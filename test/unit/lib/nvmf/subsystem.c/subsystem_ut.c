@@ -33,6 +33,7 @@
 
 #include "spdk/stdinc.h"
 
+#include "common/lib/test_env.c"
 #include "spdk_cunit.h"
 #include "spdk_internal/mock.h"
 
@@ -101,11 +102,10 @@ spdk_nvmf_transport_qpair_is_idle(struct spdk_nvmf_qpair *qpair)
 static struct spdk_nvmf_transport g_transport = {};
 
 struct spdk_nvmf_transport *
-spdk_nvmf_transport_create(struct spdk_nvmf_tgt *tgt,
-			   enum spdk_nvme_transport_type type)
+spdk_nvmf_transport_create(enum spdk_nvme_transport_type type,
+			   struct spdk_nvmf_transport_opts *tprt_opts)
 {
 	if (type == SPDK_NVME_TRANSPORT_RDMA) {
-		g_transport.tgt = tgt;
 		return &g_transport;
 	}
 
@@ -135,11 +135,12 @@ spdk_nvmf_poll_group_update_subsystem(struct spdk_nvmf_poll_group *group,
 	return 0;
 }
 
-void
+int
 spdk_nvmf_poll_group_add_subsystem(struct spdk_nvmf_poll_group *group,
 				   struct spdk_nvmf_subsystem *subsystem,
 				   spdk_nvmf_poll_group_mod_done cb_fn, void *cb_arg)
 {
+	return 0;
 }
 
 void
@@ -252,8 +253,8 @@ test_spdk_nvmf_subsystem_add_ns(void)
 	struct spdk_nvmf_ns_opts ns_opts;
 	uint32_t nsid;
 
-	tgt.opts.max_subsystems = 1024;
-	tgt.subsystems = calloc(tgt.opts.max_subsystems, sizeof(struct spdk_nvmf_subsystem *));
+	tgt.max_subsystems = 1024;
+	tgt.subsystems = calloc(tgt.max_subsystems, sizeof(struct spdk_nvmf_subsystem *));
 	SPDK_CU_ASSERT_FATAL(tgt.subsystems != NULL);
 
 	/* Allow NSID to be assigned automatically */
@@ -303,8 +304,8 @@ nvmf_test_create_subsystem(void)
 	char nqn[256];
 	struct spdk_nvmf_subsystem *subsystem;
 
-	tgt.opts.max_subsystems = 1024;
-	tgt.subsystems = calloc(tgt.opts.max_subsystems, sizeof(struct spdk_nvmf_subsystem *));
+	tgt.max_subsystems = 1024;
+	tgt.subsystems = calloc(tgt.max_subsystems, sizeof(struct spdk_nvmf_subsystem *));
 	SPDK_CU_ASSERT_FATAL(tgt.subsystems != NULL);
 
 	snprintf(nqn, sizeof(nqn), "nqn.2016-06.io.spdk:subsystem1");

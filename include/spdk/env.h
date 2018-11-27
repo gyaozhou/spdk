@@ -82,6 +82,7 @@ struct spdk_env_opts {
 	bool			hugepage_single_segments;
 	bool			unlink_hugepage;
 	size_t			num_pci_addr;
+	const char		*hugedir;
 	struct spdk_pci_addr	*pci_blacklist;
 	struct spdk_pci_addr	*pci_whitelist;
 
@@ -90,8 +91,8 @@ struct spdk_env_opts {
 };
 
 /**
- * Allocate dma/sharable memory based on a given dma_flg. It is a physically
- * contiguous memory buffer with the given size, alignment and socket id.
+ * Allocate dma/sharable memory based on a given dma_flg. It is a memory buffer
+ * with the given size, alignment and socket id.
  *
  * \param size Size in bytes.
  * \param align Alignment value for the allocated memory. If '0', the allocated
@@ -110,9 +111,8 @@ struct spdk_env_opts {
 void *spdk_malloc(size_t size, size_t align, uint64_t *phys_addr, int socket_id, uint32_t flags);
 
 /**
- * Allocate dma/sharable memory based on a given dma_flg. It is a physically
- * contiguous memory buffer with the given size, alignment and socket id.
- * Also, the buffer will be zeroed.
+ * Allocate dma/sharable memory based on a given dma_flg. It is a memory buffer
+ * with the given size, alignment and socket id. Also, the buffer will be zeroed.
  *
  * \param size Size in bytes.
  * \param align Alignment value for the allocated memory. If '0', the allocated
@@ -153,8 +153,7 @@ void spdk_env_opts_init(struct spdk_env_opts *opts);
 int spdk_env_init(const struct spdk_env_opts *opts);
 
 /**
- * Allocate a pinned, physically contiguous memory buffer with the given size
- * and alignment.
+ * Allocate a pinned memory buffer with the given size and alignment.
  *
  * \param size Size in bytes.
  * \param align Alignment value for the allocated memory. If '0', the allocated
@@ -169,8 +168,7 @@ int spdk_env_init(const struct spdk_env_opts *opts);
 void *spdk_dma_malloc(size_t size, size_t align, uint64_t *phys_addr);
 
 /**
- * Allocate a pinned, physically contiguous memory buffer with the given size,
- * alignment and socket id.
+ * Allocate a pinned, memory buffer with the given size, alignment and socket id.
  *
  * \param size Size in bytes.
  * \param align Alignment value for the allocated memory. If '0', the allocated
@@ -187,8 +185,8 @@ void *spdk_dma_malloc(size_t size, size_t align, uint64_t *phys_addr);
 void *spdk_dma_malloc_socket(size_t size, size_t align, uint64_t *phys_addr, int socket_id);
 
 /**
- * Allocate a pinned, physically contiguous memory buffer with the given size
- * and alignment. The buffer will be zeroed.
+ * Allocate a pinned memory buffer with the given size and alignment. The buffer
+ * will be zeroed.
  *
  * \param size Size in bytes.
  * \param align Alignment value for the allocated memory. If '0', the allocated
@@ -203,8 +201,8 @@ void *spdk_dma_malloc_socket(size_t size, size_t align, uint64_t *phys_addr, int
 void *spdk_dma_zmalloc(size_t size, size_t align, uint64_t *phys_addr);
 
 /**
- * Allocate a pinned, physically contiguous memory buffer with the given size,
- * alignment and socket id. The buffer will be zeroed.
+ * Allocate a pinned memory buffer with the given size, alignment and socket id.
+ * The buffer will be zeroed.
  *
  * \param size Size in bytes.
  * \param align Alignment value for the allocated memory. If '0', the allocated
@@ -247,7 +245,8 @@ void spdk_dma_free(void *buf);
 
 /**
  * Reserve a named, process shared memory zone with the given size, socket_id
- * and flags.
+ * and flags. Unless `SPDK_MEMZONE_NO_IOVA_CONTIG` flag is provided, the returned
+ * memory will be IOVA contiguous.
  *
  * \param name Name to set for this memory zone.
  * \param len Length in bytes.
@@ -261,7 +260,8 @@ void *spdk_memzone_reserve(const char *name, size_t len, int socket_id, unsigned
 
 /**
  * Reserve a named, process shared memory zone with the given size, socket_id,
- * flags and alignment.
+ * flags and alignment. Unless `SPDK_MEMZONE_NO_IOVA_CONTIG` flag is provided,
+ * the returned memory will be IOVA contiguous.
  *
  * \param name Name to set for this memory zone.
  * \param len Length in bytes.
@@ -516,6 +516,7 @@ struct spdk_ring;
 enum spdk_ring_type {
 	SPDK_RING_TYPE_SP_SC,		/* Single-producer, single-consumer */
 	SPDK_RING_TYPE_MP_SC,		/* Multi-producer, single-consumer */
+	SPDK_RING_TYPE_MP_MC,		/* Multi-producer, multi-consumer */
 };
 
 /**
@@ -978,17 +979,27 @@ typedef int (*spdk_mem_map_notify_cb)(void *cb_ctx, struct spdk_mem_map *map,
 				      enum spdk_mem_map_notify_action action,
 				      void *vaddr, size_t size);
 
+typedef int (*spdk_mem_map_contiguous_translations)(uint64_t addr_1, uint64_t addr_2);
+
+/**
+ * A function table to be implemented by each memory map.
+ */
+struct spdk_mem_map_ops {
+	spdk_mem_map_notify_cb notify_cb;
+	spdk_mem_map_contiguous_translations are_contiguous;
+};
+
 /**
  * Allocate a virtual memory address translation map.
  *
  * \param default_translation Default translation for the map.
- * \param notify_cb Callback function to notify the mapping.
+ * \param ops Table of callback functions for map operations.
  * \param cb_ctx Argument passed to the callback function.
  *
  * \return a pointer to the allocated virtual memory address translation map.
  */
 struct spdk_mem_map *spdk_mem_map_alloc(uint64_t default_translation,
-					spdk_mem_map_notify_cb notify_cb, void *cb_ctx);
+					const struct spdk_mem_map_ops *ops, void *cb_ctx);
 
 /**
  * Free a memory map previously allocated by spdk_mem_map_alloc().
@@ -1032,12 +1043,13 @@ int spdk_mem_map_clear_translation(struct spdk_mem_map *map, uint64_t vaddr, uin
  *
  * \param map Memory map.
  * \param vaddr Virtual address.
- * \param size Size of memory region.
+ * \param size Contains the size of the memory region pointed to by vaddr.
+ * Updated with the size of the memory region for which the translation is valid.
  *
  * \return the translation of vaddr stored in the map, or default_translation
  * as specified in spdk_mem_map_alloc() if vaddr is not present in the map.
  */
-uint64_t spdk_mem_map_translate(const struct spdk_mem_map *map, uint64_t vaddr, uint64_t size);
+uint64_t spdk_mem_map_translate(const struct spdk_mem_map *map, uint64_t vaddr, uint64_t *size);
 
 /**
  * Register the specified memory region for address translation.

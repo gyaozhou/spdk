@@ -64,6 +64,7 @@ _spdk_add_lvs_to_list(struct spdk_lvol_store *lvs)
 	TAILQ_FOREACH(tmp, &g_lvol_stores, link) {
 		if (!strncmp(lvs->name, tmp->name, SPDK_LVS_NAME_MAX)) {
 			name_conflict = true;
+			break;
 		}
 	}
 	if (!name_conflict) {
@@ -1002,11 +1003,6 @@ _spdk_lvs_verify_lvol_name(struct spdk_lvol_store *lvs, const char *name)
 {
 	struct spdk_lvol *tmp;
 
-	if (lvs == NULL) {
-		SPDK_ERRLOG("lvol store does not exist\n");
-		return -ENODEV;
-	}
-
 	if (name == NULL || strnlen(name, SPDK_LVOL_NAME_MAX) == 0) {
 		SPDK_INFOLOG(SPDK_LOG_LVOL, "lvol name not provided.\n");
 		return -EINVAL;
@@ -1045,6 +1041,11 @@ spdk_lvol_create(struct spdk_lvol_store *lvs, const char *name, uint64_t sz,
 	uint64_t num_clusters;
 	char *xattr_names[] = {LVOL_NAME, "uuid"};
 	int rc;
+
+	if (lvs == NULL) {
+		SPDK_ERRLOG("lvol store does not exist\n");
+		return -EINVAL;
+	}
 
 	rc = _spdk_lvs_verify_lvol_name(lvs, name);
 	if (rc < 0) {
@@ -1109,6 +1110,12 @@ spdk_lvol_create_snapshot(struct spdk_lvol *origlvol, const char *snapshot_name,
 
 	origblob = origlvol->blob;
 	lvs = origlvol->lvol_store;
+	if (lvs == NULL) {
+		SPDK_ERRLOG("lvol store does not exist\n");
+		cb_fn(cb_arg, NULL, -EINVAL);
+		return;
+	}
+
 	rc = _spdk_lvs_verify_lvol_name(lvs, snapshot_name);
 	if (rc < 0) {
 		cb_fn(cb_arg, NULL, rc);
@@ -1167,6 +1174,12 @@ spdk_lvol_create_clone(struct spdk_lvol *origlvol, const char *clone_name,
 
 	origblob = origlvol->blob;
 	lvs = origlvol->lvol_store;
+	if (lvs == NULL) {
+		SPDK_ERRLOG("lvol store does not exist\n");
+		cb_fn(cb_arg, NULL, -EINVAL);
+		return;
+	}
+
 	rc = _spdk_lvs_verify_lvol_name(lvs, clone_name);
 	if (rc < 0) {
 		cb_fn(cb_arg, NULL, rc);
@@ -1412,8 +1425,7 @@ void
 spdk_lvol_inflate(struct spdk_lvol *lvol, spdk_lvol_op_complete cb_fn, void *cb_arg)
 {
 	struct spdk_lvol_req *req;
-	struct spdk_blob *blob = lvol->blob;
-	spdk_blob_id blob_id = spdk_blob_get_id(blob);
+	spdk_blob_id blob_id;
 
 	assert(cb_fn != NULL);
 
@@ -1440,6 +1452,7 @@ spdk_lvol_inflate(struct spdk_lvol *lvol, spdk_lvol_op_complete cb_fn, void *cb_
 		return;
 	}
 
+	blob_id = spdk_blob_get_id(lvol->blob);
 	spdk_bs_inflate_blob(lvol->lvol_store->blobstore, req->channel, blob_id, _spdk_lvol_inflate_cb,
 			     req);
 }
@@ -1448,8 +1461,7 @@ void
 spdk_lvol_decouple_parent(struct spdk_lvol *lvol, spdk_lvol_op_complete cb_fn, void *cb_arg)
 {
 	struct spdk_lvol_req *req;
-	struct spdk_blob *blob = lvol->blob;
-	spdk_blob_id blob_id = spdk_blob_get_id(blob);
+	spdk_blob_id blob_id;
 
 	assert(cb_fn != NULL);
 
@@ -1476,6 +1488,7 @@ spdk_lvol_decouple_parent(struct spdk_lvol *lvol, spdk_lvol_op_complete cb_fn, v
 		return;
 	}
 
+	blob_id = spdk_blob_get_id(lvol->blob);
 	spdk_bs_blob_decouple_parent(lvol->lvol_store->blobstore, req->channel, blob_id,
 				     _spdk_lvol_inflate_cb, req);
 }

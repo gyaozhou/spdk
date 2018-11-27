@@ -40,6 +40,8 @@
 #define PCI_CFG_SIZE		256
 #define PCI_EXT_CAP_ID_SN	0x03
 
+static pthread_mutex_t g_pci_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 int
 spdk_pci_device_init(struct rte_pci_driver *driver,
 		     struct rte_pci_device *device)
@@ -48,23 +50,13 @@ spdk_pci_device_init(struct rte_pci_driver *driver,
 	int rc;
 
 	if (!ctx->cb_fn) {
-#if RTE_VERSION >= RTE_VERSION_NUM(17, 05, 0, 4)
-		rte_pci_unmap_device(device);
-#elif RTE_VERSION >= RTE_VERSION_NUM(16, 11, 0, 0)
+#if RTE_VERSION >= RTE_VERSION_NUM(16, 11, 0, 0) && RTE_VERSION < RTE_VERSION_NUM(17, 02, 0, 1)
 		rte_eal_pci_unmap_device(device);
 #endif
 
 		/* Return a positive value to indicate that this device does not belong to this driver, but
 		 * this isn't an error. */
 		return 1;
-	}
-
-	if (device->kdrv == RTE_KDRV_VFIO) {
-		/*
-		 * TODO: This is a workaround for an issue where the device is not ready after VFIO reset.
-		 * Figure out what is actually going wrong and remove this sleep.
-		 */
-		usleep(500 * 1000);
 	}
 
 	rc = ctx->cb_fn(ctx->cb_arg, (struct spdk_pci_device *)device);
@@ -92,7 +84,9 @@ spdk_pci_device_detach(struct spdk_pci_device *device)
 #endif
 #endif
 
-#if RTE_VERSION >= RTE_VERSION_NUM(17, 11, 0, 3)
+#if RTE_VERSION >= RTE_VERSION_NUM(18, 11, 0, 0)
+	rte_eal_hotplug_remove("pci", device->device.name);
+#elif RTE_VERSION >= RTE_VERSION_NUM(17, 11, 0, 3)
 	struct spdk_pci_addr	addr;
 	char			bdf[32];
 
@@ -130,7 +124,7 @@ spdk_pci_device_attach(struct spdk_pci_enum_ctx *ctx,
 	addr.function = pci_address->func;
 #endif
 
-	pthread_mutex_lock(&ctx->mtx);
+	pthread_mutex_lock(&g_pci_mutex);
 
 	if (!ctx->is_registered) {
 		ctx->is_registered = true;
@@ -144,7 +138,9 @@ spdk_pci_device_attach(struct spdk_pci_enum_ctx *ctx,
 	ctx->cb_fn = enum_cb;
 	ctx->cb_arg = enum_ctx;
 
-#if RTE_VERSION >= RTE_VERSION_NUM(17, 11, 0, 3)
+#if RTE_VERSION >= RTE_VERSION_NUM(18, 11, 0, 0)
+	if (rte_eal_hotplug_add("pci", bdf, "") != 0) {
+#elif RTE_VERSION >= RTE_VERSION_NUM(17, 11, 0, 3)
 	if (rte_eal_dev_attach(bdf, "") != 0) {
 #elif RTE_VERSION >= RTE_VERSION_NUM(17, 05, 0, 4)
 	if (rte_pci_probe_one(&addr) != 0) {
@@ -153,13 +149,13 @@ spdk_pci_device_attach(struct spdk_pci_enum_ctx *ctx,
 #endif
 		ctx->cb_arg = NULL;
 		ctx->cb_fn = NULL;
-		pthread_mutex_unlock(&ctx->mtx);
+		pthread_mutex_unlock(&g_pci_mutex);
 		return -1;
 	}
 
 	ctx->cb_arg = NULL;
 	ctx->cb_fn = NULL;
-	pthread_mutex_unlock(&ctx->mtx);
+	pthread_mutex_unlock(&g_pci_mutex);
 
 	return 0;
 }
@@ -173,7 +169,7 @@ spdk_pci_enumerate(struct spdk_pci_enum_ctx *ctx,
 		   spdk_pci_enum_cb enum_cb,
 		   void *enum_ctx)
 {
-	pthread_mutex_lock(&ctx->mtx);
+	pthread_mutex_lock(&g_pci_mutex);
 
 	if (!ctx->is_registered) {
 		ctx->is_registered = true;
@@ -196,13 +192,13 @@ spdk_pci_enumerate(struct spdk_pci_enum_ctx *ctx,
 #endif
 		ctx->cb_arg = NULL;
 		ctx->cb_fn = NULL;
-		pthread_mutex_unlock(&ctx->mtx);
+		pthread_mutex_unlock(&g_pci_mutex);
 		return -1;
 	}
 
 	ctx->cb_arg = NULL;
 	ctx->cb_fn = NULL;
-	pthread_mutex_unlock(&ctx->mtx);
+	pthread_mutex_unlock(&g_pci_mutex);
 
 	return 0;
 }
@@ -307,6 +303,11 @@ spdk_pci_device_cfg_read(struct spdk_pci_device *dev, void *value, uint32_t len,
 #else
 	rc = rte_eal_pci_read_config(dev, value, len, offset);
 #endif
+
+#if defined(__FreeBSD__) && RTE_VERSION < RTE_VERSION_NUM(18, 11, 0, 0)
+	/* Older DPDKs return 0 on success and -1 on failure */
+	return rc;
+#endif
 	return (rc > 0 && (uint32_t) rc == len) ? 0 : -1;
 }
 
@@ -319,6 +320,11 @@ spdk_pci_device_cfg_write(struct spdk_pci_device *dev, void *value, uint32_t len
 	rc = rte_pci_write_config(dev, value, len, offset);
 #else
 	rc = rte_eal_pci_write_config(dev, value, len, offset);
+#endif
+
+#ifdef __FreeBSD__
+	/* DPDK returns 0 on success and -1 on failure */
+	return rc;
 #endif
 	return (rc > 0 && (uint32_t) rc == len) ? 0 : -1;
 }

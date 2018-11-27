@@ -10,7 +10,7 @@ timing_enter initiator
 MALLOC_BDEV_SIZE=64
 MALLOC_BLOCK_SIZE=512
 
-rpc_py="python $rootdir/scripts/rpc.py"
+rpc_py="$rootdir/scripts/rpc.py"
 
 timing_enter start_iscsi_tgt
 
@@ -39,10 +39,14 @@ sleep 1
 trap "killprocess $pid; rm -f $testdir/bdev.conf; exit 1" SIGINT SIGTERM EXIT
 
 # Prepare config file for iSCSI initiator
-cp $testdir/bdev.conf.in $testdir/bdev.conf
-echo "[iSCSI_Initiator]" >> $testdir/bdev.conf
+echo "[iSCSI_Initiator]" > $testdir/bdev.conf
 echo "  URL iscsi://$TARGET_IP/iqn.2016-06.io.spdk:disk1/0 iSCSI0" >> $testdir/bdev.conf
-$rootdir/test/bdev/bdevperf/bdevperf -c $testdir/bdev.conf -q 128 -s 4096 -w verify -t 5 -d 512
+$rootdir/test/bdev/bdevperf/bdevperf -c $testdir/bdev.conf -q 128 -o 4096 -w verify -t 5 -s 512
+if [ $RUN_NIGHTLY -eq 1 ]; then
+    $rootdir/test/bdev/bdevperf/bdevperf -c $testdir/bdev.conf -q 128 -o 4096 -w unmap -t 5 -s 512
+    $rootdir/test/bdev/bdevperf/bdevperf -c $testdir/bdev.conf -q 128 -o 4096 -w flush -t 5 -s 512
+    $rootdir/test/bdev/bdevperf/bdevperf -c $testdir/bdev.conf -q 128 -o 4096 -w reset -t 10 -s 512
+fi
 rm -f $testdir/bdev.conf
 
 trap - SIGINT SIGTERM EXIT

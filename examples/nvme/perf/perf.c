@@ -83,6 +83,7 @@ struct ns_entry {
 	uint16_t		apptag_mask;
 	uint16_t		apptag;
 	char			name[1024];
+	const struct spdk_nvme_ns_data	*nsdata;
 };
 
 static const double g_latency_cutoffs[] = {
@@ -266,6 +267,8 @@ register_ns(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_ns *ns)
 	if (g_max_io_size_blocks < entry->io_size_blocks) {
 		g_max_io_size_blocks = entry->io_size_blocks;
 	}
+
+	entry->nsdata = spdk_nvme_ns_get_data(ns);
 
 	snprintf(entry->name, 44, "%-20.20s (%-20.20s)", cdata->mn, cdata->sn);
 
@@ -489,7 +492,6 @@ task_extended_lba_setup_pi(struct ns_entry *entry, struct perf_task *task, uint6
 	struct spdk_nvme_protection_info *pi;
 	uint32_t i, md_size, sector_size, pi_offset;
 	uint16_t crc16;
-	const struct spdk_nvme_ns_data *nsdata;
 
 	task->appmask = 0;
 	task->apptag = 0;
@@ -515,12 +517,11 @@ task_extended_lba_setup_pi(struct ns_entry *entry, struct perf_task *task, uint6
 
 	sector_size = spdk_nvme_ns_get_sector_size(entry->u.nvme.ns);
 	md_size = spdk_nvme_ns_get_md_size(entry->u.nvme.ns);
-	nsdata = spdk_nvme_ns_get_data(entry->u.nvme.ns);
 
 	/* PI locates at the first 8 bytes of metadata,
 	 * doesn't support now
 	 */
-	if (nsdata->dps.md_start) {
+	if (entry->nsdata->dps.md_start) {
 		return;
 	}
 
@@ -560,7 +561,6 @@ task_extended_lba_pi_verify(struct ns_entry *entry, struct perf_task *task,
 	struct spdk_nvme_protection_info *pi;
 	uint32_t i, md_size, sector_size, pi_offset, ref_tag;
 	uint16_t crc16, guard, app_tag;
-	const struct spdk_nvme_ns_data *nsdata;
 
 	if (spdk_nvme_ns_get_pi_type(entry->u.nvme.ns) ==
 	    SPDK_NVME_FMT_NVM_PROTECTION_DISABLE) {
@@ -569,12 +569,11 @@ task_extended_lba_pi_verify(struct ns_entry *entry, struct perf_task *task,
 
 	sector_size = spdk_nvme_ns_get_sector_size(entry->u.nvme.ns);
 	md_size = spdk_nvme_ns_get_md_size(entry->u.nvme.ns);
-	nsdata = spdk_nvme_ns_get_data(entry->u.nvme.ns);
 
 	/* PI locates at the first 8 bytes of metadata,
 	 * doesn't support now
 	 */
-	if (nsdata->dps.md_start) {
+	if (entry->nsdata->dps.md_start) {
 		return;
 	}
 
@@ -911,7 +910,7 @@ static void usage(char *program_name)
 #endif
 	printf("\n");
 	printf("\t[-q io depth]\n");
-	printf("\t[-s io size in bytes]\n");
+	printf("\t[-o io size in bytes]\n");
 	printf("\t[-w io pattern type, must be one of\n");
 	printf("\t\t(read, write, randread, randwrite, rw, randrw)]\n");
 	printf("\t[-M rwmixread (100 for reads, 0 for writes)]\n");
@@ -938,7 +937,7 @@ static void usage(char *program_name)
 	printf("\t  PRCHK      Control of Protection Information Checking (PRCHK=GUARD|REFTAG|APPTAG)\n");
 	printf("\t Example: -e 'PRACT=0,PRCHK=GUARD|REFTAG|APPTAG'\n");
 	printf("\t          -e 'PRACT=1,PRCHK=GUARD'\n");
-	printf("\t[-d DPDK huge memory size in MB.]\n");
+	printf("\t[-s DPDK huge memory size in MB.]\n");
 	printf("\t[-m max completions per poll]\n");
 	printf("\t\t(default: 0 - unlimited)\n");
 	printf("\t[-i shared memory group ID]\n");
@@ -1280,13 +1279,10 @@ parse_args(int argc, char **argv)
 	g_core_mask = NULL;
 	g_max_completions = 0;
 
-	while ((op = getopt(argc, argv, "c:d:e:i:lm:q:r:s:t:w:DLM:")) != -1) {
+	while ((op = getopt(argc, argv, "c:e:i:lm:o:q:r:s:t:w:DLM:")) != -1) {
 		switch (op) {
 		case 'c':
 			g_core_mask = optarg;
-			break;
-		case 'd':
-			g_dpdk_mem = atoi(optarg);
 			break;
 		case 'e':
 			if (parse_metadata(optarg)) {
@@ -1303,6 +1299,9 @@ parse_args(int argc, char **argv)
 		case 'm':
 			g_max_completions = atoi(optarg);
 			break;
+		case 'o':
+			g_io_size_bytes = atoi(optarg);
+			break;
 		case 'q':
 			g_queue_depth = atoi(optarg);
 			break;
@@ -1313,7 +1312,7 @@ parse_args(int argc, char **argv)
 			}
 			break;
 		case 's':
-			g_io_size_bytes = atoi(optarg);
+			g_dpdk_mem = atoi(optarg);
 			break;
 		case 't':
 			g_time_in_sec = atoi(optarg);

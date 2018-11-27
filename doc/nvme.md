@@ -58,24 +58,24 @@ demonstrate how to use perf.
 
 Example: Using perf for 4K 100% Random Read workload to a local NVMe SSD for 300 seconds
 ~~~{.sh}
-perf -q 128 -s 4096 -w randread -r 'trtype:PCIe traddr:0000:04:00.0' -t 300
+perf -q 128 -o 4096 -w randread -r 'trtype:PCIe traddr:0000:04:00.0' -t 300
 ~~~
 
 Example: Using perf for 4K 100% Random Read workload to a remote NVMe SSD exported over the network via NVMe-oF
 ~~~{.sh}
-perf -q 128 -s 4096 -w randread -r 'trtype:RDMA adrfam:IPv4 traddr:192.168.100.8 trsvcid:4420' -t 300
+perf -q 128 -o 4096 -w randread -r 'trtype:RDMA adrfam:IPv4 traddr:192.168.100.8 trsvcid:4420' -t 300
 ~~~
 
 Example: Using perf for 4K 70/30 Random Read/Write mix workload to all local NVMe SSDs for 300 seconds
 ~~~{.sh}
-perf -q 128 -s 4096 -w randrw -M 70 -t 300
+perf -q 128 -o 4096 -w randrw -M 70 -t 300
 ~~~
 
 Example: Using perf for extended LBA format CRC guard test to a local NVMe SSD,
 users must write to the SSD before reading the LBA from SSD
 ~~~{.sh}
-perf -q 1 -s 4096 -w write -r 'trtype:PCIe traddr:0000:04:00.0' -t 300 -e 'PRACT=0,PRCKH=GUARD'
-perf -q 1 -s 4096 -w read -r 'trtype:PCIe traddr:0000:04:00.0' -t 200 -e 'PRACT=0,PRCKH=GUARD'
+perf -q 1 -o 4096 -w write -r 'trtype:PCIe traddr:0000:04:00.0' -t 300 -e 'PRACT=0,PRCKH=GUARD'
+perf -q 1 -o 4096 -w read -r 'trtype:PCIe traddr:0000:04:00.0' -t 200 -e 'PRACT=0,PRCKH=GUARD'
 ~~~
 
 # Public Interface {#nvme_interface}
@@ -195,6 +195,10 @@ single NVM subsystem directly, the NVMe library will call `probe_cb`
 for just that subsystem; this allows the user to skip the discovery step
 and connect directly to a subsystem with a known address.
 
+## RDMA Limitations
+
+Please refer to NVMe-oF target's @ref nvmf_rdma_limitations
+
 # NVMe Multi Process {#nvme_multi_process}
 
 This capability enables the SPDK NVMe driver to support multiple processes accessing the
@@ -227,8 +231,8 @@ Example: identical shm_id and non-overlapping core masks
 	[-c core mask for I/O submission/completion]
 	[-i shared memory group ID]
 
-./perf -q 1 -s 4096 -w randread -c 0x1 -t 60 -i 1
-./perf -q 8 -s 131072 -w write -c 0x10 -t 60 -i 1
+./perf -q 1 -o 4096 -w randread -c 0x1 -t 60 -i 1
+./perf -q 8 -o 131072 -w write -c 0x10 -t 60 -i 1
 ~~~
 
 ## Limitations {#nvme_multi_process_limitations}

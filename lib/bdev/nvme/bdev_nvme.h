@@ -65,6 +65,7 @@ struct nvme_ctrlr {
 	struct spdk_nvme_transport_id	trid;
 	char				*name;
 	int				ref;
+	bool				destruct;
 	uint32_t			num_ns;
 	/** Array of bdevs indexed by nsid - 1 */
 	struct nvme_bdev		*bdevs;
@@ -83,6 +84,13 @@ struct nvme_bdev {
 	struct spdk_nvme_ns	*ns;
 };
 
+void spdk_bdev_nvme_dump_trid_json(struct spdk_nvme_transport_id *trid,
+				   struct spdk_json_write_ctx *w);
+
+struct spdk_nvme_qpair *spdk_bdev_nvme_get_io_qpair(struct spdk_io_channel *ctrlr_io_ch);
+struct nvme_ctrlr *spdk_bdev_nvme_lookup_ctrlr(const char *ctrlr_name);
+struct nvme_ctrlr *spdk_bdev_nvme_first_ctrlr(void);
+struct nvme_ctrlr *spdk_bdev_nvme_next_ctrlr(struct nvme_ctrlr *prev);
 void spdk_bdev_nvme_get_opts(struct spdk_bdev_nvme_opts *opts);
 int spdk_bdev_nvme_set_opts(const struct spdk_bdev_nvme_opts *opts);
 int spdk_bdev_nvme_set_hotplug(bool enabled, uint64_t period_us, spdk_thread_fn cb, void *cb_ctx);
@@ -102,4 +110,4 @@ struct spdk_nvme_ctrlr *spdk_bdev_nvme_get_ctrlr(struct spdk_bdev *bdev);
  */
 int spdk_bdev_nvme_delete(const char *name);
 
-#endif // SPDK_BDEV_NVME_H
+#endif /* SPDK_BDEV_NVME_H */

@@ -5,7 +5,7 @@ set -e
 testdir=$(readlink -f $(dirname $0))
 rootdir=$(readlink -f $testdir/../..)
 plugindir=$rootdir/examples/bdev/fio_plugin
-rpc_py="python $rootdir/scripts/rpc.py"
+rpc_py="$rootdir/scripts/rpc.py"
 
 function run_fio()
 {
@@ -67,6 +67,10 @@ if [ $SPDK_TEST_RBD -eq 1 ]; then
 	$rootdir/scripts/gen_rbd.sh >> $testdir/bdev.conf
 fi
 
+if [ $SPDK_TEST_CRYPTO -eq 1 ]; then
+	$rootdir/scripts/gen_crypto.sh Malloc6 >> $testdir/bdev.conf
+fi
+
 if hash pmempool; then
 	rm -f /tmp/spdk-pmem-pool
 	pmempool create blk --size=32M 512 /tmp/spdk-pmem-pool
@@ -81,13 +85,15 @@ fi
 timing_exit hello_bdev
 
 timing_enter bounds
-$testdir/bdevio/bdevio -c $testdir/bdev.conf
+if [ $(uname -s) = Linux ]; then
+	# Test dynamic memory management. All hugepages will be reserved at runtime
+	PRE_RESERVED_MEM=0
+else
+	# Dynamic memory management is not supported on BSD
+	PRE_RESERVED_MEM=2048
+fi
+$testdir/bdevio/bdevio -s $PRE_RESERVED_MEM -c $testdir/bdev.conf
 timing_exit bounds
-
-# RAID module doesn't support multi-iov yet, so bdevio test
-# would fail.  So wait to append the RAID configuration until
-# after bdevio has run.
-cat $testdir/raid.conf >> $testdir/bdev.conf
 
 timing_enter nbd_gpt
 if grep -q Nvme0 $testdir/bdev.conf; then
@@ -114,7 +120,7 @@ if [ -d /usr/src/fio ] && [ $SPDK_RUN_ASAN -eq 0 ]; then
 		fio_config_add_job $testdir/bdev.fio $b
 	done
 
-	run_fio --spdk_conf=./test/bdev/bdev.conf
+	run_fio --spdk_conf=./test/bdev/bdev.conf --spdk_mem=$PRE_RESERVED_MEM
 
 	rm -f *.state
 	rm -f $testdir/bdev.fio
@@ -146,13 +152,14 @@ EOL
 $rootdir/scripts/gen_nvme.sh >> $testdir/bdev_gpt.conf
 
 # Run bdevperf with gpt
-$testdir/bdevperf/bdevperf -c $testdir/bdev_gpt.conf -q 128 -s 4096 -w verify -t 5
+$testdir/bdevperf/bdevperf -c $testdir/bdev_gpt.conf -q 128 -o 4096 -w verify -t 5
+$testdir/bdevperf/bdevperf -c $testdir/bdev_gpt.conf -q 128 -o 4096 -w write_zeroes -t 1
 rm -f $testdir/bdev_gpt.conf
 
 if [ $RUN_NIGHTLY -eq 1 ]; then
 	# Temporarily disabled - infinite loop
 	timing_enter reset
-	#$testdir/bdevperf/bdevperf -c $testdir/bdev.conf -q 16 -w reset -s 4096 -t 60
+	#$testdir/bdevperf/bdevperf -c $testdir/bdev.conf -q 16 -w reset -o 4096 -t 60
 	timing_exit reset
 	report_test_completion "nightly_bdev_reset"
 fi

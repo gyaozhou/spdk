@@ -59,13 +59,14 @@ DEFINE_STUB(spdk_pci_device_get_id, struct spdk_pci_id,
 DEFINE_STUB(spdk_nvme_transport_available, bool,
 	    (enum spdk_nvme_transport_type trtype), true)
 
+/* return anything non-NULL, this won't be deferenced anywhere in this test */
+DEFINE_STUB(spdk_nvme_ctrlr_get_current_process, struct spdk_nvme_ctrlr_process *,
+	    (struct spdk_nvme_ctrlr *ctrlr), (struct spdk_nvme_ctrlr_process *)(uintptr_t)0x1)
+
 DEFINE_STUB(nvme_ctrlr_add_process, int,
 	    (struct spdk_nvme_ctrlr *ctrlr, void *devhandle), 0)
 
 DEFINE_STUB(nvme_ctrlr_process_init, int,
-	    (struct spdk_nvme_ctrlr *ctrlr), 0)
-
-DEFINE_STUB(nvme_ctrlr_start, int,
 	    (struct spdk_nvme_ctrlr *ctrlr), 0)
 
 DEFINE_STUB(spdk_pci_device_get_addr, struct spdk_pci_addr,
@@ -396,7 +397,7 @@ test_nvme_driver_init(void)
 	rc = nvme_driver_init();
 	CU_ASSERT(rc == 0);
 
-	/* process is not primary, mem is reserved but not intiialized */
+	/* process is not primary, mem is reserved but not initialized */
 	/* and times out */
 	MOCK_SET(spdk_process_is_primary, false);
 	MOCK_SET(spdk_memzone_reserve, (void *)&dummy);
@@ -453,7 +454,7 @@ test_spdk_nvme_detach(void)
 	 * Controllers are ref counted so mock the function that returns
 	 * the ref count so that detach will actually call the destruct
 	 * function which we've mocked simply to verify that it gets
-	 * called (we aren't testing what the real destuct function does
+	 * called (we aren't testing what the real destruct function does
 	 * here.)
 	 */
 	MOCK_SET(nvme_ctrlr_get_ref_count, 0);
@@ -691,6 +692,8 @@ test_nvme_allocate_request_user_copy(void)
 	/* put a dummy on the queue */
 	STAILQ_INSERT_HEAD(&qpair.free_req, &dummy_req, stailq);
 
+	MOCK_CLEAR(spdk_malloc)
+	MOCK_CLEAR(spdk_zmalloc)
 	req = nvme_allocate_request_user_copy(&qpair, buffer, payload_size, cb_fn,
 					      cb_arg, host_to_controller);
 	SPDK_CU_ASSERT_FATAL(req != NULL);
@@ -913,6 +916,11 @@ test_trid_parse_and_compare(void)
 	memset_trid(&trid1, &trid2);
 	CU_ASSERT(spdk_nvme_transport_id_parse(&trid1, "trtype:PCIe traddr:0000:04:00.0") == 0);
 	CU_ASSERT(spdk_nvme_transport_id_parse(&trid2, "trtype:PCIe traddr:05:00.0") == 0);
+	CU_ASSERT(spdk_nvme_transport_id_compare(&trid1, &trid2) < 0);
+
+	memset_trid(&trid1, &trid2);
+	CU_ASSERT(spdk_nvme_transport_id_parse(&trid1, "trtype=PCIe traddr=0000:04:00.0") == 0);
+	CU_ASSERT(spdk_nvme_transport_id_parse(&trid2, "trtype=PCIe traddr=05:00.0") == 0);
 	CU_ASSERT(spdk_nvme_transport_id_compare(&trid1, &trid2) < 0);
 }
 

@@ -101,12 +101,12 @@ struct spdk_fio_thread {
 	struct thread_data	*td;
 
 	struct spdk_fio_qpair	*fio_qpair;
-	struct spdk_fio_qpair	*fio_qpair_current; // the current fio_qpair to be handled.
+	struct spdk_fio_qpair	*fio_qpair_current;	/* the current fio_qpair to be handled. */
 
-	struct io_u		**iocq;	// io completion queue
-	unsigned int		iocq_count;	// number of iocq entries filled by last getevents
-	unsigned int		iocq_size;	// number of iocq entries allocated
-	struct fio_file		*current_f;   // fio_file given by user
+	struct io_u		**iocq;		/* io completion queue */
+	unsigned int		iocq_count;	/* number of iocq entries filled by last getevents */
+	unsigned int		iocq_size;	/* number of iocq entries allocated */
+	struct fio_file		*current_f;	/* fio_file given by user */
 
 };
 
@@ -335,6 +335,15 @@ static void parse_prchk_flags(const char *prchk_str)
 	}
 }
 
+static void parse_pract_flag(int pract)
+{
+	if (pract == 1) {
+		spdk_pract_flag = SPDK_NVME_IO_FLAGS_PRACT;
+	} else {
+		spdk_pract_flag = 0;
+	}
+}
+
 /* Called once at initialization. This is responsible for gathering the size of
  * each "file", which in our case are in the form
  * 'key=value [key=value] ... ns=value'
@@ -376,7 +385,7 @@ static int spdk_fio_setup(struct thread_data *td)
 		opts.mem_size = fio_options->mem_size;
 		opts.shm_id = fio_options->shm_id;
 		spdk_enable_sgl = fio_options->enable_sgl;
-		spdk_pract_flag = fio_options->pi_act;
+		parse_pract_flag(fio_options->pi_act);
 		parse_prchk_flags(fio_options->pi_chk);
 		if (spdk_env_init(&opts) < 0) {
 			SPDK_ERRLOG("Unable to initialize SPDK env\n");
@@ -685,11 +694,12 @@ spdk_fio_queue(struct thread_data *td, struct io_u *io_u)
 		return -ENXIO;
 	}
 
-	block_size = spdk_nvme_ns_get_sector_size(ns);
+	block_size = spdk_nvme_ns_get_extended_sector_size(ns);
+
 	lba = io_u->offset / block_size;
 	lba_count = io_u->xfer_buflen / block_size;
 
-	// TODO: considering situations that fio will randomize and verify io_u
+	/* TODO: considering situations that fio will randomize and verify io_u */
 	if (fio_qpair->do_nvme_pi) {
 		fio_extended_lba_setup_pi(fio_qpair, io_u);
 	}
@@ -852,6 +862,7 @@ static struct fio_option options[] = {
 		.type		= FIO_OPT_INT,
 		.off1		= offsetof(struct spdk_fio_options, mem_size),
 		.def		= "512",
+		.help		= "Memory Size for SPDK (MB)",
 		.category	= FIO_OPT_C_ENGINE,
 		.group		= FIO_OPT_G_INVALID,
 	},
@@ -861,6 +872,7 @@ static struct fio_option options[] = {
 		.type		= FIO_OPT_INT,
 		.off1		= offsetof(struct spdk_fio_options, shm_id),
 		.def		= "-1",
+		.help		= "Shared Memory ID",
 		.category	= FIO_OPT_C_ENGINE,
 		.group		= FIO_OPT_G_INVALID,
 	},
@@ -870,6 +882,7 @@ static struct fio_option options[] = {
 		.type		= FIO_OPT_INT,
 		.off1		= offsetof(struct spdk_fio_options, enable_sgl),
 		.def		= "0",
+		.help		= "SGL Used for I/O Commands (enable_sgl=1 or enable_sgl=0)",
 		.category	= FIO_OPT_C_ENGINE,
 		.group		= FIO_OPT_G_INVALID,
 	},

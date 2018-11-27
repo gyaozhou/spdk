@@ -128,13 +128,28 @@ DEFINE_STUB(spdk_nvmf_request_free,
 	    (struct spdk_nvmf_request *req),
 	    -1);
 
+DEFINE_STUB(spdk_nvmf_qpair_get_listen_trid,
+	    int,
+	    (struct spdk_nvmf_qpair *qpair, struct spdk_nvme_transport_id *trid),
+	    0);
+
+DEFINE_STUB(spdk_nvmf_subsystem_listener_allowed,
+	    bool,
+	    (struct spdk_nvmf_subsystem *subsystem, struct spdk_nvme_transport_id *trid),
+	    true);
+
+DEFINE_STUB(spdk_nvmf_transport_qpair_set_sqsize,
+	    int,
+	    (struct spdk_nvmf_qpair *qpair),
+	    0);
+
 static void
 ctrlr_ut_pass_msg(spdk_thread_fn fn, void *ctx, void *thread_ctx)
 {
 	fn(ctx);
 }
 
-int
+void
 spdk_nvmf_bdev_ctrlr_identify_ns(struct spdk_nvmf_ns *ns, struct spdk_nvme_ns_data *nsdata)
 {
 	uint64_t num_blocks;
@@ -147,8 +162,6 @@ spdk_nvmf_bdev_ctrlr_identify_ns(struct spdk_nvmf_ns *ns, struct spdk_nvme_ns_da
 	nsdata->nlbaf = 0;
 	nsdata->flbas.format = 0;
 	nsdata->lbaf[0].lbads = spdk_u32log2(512);
-
-	return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
 }
 
 static void
@@ -283,10 +296,9 @@ test_connect(void)
 	admin_qpair.group = &group;
 
 	memset(&tgt, 0, sizeof(tgt));
-	tgt.opts.max_queue_depth = 64;
-	tgt.opts.max_qpairs_per_ctrlr = 3;
-
 	memset(&transport, 0, sizeof(transport));
+	transport.opts.max_queue_depth = 64;
+	transport.opts.max_qpairs_per_ctrlr = 3;
 	transport.tgt = &tgt;
 
 	memset(&qpair, 0, sizeof(qpair));
@@ -682,6 +694,9 @@ static void
 test_identify_ns(void)
 {
 	struct spdk_nvmf_subsystem subsystem = {};
+	struct spdk_nvmf_transport transport = {};
+	struct spdk_nvmf_qpair admin_qpair = { .transport = &transport};
+	struct spdk_nvmf_ctrlr ctrlr = { .subsys = &subsystem, .admin_qpair = &admin_qpair };
 	struct spdk_nvme_cmd cmd = {};
 	struct spdk_nvme_cpl rsp = {};
 	struct spdk_nvme_ns_data nsdata = {};
@@ -696,7 +711,7 @@ test_identify_ns(void)
 	cmd.nsid = 0;
 	memset(&nsdata, 0, sizeof(nsdata));
 	memset(&rsp, 0, sizeof(rsp));
-	CU_ASSERT(spdk_nvmf_ctrlr_identify_ns(&subsystem, &cmd, &rsp,
+	CU_ASSERT(spdk_nvmf_ctrlr_identify_ns(&ctrlr, &cmd, &rsp,
 					      &nsdata) == SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE);
 	CU_ASSERT(rsp.status.sct == SPDK_NVME_SCT_GENERIC);
 	CU_ASSERT(rsp.status.sc == SPDK_NVME_SC_INVALID_NAMESPACE_OR_FORMAT);
@@ -706,7 +721,7 @@ test_identify_ns(void)
 	cmd.nsid = 1;
 	memset(&nsdata, 0, sizeof(nsdata));
 	memset(&rsp, 0, sizeof(rsp));
-	CU_ASSERT(spdk_nvmf_ctrlr_identify_ns(&subsystem, &cmd, &rsp,
+	CU_ASSERT(spdk_nvmf_ctrlr_identify_ns(&ctrlr, &cmd, &rsp,
 					      &nsdata) == SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE);
 	CU_ASSERT(rsp.status.sct == SPDK_NVME_SCT_GENERIC);
 	CU_ASSERT(rsp.status.sc == SPDK_NVME_SC_SUCCESS);
@@ -716,7 +731,7 @@ test_identify_ns(void)
 	cmd.nsid = 2;
 	memset(&nsdata, 0, sizeof(nsdata));
 	memset(&rsp, 0, sizeof(rsp));
-	CU_ASSERT(spdk_nvmf_ctrlr_identify_ns(&subsystem, &cmd, &rsp,
+	CU_ASSERT(spdk_nvmf_ctrlr_identify_ns(&ctrlr, &cmd, &rsp,
 					      &nsdata) == SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE);
 	CU_ASSERT(rsp.status.sct == SPDK_NVME_SCT_GENERIC);
 	CU_ASSERT(rsp.status.sc == SPDK_NVME_SC_SUCCESS);
@@ -726,7 +741,7 @@ test_identify_ns(void)
 	cmd.nsid = 3;
 	memset(&nsdata, 0, sizeof(nsdata));
 	memset(&rsp, 0, sizeof(rsp));
-	CU_ASSERT(spdk_nvmf_ctrlr_identify_ns(&subsystem, &cmd, &rsp,
+	CU_ASSERT(spdk_nvmf_ctrlr_identify_ns(&ctrlr, &cmd, &rsp,
 					      &nsdata) == SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE);
 	CU_ASSERT(rsp.status.sct == SPDK_NVME_SCT_GENERIC);
 	CU_ASSERT(rsp.status.sc == SPDK_NVME_SC_SUCCESS);
@@ -736,7 +751,7 @@ test_identify_ns(void)
 	cmd.nsid = 4;
 	memset(&nsdata, 0, sizeof(nsdata));
 	memset(&rsp, 0, sizeof(rsp));
-	CU_ASSERT(spdk_nvmf_ctrlr_identify_ns(&subsystem, &cmd, &rsp,
+	CU_ASSERT(spdk_nvmf_ctrlr_identify_ns(&ctrlr, &cmd, &rsp,
 					      &nsdata) == SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE);
 	CU_ASSERT(rsp.status.sct == SPDK_NVME_SCT_GENERIC);
 	CU_ASSERT(rsp.status.sc == SPDK_NVME_SC_INVALID_NAMESPACE_OR_FORMAT);
@@ -746,7 +761,7 @@ test_identify_ns(void)
 	cmd.nsid = 0xFFFFFFFF;
 	memset(&nsdata, 0, sizeof(nsdata));
 	memset(&rsp, 0, sizeof(rsp));
-	CU_ASSERT(spdk_nvmf_ctrlr_identify_ns(&subsystem, &cmd, &rsp,
+	CU_ASSERT(spdk_nvmf_ctrlr_identify_ns(&ctrlr, &cmd, &rsp,
 					      &nsdata) == SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE);
 	CU_ASSERT(rsp.status.sct == SPDK_NVME_SCT_GENERIC);
 	CU_ASSERT(rsp.status.sc == SPDK_NVME_SC_INVALID_NAMESPACE_OR_FORMAT);

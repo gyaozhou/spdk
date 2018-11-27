@@ -253,12 +253,12 @@ spdk_nvmf_subsystem_create(struct spdk_nvmf_tgt *tgt,
 	}
 
 	/* Find a free subsystem id (sid) */
-	for (sid = 0; sid < tgt->opts.max_subsystems; sid++) {
+	for (sid = 0; sid < tgt->max_subsystems; sid++) {
 		if (tgt->subsystems[sid] == NULL) {
 			break;
 		}
 	}
-	if (sid >= tgt->opts.max_subsystems) {
+	if (sid >= tgt->max_subsystems) {
 		return NULL;
 	}
 
@@ -288,6 +288,9 @@ spdk_nvmf_subsystem_create(struct spdk_nvmf_tgt *tgt,
 			return NULL;
 		}
 	}
+
+	memset(subsystem->sn, '0', sizeof(subsystem->sn) - 1);
+	subsystem->sn[sizeof(subsystem->sn) - 1] = '\n';
 
 	tgt->subsystems[sid] = subsystem;
 	tgt->discovery_genctr++;
@@ -388,6 +391,11 @@ spdk_nvmf_subsystem_set_state(struct spdk_nvmf_subsystem *subsystem,
 		if (actual_old_state == SPDK_NVMF_SUBSYSTEM_RESUMING &&
 		    state == SPDK_NVMF_SUBSYSTEM_ACTIVE) {
 			expected_old_state = SPDK_NVMF_SUBSYSTEM_RESUMING;
+		}
+		/* This is for the case when activating the subsystem fails. */
+		if (actual_old_state == SPDK_NVMF_SUBSYSTEM_ACTIVATING &&
+		    state == SPDK_NVMF_SUBSYSTEM_DEACTIVATING) {
+			expected_old_state = SPDK_NVMF_SUBSYSTEM_ACTIVATING;
 		}
 		actual_old_state = __sync_val_compare_and_swap(&subsystem->state, expected_old_state, state);
 	}
@@ -551,7 +559,7 @@ spdk_nvmf_subsystem_get_first(struct spdk_nvmf_tgt *tgt)
 	struct spdk_nvmf_subsystem	*subsystem;
 	uint32_t sid;
 
-	for (sid = 0; sid < tgt->opts.max_subsystems; sid++) {
+	for (sid = 0; sid < tgt->max_subsystems; sid++) {
 		subsystem = tgt->subsystems[sid];
 		if (subsystem) {
 			return subsystem;
@@ -573,7 +581,7 @@ spdk_nvmf_subsystem_get_next(struct spdk_nvmf_subsystem *subsystem)
 
 	tgt = subsystem->tgt;
 
-	for (sid = subsystem->id + 1; sid < tgt->opts.max_subsystems; sid++) {
+	for (sid = subsystem->id + 1; sid < tgt->max_subsystems; sid++) {
 		subsystem = tgt->subsystems[sid];
 		if (subsystem) {
 			return subsystem;
@@ -777,16 +785,13 @@ spdk_nvmf_subsystem_remove_listener(struct spdk_nvmf_subsystem *subsystem,
 	return 0;
 }
 
-/*
- * TODO: this is the whitelist and will be called during connection setup
- */
 bool
 spdk_nvmf_subsystem_listener_allowed(struct spdk_nvmf_subsystem *subsystem,
 				     struct spdk_nvme_transport_id *trid)
 {
 	struct spdk_nvmf_listener *listener;
 
-	if (TAILQ_EMPTY(&subsystem->listeners)) {
+	if (!strcmp(subsystem->subnqn, SPDK_NVMF_DISCOVERY_NQN)) {
 		return true;
 	}
 

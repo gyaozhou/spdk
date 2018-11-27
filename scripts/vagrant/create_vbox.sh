@@ -15,17 +15,24 @@ SPDK_DIR="$( cd "${DIR}/../../" && pwd )"
 # The command line help
 display_help() {
 	echo
-	echo " Usage: ${0##*/} [-n <num-cpus>] [-s <ram-size>] [-x <http-proxy>] [-hvr] <distro>"
+	echo " Usage: ${0##*/} [-b nvme-backing-file] [-n <num-cpus>] [-s <ram-size>] [-x <http-proxy>] [-hvrld] <distro>"
 	echo
 	echo "  distro = <centos7 | ubuntu16 | ubuntu18 | fedora26 | fedora27 | freebsd11> "
 	echo
+	echo "  -b <nvme-backing-file>    default: ${NVME_FILE}"
 	echo "  -s <ram-size> in kb       default: ${SPDK_VAGRANT_VMRAM}"
 	echo "  -n <num-cpus> 1 to 4      default: ${SPDK_VAGRANT_VMCPU}"
 	echo "  -x <http-proxy>           default: \"${SPDK_VAGRANT_HTTP_PROXY}\""
+	echo "  -p <provider>             libvirt or virtualbox"
+	echo "  --vhost-host-dir=<path>   directory path with vhost test dependencies"
+	echo "                            (test VM qcow image, fio binary, ssh keys)"
+	echo "  --vhost-vm-dir=<path>     directory where to put vhost dependencies in VM"
 	echo "  -r dry-run"
+	echo "  -l use a local copy of spdk, don't try to rsync from the host."
+	echo "  -d deploy a test vm by provisioning all prerequisites for spdk autotest"
 	echo "  -h help"
 	echo "  -v verbose"
-        echo
+	echo
 	echo " Examples:"
 	echo
 	echo "  $0 -x http://user:password@host:port fedora27"
@@ -41,14 +48,24 @@ SPDK_VAGRANT_HTTP_PROXY=""
 
 VERBOSE=0
 HELP=0
+COPY_SPDK_DIR=1
 DRY_RUN=0
+DEPLOY_TEST_VM=0
 SPDK_VAGRANT_DISTRO="distro"
 SPDK_VAGRANT_VMCPU=4
 SPDK_VAGRANT_VMRAM=4096
 OPTIND=1
+NVME_FILE="nvme_disk.img"
 
-while getopts ":n:s:x:vrh" opt; do
+while getopts ":b:n:s:x:p:vrldh-:" opt; do
 	case "${opt}" in
+		-)
+		case "${OPTARG}" in
+			vhost-host-dir=*) VHOST_HOST_DIR="${OPTARG#*=}" ;;
+			vhost-vm-dir=*) VHOST_VM_DIR="${OPTARG#*=}" ;;
+			*) echo "Invalid argument '$OPTARG'" ;;
+		esac
+		;;
 		x)
 			http_proxy=$OPTARG
 			https_proxy=$http_proxy
@@ -60,6 +77,9 @@ while getopts ":n:s:x:vrh" opt; do
 		s)
 			SPDK_VAGRANT_VMRAM=$OPTARG
 		;;
+		p)
+			PROVIDER=$OPTARG
+		;;
 		v)
 			VERBOSE=1
 		;;
@@ -69,6 +89,15 @@ while getopts ":n:s:x:vrh" opt; do
 		h)
 			display_help >&2
 			exit 0
+		;;
+		l)
+			COPY_SPDK_DIR=0
+		;;
+		d)
+			DEPLOY_TEST_VM=1
+		;;
+		b)
+			NVME_FILE=$OPTARG
 		;;
 		*)
 			echo "  Invalid argument: -$OPTARG" >&2
@@ -98,6 +127,9 @@ case "$SPDK_VAGRANT_DISTRO" in
 	fedora27)
 		export SPDK_VAGRANT_DISTRO
 	;;
+	fedora28)
+		export SPDK_VAGRANT_DISTRO
+	;;
 	freebsd11)
 		export SPDK_VAGRANT_DISTRO
 	;;
@@ -108,6 +140,11 @@ case "$SPDK_VAGRANT_DISTRO" in
 	;;
 esac
 
+if ! echo "$SPDK_VAGRANT_DISTRO" | grep -q fedora && [ $DEPLOY_TEST_VM -eq 1 ]; then
+	echo "Warning: Test machine deployment is only available on fedora distros. Disabling it for this build"
+	DEPLOY_TEST_VM=0
+fi
+
 if [ ${VERBOSE} = 1 ]; then
 	echo
 	echo DIR=${DIR}
@@ -115,10 +152,13 @@ if [ ${VERBOSE} = 1 ]; then
 	echo VAGRANT_TARGET=${VAGRANT_TARGET}
 	echo HELP=$HELP
 	echo DRY_RUN=$DRY_RUN
+	echo NVME_FILE=$NVME_FILE
 	echo SPDK_VAGRANT_DISTRO=$SPDK_VAGRANT_DISTRO
 	echo SPDK_VAGRANT_VMCPU=$SPDK_VAGRANT_VMCPU
 	echo SPDK_VAGRANT_VMRAM=$SPDK_VAGRANT_VMRAM
 	echo SPDK_VAGRANT_HTTP_PROXY=$SPDK_VAGRANT_HTTP_PROXY
+	echo VHOST_HOST_DIR=$VHOST_HOST_DIR
+	echo VHOST_VM_DIR=$VHOST_VM_DIR
 	echo
 fi
 
@@ -126,6 +166,21 @@ export SPDK_VAGRANT_HTTP_PROXY
 export SPDK_VAGRANT_VMCPU
 export SPDK_VAGRANT_VMRAM
 export SPDK_DIR
+export COPY_SPDK_DIR
+export DEPLOY_TEST_VM
+export NVME_FILE
+
+if [ -n "$PROVIDER" ]; then
+    provider="--provider=${PROVIDER}"
+fi
+
+if [ -n "$VHOST_HOST_DIR" ]; then
+    export VHOST_HOST_DIR
+fi
+
+if [ -n "$VHOST_VM_DIR" ]; then
+    export VHOST_VM_DIR
+fi
 
 if [ ${DRY_RUN} = 1 ]; then
 	echo "Environemnt Variables"
@@ -136,15 +191,15 @@ if [ ${DRY_RUN} = 1 ]; then
 	printenv SPDK_DIR
 fi
 
-if [ -d "${VAGRANT_TARGET}/${SPDK_VAGRANT_DISTRO}" ]; then
-	echo "Error: ${VAGRANT_TARGET}/${SPDK_VAGRANT_DISTRO} already exists!"
+if [ -d "${VAGRANT_TARGET}/${SPDK_VAGRANT_DISTRO}-${PROVIDER}" ]; then
+	echo "Error: ${VAGRANT_TARGET}/${SPDK_VAGRANT_DISTRO}-${PROVIDER} already exists!"
 	exit 1
 fi
 
 if [ ${DRY_RUN} != 1 ]; then
-	mkdir -vp "${VAGRANT_TARGET}/${SPDK_VAGRANT_DISTRO}"
-	cp ${DIR}/Vagrantfile ${VAGRANT_TARGET}/${SPDK_VAGRANT_DISTRO}
-	pushd "${VAGRANT_TARGET}/${SPDK_VAGRANT_DISTRO}"
+	mkdir -vp "${VAGRANT_TARGET}/${SPDK_VAGRANT_DISTRO}-${PROVIDER}"
+	cp ${DIR}/Vagrantfile ${VAGRANT_TARGET}/${SPDK_VAGRANT_DISTRO}-${PROVIDER}
+	pushd "${VAGRANT_TARGET}/${SPDK_VAGRANT_DISTRO}-${PROVIDER}"
 	if [ ! -z "${http_proxy}" ]; then
 		export http_proxy
 		export https_proxy
@@ -153,12 +208,19 @@ if [ ${DRY_RUN} != 1 ]; then
 		else
 			vagrant plugin install vagrant-proxyconf
 		fi
+		if echo "$SPDK_VAGRANT_DISTRO" | grep -q freebsd; then
+			cat >~/vagrant_pkg.conf <<EOF
+pkg_env: {
+http_proxy: ${http_proxy}
+}
+EOF
+		fi
 	fi
-	vagrant up
+	vagrant up $provider
 	echo ""
 	echo "  SUCCESS!"
 	echo ""
-	echo "  cd to ${SPDK_VAGRANT_DISTRO} and type \"vagrant ssh\" to use."
+	echo "  cd to ${SPDK_VAGRANT_DISTRO}-${PROVIDER} and type \"vagrant ssh\" to use."
 	echo "  Use vagrant \"suspend\" and vagrant \"resume\" to stop and start."
 	echo "  Use vagrant \"destroy\" followed by \"rm -rf ${SPDK_VAGRANT_DISTRO}\" to destroy all trace of vm."
 	echo ""

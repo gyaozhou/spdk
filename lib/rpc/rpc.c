@@ -45,7 +45,7 @@
 #define RPC_DEFAULT_PORT	"5260"
 
 static struct sockaddr_un g_rpc_listen_addr_unix = {};
-static char g_rpc_lock_path[sizeof(g_rpc_listen_addr_unix.sun_path) + sizeof(".lock") + 1];
+static char g_rpc_lock_path[sizeof(g_rpc_listen_addr_unix.sun_path) + sizeof(".lock")];
 static int g_rpc_lock_fd = -1;
 
 static struct spdk_jsonrpc_server *g_jsonrpc_server = NULL;
@@ -64,6 +64,12 @@ void
 spdk_rpc_set_state(uint32_t state)
 {
 	g_rpc_state = state;
+}
+
+uint32_t
+spdk_rpc_get_state(void)
+{
+	return g_rpc_state;
 }
 
 static void

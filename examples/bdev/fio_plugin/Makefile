@@ -40,12 +40,12 @@ include $(SPDK_ROOT_DIR)/mk/spdk.modules.mk
 APP := fio_plugin
 
 C_SRCS = fio_plugin.c
-CFLAGS += -I$(FIO_SOURCE_DIR)
+CFLAGS += -I$(CONFIG_FIO_SOURCE_DIR)
 LDFLAGS += -shared -rdynamic
 
-SPDK_LIB_LIST +=  thread util bdev conf copy rpc jsonrpc json log
+SPDK_LIB_LIST += thread util bdev conf copy rpc jsonrpc json log sock trace
 
-LIBS += $(BLOCKDEV_MODULES_LINKER_ARGS)
+LIBS += $(BLOCKDEV_MODULES_LINKER_ARGS) $(SOCK_MODULES_LINKER_ARGS)
 LIBS += $(SPDK_LIB_LINKER_ARGS) $(ENV_LINKER_ARGS)
 
 all: $(APP)

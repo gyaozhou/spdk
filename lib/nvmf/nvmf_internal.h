@@ -40,6 +40,7 @@
 #include "spdk/nvmf.h"
 #include "spdk/nvmf_spec.h"
 #include "spdk/assert.h"
+#include "spdk/bdev.h"
 #include "spdk/queue.h"
 #include "spdk/util.h"
 #include "spdk/thread.h"
@@ -58,7 +59,6 @@ enum spdk_nvmf_subsystem_state {
 
 enum spdk_nvmf_qpair_state {
 	SPDK_NVMF_QPAIR_UNINITIALIZED = 0,
-	SPDK_NVMF_QPAIR_INACTIVE,
 	SPDK_NVMF_QPAIR_ACTIVATING,
 	SPDK_NVMF_QPAIR_ACTIVE,
 	SPDK_NVMF_QPAIR_DEACTIVATING,
@@ -68,9 +68,9 @@ enum spdk_nvmf_qpair_state {
 typedef void (*spdk_nvmf_state_change_done)(void *cb_arg, int status);
 
 struct spdk_nvmf_tgt {
-	struct spdk_nvmf_tgt_opts		opts;
-
 	uint64_t				discovery_genctr;
+
+	uint32_t				max_subsystems;
 
 	/* Array of subsystem pointers of size max_subsystems indexed by sid */
 	struct spdk_nvmf_subsystem		**subsystems;
@@ -151,8 +151,9 @@ struct spdk_nvmf_request {
 	void				*data;
 	union nvmf_h2c_msg		*cmd;
 	union nvmf_c2h_msg		*rsp;
-	struct iovec			iov[SPDK_NVMF_MAX_SGL_ENTRIES];
+	struct iovec			iov[SPDK_NVMF_MAX_SGL_ENTRIES * 2];
 	uint32_t			iovcnt;
+	struct spdk_bdev_io_wait_entry	bdev_io_wait;
 
 	TAILQ_ENTRY(spdk_nvmf_request)	link;
 };
@@ -209,8 +210,8 @@ struct spdk_nvmf_ctrlr {
 
 	struct spdk_nvmf_ctrlr_feat feat;
 
-	struct spdk_nvmf_qpair *admin_qpair;
-
+	struct spdk_nvmf_qpair	*admin_qpair;
+	struct spdk_thread	*thread;
 	struct spdk_bit_array	*qpair_mask;
 
 	struct spdk_nvmf_request *aer_req;
@@ -261,9 +262,9 @@ int spdk_nvmf_poll_group_add_transport(struct spdk_nvmf_poll_group *group,
 				       struct spdk_nvmf_transport *transport);
 int spdk_nvmf_poll_group_update_subsystem(struct spdk_nvmf_poll_group *group,
 		struct spdk_nvmf_subsystem *subsystem);
-void spdk_nvmf_poll_group_add_subsystem(struct spdk_nvmf_poll_group *group,
-					struct spdk_nvmf_subsystem *subsystem,
-					spdk_nvmf_poll_group_mod_done cb_fn, void *cb_arg);
+int spdk_nvmf_poll_group_add_subsystem(struct spdk_nvmf_poll_group *group,
+				       struct spdk_nvmf_subsystem *subsystem,
+				       spdk_nvmf_poll_group_mod_done cb_fn, void *cb_arg);
 void spdk_nvmf_poll_group_remove_subsystem(struct spdk_nvmf_poll_group *group,
 		struct spdk_nvmf_subsystem *subsystem, spdk_nvmf_poll_group_mod_done cb_fn, void *cb_arg);
 void spdk_nvmf_poll_group_pause_subsystem(struct spdk_nvmf_poll_group *group,
@@ -286,7 +287,7 @@ bool spdk_nvmf_ctrlr_dsm_supported(struct spdk_nvmf_ctrlr *ctrlr);
 bool spdk_nvmf_ctrlr_write_zeroes_supported(struct spdk_nvmf_ctrlr *ctrlr);
 void spdk_nvmf_ctrlr_ns_changed(struct spdk_nvmf_ctrlr *ctrlr, uint32_t nsid);
 
-int spdk_nvmf_bdev_ctrlr_identify_ns(struct spdk_nvmf_ns *ns, struct spdk_nvme_ns_data *nsdata);
+void spdk_nvmf_bdev_ctrlr_identify_ns(struct spdk_nvmf_ns *ns, struct spdk_nvme_ns_data *nsdata);
 
 int spdk_nvmf_subsystem_add_ctrlr(struct spdk_nvmf_subsystem *subsystem,
 				  struct spdk_nvmf_ctrlr *ctrlr);

@@ -40,5 +40,7 @@ C_SRCS = acceptor.c conn.c \
 	 tgt_node.c iscsi_subsystem.c \
 	 iscsi_rpc.c task.c
 LIBNAME = iscsi
+LOCAL_SYS_LIBS = -lcrypto
+SPDK_DEP_LIBNAMES = scsi
 
 include $(SPDK_ROOT_DIR)/mk/spdk.lib.mk

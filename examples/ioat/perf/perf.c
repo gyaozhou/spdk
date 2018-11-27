@@ -250,7 +250,7 @@ usage(char *program_name)
 	printf("\t[-c core mask for distributing I/O submission/completion work]\n");
 	printf("\t[-q queue depth]\n");
 	printf("\t[-n number of channels]\n");
-	printf("\t[-s transfer size in bytes]\n");
+	printf("\t[-o transfer size in bytes]\n");
 	printf("\t[-t time in seconds]\n");
 	printf("\t[-v verify copy result if this switch is on]\n");
 }
@@ -261,9 +261,9 @@ parse_args(int argc, char **argv)
 	int op;
 
 	construct_user_config(&g_user_config);
-	while ((op = getopt(argc, argv, "c:hn:q:s:t:v")) != -1) {
+	while ((op = getopt(argc, argv, "c:hn:o:q:t:v")) != -1) {
 		switch (op) {
-		case 's':
+		case 'o':
 			g_user_config.xfer_size_bytes = atoi(optarg);
 			break;
 		case 'n':
@@ -321,7 +321,7 @@ submit_single_xfer(struct ioat_chan_entry *ioat_chan_entry, struct ioat_task *io
 	ioat_chan_entry->current_queue_depth++;
 }
 
-static void
+static int
 submit_xfers(struct ioat_chan_entry *ioat_chan_entry, uint64_t queue_depth)
 {
 	while (queue_depth-- > 0) {
@@ -331,9 +331,14 @@ submit_xfers(struct ioat_chan_entry *ioat_chan_entry, uint64_t queue_depth)
 		src = spdk_mempool_get(ioat_chan_entry->data_pool);
 		dst = spdk_mempool_get(ioat_chan_entry->data_pool);
 		ioat_task = spdk_mempool_get(ioat_chan_entry->task_pool);
+		if (!ioat_task) {
+			fprintf(stderr, "Unable to get ioat_task\n");
+			return -1;
+		}
 
 		submit_single_xfer(ioat_chan_entry, ioat_task, dst, src);
 	}
+	return 0;
 }
 
 static int
@@ -349,8 +354,10 @@ work_fn(void *arg)
 
 	t = worker->ctx;
 	while (t != NULL) {
-		// begin to submit transfers
-		submit_xfers(t, g_user_config.queue_depth);
+		/* begin to submit transfers */
+		if (submit_xfers(t, g_user_config.queue_depth) < 0) {
+			return -1;
+		}
 		t = t->next;
 	}
 
@@ -368,7 +375,7 @@ work_fn(void *arg)
 
 	t = worker->ctx;
 	while (t != NULL) {
-		// begin to drain io
+		/* begin to drain io */
 		t->is_draining = true;
 		drain_io(t);
 		t = t->next;

@@ -2,6 +2,7 @@
  *   BSD LICENSE
  *
  *   Copyright (c) Intel Corporation.
+ *   Copyright(c) 2016 6WIND S.A.
  *   All rights reserved.
  *
  *   Redistribution and use in source and binary forms, with or without
@@ -25,25 +26,70 @@
  *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
  *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
  *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ *   DATA, OR PROFITS; OR BUSINESS INTERRUcryptoION) HOWEVER CAUSED AND ON ANY
  *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-/* This file is included in the bdev test tools, not compiled separately. */
+#ifndef _RTE_CRYPTO_H_
+#define _RTE_CRYPTO_H_
 
-#include "spdk/event.h"
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-static void
-bdevtest_init(const char *config_file, const char *cpumask,
-	      struct spdk_app_opts *opts)
-{
-	assert(opts != NULL);
+/* In order to mock some DPDK functions, we place headers here with the name name as the DPDK headers
+ * so these definitions wil be picked up.  Only what's mocked is included.
+ */
 
-	spdk_app_opts_init(opts);
-	opts->name = "bdevtest";
-	opts->config_file = config_file;
-	opts->reactor_mask = cpumask;
-	opts->mem_size = 1024;
+#include "rte_mbuf.h"
+#include "rte_mempool.h"
+#include "rte_crypto_sym.h"
+
+enum rte_crypto_op_type {
+	RTE_CRYPTO_OP_TYPE_UNDEFINED,
+	RTE_CRYPTO_OP_TYPE_SYMMETRIC,
+};
+
+enum rte_crypto_op_status {
+	RTE_CRYPTO_OP_STATUS_SUCCESS,
+	RTE_CRYPTO_OP_STATUS_NOT_PROCESSED,
+	RTE_CRYPTO_OP_STATUS_AUTH_FAILED,
+	RTE_CRYPTO_OP_STATUS_INVALID_SESSION,
+	RTE_CRYPTO_OP_STATUS_INVALID_ARGS,
+	RTE_CRYPTO_OP_STATUS_ERROR,
+};
+
+struct rte_crypto_op {
+	uint8_t type;
+	uint8_t status;
+	uint8_t sess_type;
+	uint8_t reserved[5];
+	struct rte_mempool *mempool;
+	rte_iova_t phys_addr;
+	__extension__
+	union {
+		struct rte_crypto_sym_op sym[0];
+	};
+};
+
+extern struct rte_mempool *
+rte_crypto_op_pool_create(const char *name, enum rte_crypto_op_type type,
+			  unsigned nb_elts, unsigned cache_size, uint16_t priv_size,
+			  int socket_id);
+
+static inline unsigned
+rte_crypto_op_bulk_alloc(struct rte_mempool *mempool,
+			 enum rte_crypto_op_type type,
+			 struct rte_crypto_op **ops, uint16_t nb_ops);
+
+static inline int
+rte_crypto_op_attach_sym_session(struct rte_crypto_op *op,
+				 struct rte_cryptodev_sym_session *sess);
+
+#ifdef __cplusplus
 }
+#endif
+
+#endif

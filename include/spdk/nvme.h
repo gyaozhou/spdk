@@ -44,6 +44,7 @@
 extern "C" {
 #endif
 
+#include "spdk/config.h"
 #include "spdk/env.h"
 #include "spdk/nvme_spec.h"
 #include "spdk/nvmf_spec.h"
@@ -155,6 +156,17 @@ struct spdk_nvme_ctrlr_opts {
 	 * command set is used.
 	 */
 	enum spdk_nvme_cc_css command_set;
+
+	/**
+	 * Admin commands timeout in milliseconds (0 = no timeout).
+	 *
+	 * The timeout value is used for admin commands submitted internally
+	 * by the nvme driver during initialization, before the user is able
+	 * to call spdk_nvme_ctrlr_register_timeout_callback(). By default,
+	 * this is set to 120 seconds, users can change it in the probing
+	 * callback.
+	 */
+	uint32_t admin_timeout_ms;
 };
 
 /**
@@ -190,7 +202,15 @@ enum spdk_nvme_transport_type {
 	 * Fibre Channel (FC) Transport
 	 */
 	SPDK_NVME_TRANSPORT_FC = SPDK_NVMF_TRTYPE_FC,
+
+	/**
+	 * TCP Transport
+	 */
+	SPDK_NVME_TRANSPORT_TCP = SPDK_NVMF_TRTYPE_TCP,
 };
+
+/* typedef added for coding style reasons */
+typedef enum spdk_nvme_transport_type spdk_nvme_transport_type_t;
 
 /**
  * NVMe transport identifier.
@@ -218,8 +238,8 @@ struct spdk_nvme_transport_id {
 	 * addressing (e.g. RDMA), this should be an IP address. For PCIe, this
 	 * can either be a zero length string (the whole bus) or a PCI address
 	 * in the format DDDD:BB:DD.FF or DDDD.BB.DD.FF. For FC the string is
-	 * formatted as: nn-0xWWNN:pn-0xWWPN” where a)WWN isthe Node_Name of the
-	 * target NVMe_Port and b)WWPN is the N_Port_Name of the target NVMe_Port.
+	 * formatted as: nn-0xWWNN:pn-0xWWPN” where WWNN is the Node_Name of the
+	 * target NVMe_Port and WWPN is the N_Port_Name of the target NVMe_Port.
 	 */
 	char traddr[SPDK_NVMF_TRADDR_MAX_LEN + 1];
 
@@ -1096,6 +1116,56 @@ int spdk_nvme_ctrlr_cmd_set_feature_ns(struct spdk_nvme_ctrlr *ctrlr, uint8_t fe
 				       void *cb_arg, uint32_t ns_id);
 
 /**
+ * Receive security protocol data from controller.
+ *
+ * This function is thread safe and can be called at any point after spdk_nvme_probe().
+ *
+ * Call spdk_nvme_ctrlr_process_admin_completions() to poll for completion of
+ * commands submitted through this function.
+ *
+ * \param ctrlr NVMe controller to use for security receive command submission.
+ * \param secp Security Protocol that is used.
+ * \param spsp Security Protocol Specific field.
+ * \param nssf NVMe Security Specific field. Indicate RPMB target when using Security
+ * Protocol EAh.
+ * \param payload The pointer to the payload buffer.
+ * \param payload_size The size of payload buffer.
+ * \param cb_fn Callback function to invoke when the security receive has completed.
+ * \param cb_arg Argument to pass to the callback function.
+ *
+ * \return 0 if successfully submitted, negated errno if resources could not be allocated
+ * for this request.
+ */
+int spdk_nvme_ctrlr_cmd_security_receive(struct spdk_nvme_ctrlr *ctrlr, uint8_t secp, uint16_t spsp,
+		uint8_t nssf, void *payload, uint32_t payload_size,
+		spdk_nvme_cmd_cb cb_fn, void *cb_arg);
+
+/**
+ * Send security protocol data to controller.
+ *
+ * This function is thread safe and can be called at any point after spdk_nvme_probe().
+ *
+ * Call spdk_nvme_ctrlr_process_admin_completions() to poll for completion of
+ * commands submitted through this function.
+ *
+ * \param ctrlr NVMe controller to use for security send command submission.
+ * \param secp Security Protocol that is used.
+ * \param spsp Security Protocol Specific field.
+ * \param nssf NVMe Security Specific field. Indicate RPMB target when using Security
+ * Protocol EAh.
+ * \param payload The pointer to the payload buffer.
+ * \param payload_size The size of payload buffer.
+ * \param cb_fn Callback function to invoke when the security send has completed.
+ * \param cb_arg Argument to pass to the callback function.
+ *
+ * \return 0 if successfully submitted, negated errno if resources could not be allocated
+ * for this request.
+ */
+int spdk_nvme_ctrlr_cmd_security_send(struct spdk_nvme_ctrlr *ctrlr, uint8_t secp, uint16_t spsp,
+				      uint8_t nssf, void *payload, uint32_t payload_size,
+				      spdk_nvme_cmd_cb cb_fn, void *cb_arg);
+
+/**
  * Attach the specified namespace to controllers.
  *
  * This function is thread safe and can be called at any point after spdk_nvme_probe().
@@ -1290,6 +1360,9 @@ uint32_t spdk_nvme_ns_get_max_io_xfer_size(struct spdk_nvme_ns *ns);
 /**
  * Get the sector size, in bytes, of the given namespace.
  *
+ * This function returns the size of the data sector only.  It does not
+ * include metadata size.
+ *
  * This function is thread safe and can be called at any point while the controller
  * is attached to the SPDK NVMe driver.
  *
@@ -1298,6 +1371,20 @@ uint32_t spdk_nvme_ns_get_max_io_xfer_size(struct spdk_nvme_ns *ns);
  * /return the sector size in bytes.
  */
 uint32_t spdk_nvme_ns_get_sector_size(struct spdk_nvme_ns *ns);
+
+/**
+ * Get the extended sector size, in bytes, of the given namespace.
+ *
+ * This function returns the size of the data sector plus metadata.
+ *
+ * This function is thread safe and can be called at any point while the controller
+ * is attached to the SPDK NVMe driver.
+ *
+ * \param ns Namespace to query.
+ *
+ * /return the extended sector size in bytes.
+ */
+uint32_t spdk_nvme_ns_get_extended_sector_size(struct spdk_nvme_ns *ns);
 
 /**
  * Get the number of sectors for the given namespace.
@@ -1968,6 +2055,53 @@ void spdk_nvme_qpair_remove_cmd_error_injection(struct spdk_nvme_ctrlr *ctrlr,
 		struct spdk_nvme_qpair *qpair,
 		uint8_t opc);
 
+#ifdef SPDK_CONFIG_RDMA
+struct ibv_context;
+struct ibv_pd;
+struct ibv_mr;
+
+/**
+ * RDMA Transport Hooks
+ */
+struct spdk_nvme_rdma_hooks {
+	/**
+	 * \brief Get an InfiniBand Verbs protection domain.
+	 *
+	 * \param trid the transport id
+	 * \param verbs Infiniband verbs context
+	 *
+	 * \return pd of the nvme ctrlr
+	 */
+	struct ibv_pd *(*get_ibv_pd)(const struct spdk_nvme_transport_id *trid,
+				     struct ibv_context *verbs);
+
+	/**
+	 * \brief Get an InfiniBand Verbs memory region for a buffer.
+	 *
+	 * \param pd The protection domain returned from get_ibv_pd
+	 * \param buf Memory buffer for which an rkey should be returned.
+	 * \param size size of buf
+	 *
+	 * \return Infiniband remote key (rkey) for this buf
+	 */
+	uint64_t (*get_rkey)(struct ibv_pd *pd, void *buf, size_t size);
+};
+
+/**
+ * \brief Set the global hooks for the RDMA transport, if necessary.
+ *
+ * This call is optional and must be performed prior to probing for
+ * any devices. By default, the RDMA transport will use the ibverbs
+ * library to create protection domains and register memory. This
+ * is a mechanism to subvert that and use an existing registration.
+ *
+ * This function may only be called one time per process.
+ *
+ * \param hooks for initializing global hooks
+ */
+void spdk_nvme_rdma_init_hooks(struct spdk_nvme_rdma_hooks *hooks);
+
+#endif
 
 #ifdef __cplusplus
 }

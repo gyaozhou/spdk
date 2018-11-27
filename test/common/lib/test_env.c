@@ -65,13 +65,18 @@ spdk_memzone_reserve_aligned(const char *name, size_t len, int socket_id,
 	return malloc(len);
 }
 
-DEFINE_RETURN_MOCK(spdk_dma_malloc, void *);
+DEFINE_RETURN_MOCK(spdk_malloc, void *);
 void *
-spdk_dma_malloc(size_t size, size_t align, uint64_t *phys_addr)
+spdk_malloc(size_t size, size_t align, uint64_t *phys_addr, int socket_id, uint32_t flags)
 {
-	HANDLE_RETURN_MOCK(spdk_dma_malloc);
+	HANDLE_RETURN_MOCK(spdk_malloc);
 
 	void *buf = NULL;
+
+	if (align == 0) {
+		align = 8;
+	}
+
 	if (posix_memalign(&buf, align, size)) {
 		return NULL;
 	}
@@ -82,18 +87,36 @@ spdk_dma_malloc(size_t size, size_t align, uint64_t *phys_addr)
 	return buf;
 }
 
+DEFINE_RETURN_MOCK(spdk_zmalloc, void *);
+void *
+spdk_zmalloc(size_t size, size_t align, uint64_t *phys_addr, int socket_id, uint32_t flags)
+{
+	HANDLE_RETURN_MOCK(spdk_zmalloc);
+
+	void *buf = spdk_malloc(size, align, phys_addr, -1, 1);
+
+	if (buf != NULL) {
+		memset(buf, 0, size);
+	}
+	return buf;
+}
+
+DEFINE_RETURN_MOCK(spdk_dma_malloc, void *);
+void *
+spdk_dma_malloc(size_t size, size_t align, uint64_t *phys_addr)
+{
+	HANDLE_RETURN_MOCK(spdk_dma_malloc);
+
+	return spdk_malloc(size, align, phys_addr, -1, 1);
+}
+
 DEFINE_RETURN_MOCK(spdk_dma_zmalloc, void *);
 void *
 spdk_dma_zmalloc(size_t size, size_t align, uint64_t *phys_addr)
 {
 	HANDLE_RETURN_MOCK(spdk_dma_zmalloc);
 
-	void *buf = spdk_dma_malloc(size, align, phys_addr);
-
-	if (buf != NULL) {
-		memset(buf, 0, size);
-	}
-	return buf;
+	return spdk_zmalloc(size, align, phys_addr, -1, 1);
 }
 
 DEFINE_RETURN_MOCK(spdk_dma_malloc_socket, void *);
@@ -124,9 +147,15 @@ spdk_dma_realloc(void *buf, size_t size, size_t align, uint64_t *phys_addr)
 }
 
 void
-spdk_dma_free(void *buf)
+spdk_free(void *buf)
 {
 	free(buf);
+}
+
+void
+spdk_dma_free(void *buf)
+{
+	return spdk_free(buf);
 }
 
 DEFINE_RETURN_MOCK(spdk_vtophys, uint64_t);
@@ -197,7 +226,7 @@ spdk_mempool_get(struct spdk_mempool *_mp)
 		return NULL;
 	}
 
-	if (posix_memalign(&buf, 64, 0x1000)) {
+	if (posix_memalign(&buf, 64, 0x10000)) {
 		return NULL;
 	} else {
 		if (mp) {
@@ -354,6 +383,7 @@ spdk_get_ticks_hz(void)
 void
 spdk_delay_us(unsigned int us)
 {
+	/* spdk_get_ticks_hz is 1000000, meaning 1 tick per us. */
 	ut_spdk_get_ticks += us;
 }
 

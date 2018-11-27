@@ -100,47 +100,20 @@ _sprintf_alloc(const char *format, ...)
 	return NULL;
 }
 
-#if RTE_VERSION >= RTE_VERSION_NUM(18, 05, 0, 0)
-const char *eal_get_runtime_dir(void);
-#endif
-
 static void
 spdk_env_unlink_shared_files(void)
 {
+	/* Starting with DPDK 18.05, there are more files with unpredictable paths
+	 * and filenames. The --no-shconf option prevents from creating them, but
+	 * only for DPDK 18.08+. For DPDK 18.05 we just leave them be.
+	 */
+#if RTE_VERSION < RTE_VERSION_NUM(18, 05, 0, 0)
 	char buffer[PATH_MAX];
 
-	snprintf(buffer, PATH_MAX, "/var/run/.spdk_pid%d_config", getpid());
-	if (unlink(buffer)) {
-		fprintf(stderr, "Unable to unlink shared memory file: %s. Error code: %d\n", buffer, errno);
-	}
-
-#if RTE_VERSION < RTE_VERSION_NUM(18, 05, 0, 0)
 	snprintf(buffer, PATH_MAX, "/var/run/.spdk_pid%d_hugepage_info", getpid());
 	if (unlink(buffer)) {
 		fprintf(stderr, "Unable to unlink shared memory file: %s. Error code: %d\n", buffer, errno);
 	}
-#else
-	DIR *dir;
-	struct dirent *d;
-
-	dir = opendir(eal_get_runtime_dir());
-	if (!dir) {
-		fprintf(stderr, "Failed to open DPDK runtime dir: %s (%d)\n", eal_get_runtime_dir(), errno);
-		return;
-	}
-
-	while ((d = readdir(dir)) != NULL) {
-		if (d->d_type != DT_REG) {
-			continue;
-		}
-
-		snprintf(buffer, PATH_MAX, "%s/%s", eal_get_runtime_dir(), d->d_name);
-		if (unlink(buffer)) {
-			fprintf(stderr, "Unable to unlink shared memory file: %s. Error code: %d\n", buffer, errno);
-		}
-	}
-
-	closedir(dir);
 #endif
 }
 
@@ -219,6 +192,14 @@ spdk_build_eal_cmdline(const struct spdk_env_opts *opts)
 		return -1;
 	}
 
+	/* disable shared configuration files when in single process mode. This allows for cleaner shutdown */
+	if (opts->shm_id < 0) {
+		args = spdk_push_arg(args, &argcount, _sprintf_alloc("%s", "--no-shconf"));
+		if (args == NULL) {
+			return -1;
+		}
+	}
+
 	/* set the coremask */
 	/* NOTE: If coremask starts with '[' and ends with ']' it is a core list
 	 */
@@ -246,7 +227,7 @@ spdk_build_eal_cmdline(const struct spdk_env_opts *opts)
 	}
 
 	/* set the memory size */
-	if (opts->mem_size > 0) {
+	if (opts->mem_size >= 0) {
 		args = spdk_push_arg(args, &argcount, _sprintf_alloc("-m %d", opts->mem_size));
 		if (args == NULL) {
 			return -1;
@@ -286,8 +267,16 @@ spdk_build_eal_cmdline(const struct spdk_env_opts *opts)
 		}
 	}
 
-#if RTE_VERSION >= RTE_VERSION_NUM(18, 05, 0, 0)
-	/* SPDK holds off with using the new memory management model just yet */
+	/* use a specific hugetlbfs mount */
+	if (opts->hugedir) {
+		args = spdk_push_arg(args, &argcount, _sprintf_alloc("--huge-dir=%s", opts->hugedir));
+		if (args == NULL) {
+			return -1;
+		}
+	}
+
+#if RTE_VERSION >= RTE_VERSION_NUM(18, 05, 0, 0) && RTE_VERSION < RTE_VERSION_NUM(18, 5, 1, 0)
+	/* Dynamic memory management is buggy in DPDK 18.05.0. Don't use it. */
 	args = spdk_push_arg(args, &argcount, _sprintf_alloc("--legacy-mem"));
 	if (args == NULL) {
 		return -1;
@@ -312,6 +301,17 @@ spdk_build_eal_cmdline(const struct spdk_env_opts *opts)
 	}
 
 #ifdef __linux__
+	/* Set the base virtual address - it must be an address that is not in the
+	 * ASAN shadow region, otherwise ASAN-enabled builds will ignore the
+	 * mmap hint.
+	 *
+	 * Ref: https://github.com/google/sanitizers/wiki/AddressSanitizerAlgorithm
+	 */
+	args = spdk_push_arg(args, &argcount, _sprintf_alloc("--base-virtaddr=0x200000000000"));
+	if (args == NULL) {
+		return -1;
+	}
+
 	if (opts->shm_id < 0) {
 		args = spdk_push_arg(args, &argcount, _sprintf_alloc("--file-prefix=spdk_pid%d",
 				     getpid()));
@@ -321,17 +321,6 @@ spdk_build_eal_cmdline(const struct spdk_env_opts *opts)
 	} else {
 		args = spdk_push_arg(args, &argcount, _sprintf_alloc("--file-prefix=spdk%d",
 				     opts->shm_id));
-		if (args == NULL) {
-			return -1;
-		}
-
-		/* Set the base virtual address - it must be an address that is not in the
-		 * ASAN shadow region, otherwise ASAN-enabled builds will ignore the
-		 * mmap hint.
-		 *
-		 * Ref: https://github.com/google/sanitizers/wiki/AddressSanitizerAlgorithm
-		 */
-		args = spdk_push_arg(args, &argcount, _sprintf_alloc("--base-virtaddr=0x200000000000"));
 		if (args == NULL) {
 			return -1;
 		}

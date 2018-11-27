@@ -115,8 +115,9 @@ bdev_rados_context_init(const char *rbd_pool_name, rados_t *cluster,
 
 	ret = rados_connect(*cluster);
 	if (ret < 0) {
-		SPDK_ERRLOG("Failed to connect rbd_pool\n");
+		SPDK_ERRLOG("Failed to connect to rbd_pool\n");
 		rados_shutdown(*cluster);
+		return -1;
 	}
 
 	ret = rados_ioctx_create(*cluster, rbd_pool_name, io_ctx);
@@ -141,7 +142,7 @@ bdev_rbd_init(const char *rbd_pool_name, const char *rbd_name, rbd_image_info_t 
 	ret = bdev_rados_context_init(rbd_pool_name, &cluster, &io_ctx);
 	if (ret < 0) {
 		SPDK_ERRLOG("Failed to create rados context for rbd_pool=%s\n",
-			    rbd_name);
+			    rbd_pool_name);
 		return -1;
 	}
 
@@ -311,6 +312,8 @@ static int
 bdev_rbd_destruct(void *ctx)
 {
 	struct bdev_rbd *rbd = ctx;
+
+	spdk_io_device_unregister(rbd, NULL);
 
 	bdev_rbd_free(rbd);
 	return 0;
@@ -647,7 +650,8 @@ spdk_bdev_rbd_create(const char *name, const char *pool_name, const char *rbd_na
 
 	spdk_io_device_register(rbd, bdev_rbd_create_cb,
 				bdev_rbd_destroy_cb,
-				sizeof(struct bdev_rbd_io_channel));
+				sizeof(struct bdev_rbd_io_channel),
+				rbd_name);
 	ret = spdk_bdev_register(&rbd->disk);
 	if (ret) {
 		spdk_io_device_unregister(rbd, NULL);

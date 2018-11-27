@@ -1,6 +1,238 @@
 # Changelog
 
-## v18.10: (Upcoming Release)
+## v19.01: (Upcoming Release)
+
+### nvme
+
+admin_timeout_ms was added to NVMe controller initialization options, users
+can change the default value when probing a controller.
+
+### NVMe-oF Target
+
+The `spdk_nvmf_tgt_opts` struct has been deprecated in favor of `spdk_nvmf_transport_opts`.
+Users will no longer be able to specify target wide I/O parameters. `spdk_nvmf_tgt_listen`
+will also no longer implicitly initialize a transport with the default target options (since
+there are none). Instead, a user must manually instantiate the transport with `spdk_nvmf_transport_create`
+prior to calling `spdk_nvmf_tgt_listen`.
+
+Related to the previous change, the rpc `set_nvmf_target_options` has been renamed to
+`set_nvmf_target_max_subsystems` to indicate that this is the only target option available for the user to edit.
+
+### nvme
+
+Add a new TCP/IP transport(located in lib/nvme/nvme_tcp.c) in nvme driver. With
+this new transport, it can be used to connect the NVMe-oF target with the
+same TCP/IP support.
+
+### nvmf
+
+Add a new TCP/IP transport (located in lib/nvmf/tcp.c). With this tranport,
+the SPDK NVMe-oF target can have a new transport, and can serve the NVMe-oF
+protocol via TCP/IP from the host.
+
+### bdev
+
+On shutdown, bdev unregister now proceeds in top-down fashion, with
+claimed bdevs skipped (these will be unregistered later, when virtual
+bdev built on top of the respective base bdev unclaims it). This
+allows virtual bdevs to be shut down cleanly as opposed to the
+previous behavior that didn't differentiate between hotremove and
+planned shutdown.
+
+## v18.10:
+
+### nvme
+
+spdk_nvme_ctrlr_cmd_security_send() and spdk_nvme_ctrlr_cmd_security_receive()
+were added to support sending or receiving security protocol data to or from
+nvme controller.
+
+spdk_nvme_ns_get_extended_sector_size() was added.  This function includes
+the metadata size per sector (if any).  spdk_nvme_ns_get_sector_size() still
+returns only the data size per sector, not including metadata.
+
+New `send_nvme_cmd` RPC was added to allow sending NVMe commands directly to NVMe controller.
+See the [send_nvme_cmd](http://spdk.io/doc/jsonrpc.html#rpc_send_nvme_cmd) documentation
+for more details.
+
+### Build System
+
+New `configure` options, `--with-shared` and `--without-shared`
+[default], provide the capability to build, or not, SPDK shared libraries.
+This includes the single SPDK shared lib encompassing all of the SPDK
+static libs as well as individual SPDK shared libs corresponding to
+each of the SPDK static ones.  Although the production of the shared
+libs conforms with conventional version naming practices, such naming
+does not at this time confer any SPDK ABI compatibility claims.
+
+### bdev
+
+spdk_bdev_alias_del_all() was added to delete all alias from block device.
+
+A new virtual bdev module has been added to perform at rest data encryption using the DPDK CryptoDev
+Framework.  The module initially uses a software AESNI CBC cipher with experimental support for the
+Intel QAT hardware accelerator also currently implemented with support for CBC cipher. Future work
+may include additional ciphers as well as consideration for authentication.
+
+The RAID virtual bdev module is now always enabled by default.  The configure --with-raid and
+--without-raid options are now ignored and deprecated and will be removed in the next release.
+
+Enforcement of bandwidth limits for quality of service (QoS) has been added to the bdev layer.
+See the new [set_bdev_qos_limit](http://www.spdk.io/doc/jsonrpc.html#rpc_set_bdev_qos_limit)
+documentation for more details. The previous set_bdev_qos_limit_iops RPC method introduced at
+18.04 release has been deprecated. The new set_bdev_qos_limit RPC method can support both
+bandwidth and IOPS limits.
+
+spdk_bdev_config_json() and corresponding `get_bdevs_config` RPC was removed.
+
+### Environment Abstraction Layer and Event Framework
+
+The size parameter of spdk_mem_map_translate is now a pointer. This allows the
+function to report back the actual size of the translation relative to the original
+request made by the user.
+
+A new structure spdk_mem_map_ops has been introduced to hold memory map related
+callbacks. This structure is now passed as the second argument of spdk_mem_map_alloc
+in lieu of the notify callback.
+
+### DPDK 18.08
+
+The DPDK submodule has been updated to the DPDK 18.08 release. SPDK will now automatically
+utilize DPDK's dynamic memory management with DPDK versions >= 18.05.1.
+
+Hugepages can be still reserved with `[-s|--mem-size <size>]` option at application startup,
+but once we use them all up, instead of failing user allocations with -ENOMEM, we'll try
+to dynamically reserve even more. This allows starting SPDK with `--mem-size 0` and using
+only as many hugepages as it is really needed.
+
+Due to this change, the memory buffers returned by `spdk_*malloc()` are no longer guaranteed
+to be physically contiguous.
+
+### I/OAT
+
+I/OAT driver can now reinitialize I/OAT channels after encountering DMA errors.
+
+### iscsi target
+
+Parameter names of `set_iscsi_options` and `get_iscsi_global_params` RPC
+method for CHAP authentication in discovery sessions have been changed to
+align with `construct_target_node` RPC method. Old names are still usable
+but will be removed in future release.
+
+`set_iscsi_discovery_auth` and `set_iscsi_target_node_auth` RPC methods have
+been added to set CHAP authentication for discovery sessions and existing
+target nodes, respectively.
+
+The SPDK iSCSI target supports an AuthFile which can be used to load CHAP
+shared secrets when the iSCSI target starts. SPDK previously provided a
+default location for this file (`/usr/local/etc/spdk/auth.conf`) if none was
+specified. This default has been removed. Users must now explicitly specify
+the location of this file to load CHAP shared secrets from a file, or use
+the related iSCSI RPC methods to add them at runtime.
+
+### iscsi initiator
+
+The SPDK iSCSI initiator is no longer considered experimental and becomes
+a first-class citizen among bdev modules. The basic usage has been briefly
+described in the bdev user guide: [iSCSI bdev](https://spdk.io/doc/bdev.html#bdev_config_iscsi)
+
+### Miscellaneous
+
+The SPDK application framework can now parse long name command line parameters.
+Most single-character parameters have a long name equivalent now. See the
+[Command Line Parameters](https://spdk.io/doc/app_overview.html) documentation
+for details or use the `--help` command line parameter to list all available
+params.
+
+bdevperf `-s` param (io size) was renamed to `-o` as `-s` had been already
+used by existing apps for memory size.
+
+bdevio can now accept all SPDK command line parameters. The config now has to
+be provided with `-c` or `--config` param.
+
+The following ioat/perf and nvme/perf parameters were renamed as well:
+ `-s` (io size) to `-o`
+ `-d` (mem size) to `-s`
+
+The ReactorMask config file parameter has been deprecated.  Users should
+use the -m or --cpumask command line option to specify the CPU core mask
+for the application.
+
+Default config file pathnames have been removed from iscsi_tgt, nvmf_tgt
+and vhost.  Config file pathnames may now only be specified using the
+-c command line option.
+
+Users may no longer set DPDK_DIR in their environment to specify the
+location of the DPDK installation used to build SPDK.  Using DPDK_DIR
+has not been the documented nor recommended way to specify the DPDK
+location for several releases, but removing it ensures no unexpected
+surprises for users who may have DPDK_DIR defined for other reasons.
+Users should just use the "configure" script to specify the DPDK
+location before building SPDK.
+
+Although we know that many developers still use Python 2 we are officially
+switching to Python3 with requirement that all new code must be valid also
+for Python 2 up to the EOL which is year 2020.
+
+Invoking interpreter explicitly is forbidden for executable scripts. There
+is no need to use syntax like "python ./scripts/rpc.py". All executable
+scripts must contain proper shebang pointing to the right interpreter.
+Scripts without shebang musn't be executable.
+
+A Python script has been added to enable conversion of old INI config file
+to new JSON-RPC config file format. This script can be found at
+scripts/config_converter.py. Example how this script can be used:
+~~~{.sh}
+cat old_format.ini | scripts/config_converter.py > new_json_format.json
+~~~
+
+### Sock
+
+Two additional parameters were added to spdk_sock_get_addr() for the server
+port and client port. These parameters are named "sport" and "cport"
+respectively.
+
+### Virtio
+
+The following RPC commands have been deprecated:
+ - construct_virtio_user_scsi_bdev
+ - construct_virtio_pci_scsi_bdev
+ - construct_virtio_user_blk_bdev
+ - construct_virtio_pci_blk_bdev
+ - remove_virtio_scsi_bdev
+
+The `construct_virtio_*` ones were replaced with a single `construct_virtio_dev`
+command that can create any type of Virtio bdev(s). `remove_virtio_scsi_bdev`
+was replaced with `remove_virtio_bdev` that can delete both Virtio Block and SCSI
+devices.
+
+### Blobfs
+
+spdk_file_get_id() returning unique ID for the file was added.
+
+### JSON
+
+Added jsonrpc-client C library intended for issuing RPC commands from applications.
+
+Added API enabling iteration over JSON object:
+ - spdk_json_find()
+ - spdk_json_find_string()
+ - spdk_json_find_array()
+ - spdk_json_object_first()
+ - spdk_json_array_first()
+ - spdk_json_next()
+
+### Blobstore
+
+Blobstore I/O operations are now based on io_units, instead of blobstore page size.
+The io_unit size is now the same as the underlying block device's block size.
+Logical volumes built on a block device with 512B block size can now be used as boot devices
+in QEMU.
+
+### SPDKCLI
+
+The SPDKCLI interactive command tool for managing SPDK is no longer considered experimental.
+Support for the iSCSI and NVMe-oF targets has been added.
 
 ## v18.07:
 
@@ -234,7 +466,7 @@ A new `destroy_lvol_bdev` RPC method to delete logical volumes has been added.
 
 Lvols now have their own UUIDs which replace previous LvolStoreUUID_BlobID combination.
 
-New Snapshot and Clone funtionalities have been added. User may create Snapshots of existing Lvols
+New Snapshot and Clone functionalities have been added. User may create Snapshots of existing Lvols
 and Clones of existing Snapshots.
 See the [lvol snapshots](http://www.spdk.io/doc/logical_volumes.html#lvol_snapshots) documentation
 for more details.
@@ -383,7 +615,7 @@ See the [GPT](http://www.spdk.io/doc/bdev.html#bdev_config_gpt) documentation fo
 
 ### FIO plugin
 
-SPDK `fio_plugin` now suports FIO 3.3. The support for previous FIO 2.21 has been dropped,
+SPDK `fio_plugin` now supports FIO 3.3. The support for previous FIO 2.21 has been dropped,
 although it still remains to work for now. The new FIO contains huge amount of bugfixes and
 it's recommended to do an update.
 

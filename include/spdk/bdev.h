@@ -105,6 +105,16 @@ enum spdk_bdev_io_type {
 	SPDK_BDEV_NUM_IO_TYPES /* Keep last */
 };
 
+/** bdev QoS rate limit type */
+enum spdk_bdev_qos_rate_limit_type {
+	/** IOPS rate limit for both read and write */
+	SPDK_BDEV_QOS_RW_IOPS_RATE_LIMIT = 0,
+	/** Byte per second rate limit for both read and write */
+	SPDK_BDEV_QOS_RW_BPS_RATE_LIMIT,
+	/** Keep last */
+	SPDK_BDEV_QOS_NUM_RATE_LIMIT_TYPES
+};
+
 /**
  * Block device completion callback.
  *
@@ -234,7 +244,8 @@ struct spdk_bdev *spdk_bdev_next_leaf(struct spdk_bdev *prev);
  *
  * \param bdev Block device to open.
  * \param write true is read/write access requested, false if read-only
- * \param remove_cb callback function for hot remove the device.
+ * \param remove_cb callback function for hot remove the device. Will
+ * always be called on the same thread that spdk_bdev_open() was called on.
  * \param remove_ctx param for hot removal callback function.
  * \param desc output parameter for the descriptor when operation is successful
  * \return 0 if operation is successful, suitable errno value otherwise
@@ -244,6 +255,9 @@ int spdk_bdev_open(struct spdk_bdev *bdev, bool write, spdk_bdev_remove_cb_t rem
 
 /**
  * Close a previously opened block device.
+ *
+ * Must be called on the same thread that the spdk_bdev_open()
+ * was performed on.
  *
  * \param desc Block device descriptor to close.
  */
@@ -280,21 +294,6 @@ bool spdk_bdev_io_type_supported(struct spdk_bdev *bdev, enum spdk_bdev_io_type 
 int spdk_bdev_dump_info_json(struct spdk_bdev *bdev, struct spdk_json_write_ctx *w);
 
 /**
- * Output bdev-specific configuration to a JSON stream.
- *
- * If supported, the object with following keys will be written:
- * method - name of the constructor method
- * params - parameters necessary to recreate this \c bdev
- *
- * If \c bdev does not support writing JSON configuration then object will be written
- * with only one key - the name of this bdev.
- *
- * \param bdev block device to query configuration.
- * \param w pointer to a JSON write context where \c bdev the configuration will be written.
- */
-void spdk_bdev_config_json(struct spdk_bdev *bdev, struct spdk_json_write_ctx *w);
-
-/**
  * Get block device name.
  *
  * \param bdev Block device to query.
@@ -329,25 +328,35 @@ uint32_t spdk_bdev_get_block_size(const struct spdk_bdev *bdev);
 uint64_t spdk_bdev_get_num_blocks(const struct spdk_bdev *bdev);
 
 /**
- * Get IOs per second of block device for the QoS rate limiting.
+ * Get the string of quality of service rate limit.
  *
- * \param bdev Block device to query.
- * \return IOs per second.
- *
- * Return 0 for no QoS enforced on the queried block device.
+ * \param type Type of rate limit to query.
+ * \return String of QoS type.
  */
-uint64_t spdk_bdev_get_qos_ios_per_sec(struct spdk_bdev *bdev);
+const char *spdk_bdev_get_qos_rpc_type(enum spdk_bdev_qos_rate_limit_type type);
 
 /**
- * Set an IOPS-based quality of service rate limit on a bdev.
+ * Get the quality of service rate limits on a bdev.
+ *
+ * \param bdev Block device to query.
+ * \param limits Pointer to the QoS rate limits array which holding the limits.
+ *
+ * The limits are ordered based on the @ref spdk_bdev_qos_rate_limit_type enum.
+ */
+void spdk_bdev_get_qos_rate_limits(struct spdk_bdev *bdev, uint64_t *limits);
+
+/**
+ * Set the quality of service rate limits on a bdev.
  *
  * \param bdev Block device.
- * \param ios_per_sec I/O per second limit.
+ * \param limits Pointer to the QoS rate limits array which holding the limits.
  * \param cb_fn Callback function to be called when the QoS limit has been updated.
  * \param cb_arg Argument to pass to cb_fn.
+ *
+ * The limits are ordered based on the @ref spdk_bdev_qos_rate_limit_type enum.
  */
-void spdk_bdev_set_qos_limit_iops(struct spdk_bdev *bdev, uint64_t ios_per_sec,
-				  void (*cb_fn)(void *cb_arg, int status), void *cb_arg);
+void spdk_bdev_set_qos_rate_limits(struct spdk_bdev *bdev, uint64_t *limits,
+				   void (*cb_fn)(void *cb_arg, int status), void *cb_arg);
 
 /**
  * Get minimum I/O buffer address alignment for a bdev.

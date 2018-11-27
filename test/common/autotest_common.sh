@@ -36,6 +36,7 @@ fi
 
 # Set defaults for missing test config options
 : ${SPDK_BUILD_DOC=1}; export SPDK_BUILD_DOC
+: ${SPDK_BUILD_SHARED_OBJECT=1}; export SPDK_BUILD_SHARED_OBJECT
 : ${SPDK_RUN_CHECK_FORMAT=1}; export SPDK_RUN_CHECK_FORMAT
 : ${SPDK_RUN_SCANBUILD=1}; export SPDK_RUN_SCANBUILD
 : ${SPDK_RUN_VALGRIND=1}; export SPDK_RUN_VALGRIND
@@ -54,8 +55,12 @@ fi
 : ${SPDK_TEST_VHOST_INIT=1}; export SPDK_TEST_VHOST_INIT
 : ${SPDK_TEST_PMDK=1}; export SPDK_TEST_PMDK
 : ${SPDK_TEST_LVOL=1}; export SPDK_TEST_LVOL
+: ${SPDK_TEST_JSON=1}; export SPDK_TEST_JSON
+: ${SPDK_TEST_REDUCE=1}; export SPDK_TEST_REDUCE
 : ${SPDK_RUN_ASAN=1}; export SPDK_RUN_ASAN
 : ${SPDK_RUN_UBSAN=1}; export SPDK_RUN_UBSAN
+: ${SPDK_RUN_INSTALLED_DPDK=1}; export SPDK_RUN_INSTALLED_DPDK
+: ${SPDK_TEST_CRYPTO=1}; export SPDK_TEST_CRYPTO
 
 if [ -z "$DEPENDENCY_DIR" ]; then
 	export DEPENDENCY_DIR=/home/sys_sgsw
@@ -76,13 +81,12 @@ config_params='--enable-debug --enable-werror'
 
 if echo -e "#include <libunwind.h>\nint main(int argc, char *argv[]) {return 0;}\n" | \
 	gcc -o /dev/null -lunwind -x c - 2>/dev/null; then
-	config_params+=' --enable-log-bt=ERROR'
+	config_params+=' --enable-log-bt'
 fi
 
-# RAID is marked experimental and not built by default currently, since it does not
-#  support iov (meaning vhost will not work).  But enable it in the build here, to make
-#  sure it gets built and run against a limited set of use cases for now.
-config_params+=' --with-raid'
+if [ $SPDK_TEST_CRYPTO -eq 1 ]; then
+	config_params+=' --with-crypto'
+fi
 
 export UBSAN_OPTIONS='halt_on_error=1:print_stacktrace=1:abort_on_error=1'
 
@@ -98,7 +102,7 @@ DEFAULT_RPC_ADDR=/var/tmp/spdk.sock
 case `uname` in
 	FreeBSD)
 		DPDK_FREEBSD_DIR=/usr/local/share/dpdk/x86_64-native-bsdapp-clang
-		if [ -d $DPDK_FREEBSD_DIR ]; then
+		if [ -d $DPDK_FREEBSD_DIR ] && [ $SPDK_RUN_INSTALLED_DPDK -eq 1 ]; then
 			WITH_DPDK_DIR=$DPDK_FREEBSD_DIR
 		fi
 		MAKE=gmake
@@ -107,8 +111,8 @@ case `uname` in
 		SPDK_RUN_UBSAN=0
 		;;
 	Linux)
-		DPDK_LINUX_DIR=/usr/local/share/dpdk/x86_64-native-linuxapp-gcc
-		if [ -d $DPDK_LINUX_DIR ]; then
+		DPDK_LINUX_DIR=/usr/share/dpdk/x86_64-default-linuxapp-gcc
+		if [ -d $DPDK_LINUX_DIR ] && [ $SPDK_RUN_INSTALLED_DPDK -eq 1 ]; then
 			WITH_DPDK_DIR=$DPDK_LINUX_DIR
 		fi
 		MAKE=make
@@ -147,6 +151,14 @@ if [ -f /usr/include/libpmemblk.h ]; then
 else
 	# PMDK not installed so disable PMDK tests explicitly here
 	SPDK_TEST_PMDK=0; export SPDK_TEST_PMDK
+fi
+
+if [ -f /usr/include/libpmem.h ]; then
+	config_params+=' --with-reduce'
+else
+	# PMDK not installed so disable any reduce tests explicitly here
+	#  since reduce depends on libpmem
+	SPDK_TEST_REDUCE=0; export SPDK_TEST_REDUCE
 fi
 
 if [ -d /usr/src/fio ]; then
@@ -262,6 +274,30 @@ function process_core() {
 	return $ret
 }
 
+function process_shm() {
+	type=$1
+	id=$2
+	if [ "$type" = "--pid" ]; then
+		id="pid${id}"
+	elif [ "$type" = "--id" ]; then
+		id="${id}"
+	else
+		echo "Please specify to search for pid or shared memory id."
+		return 1
+	fi
+
+	shm_files=$(find /dev/shm -name "*.${id}" -printf "%f\n")
+
+	if [[ -z $shm_files ]]; then
+		echo "SHM File for specified PID or shared memory id: ${id} not found!"
+		return 1
+	fi
+	for n in $shm_files; do
+		tar -C /dev/shm/ -cvzf $output_dir/${n}_shm.tar.gz ${n}
+	done
+	return 0
+}
+
 function waitforlisten() {
 	# $1 = process pid
 	if [ -z "$1" ]; then
@@ -287,12 +323,12 @@ function waitforlisten() {
 		fi
 
 		if hash ss; then
-			if $ns_cmd ss -lx | grep -q $rpc_addr; then
+			if $ns_cmd ss -ln | egrep -q "\s+$rpc_addr\s+"; then
 				ret=0
 			fi
 		else
 			# if system doesn't have ss, just assume it has netstat
-			if $ns_cmd netstat -an -x | grep -iw LISTENING | grep -q $rpc_addr; then
+			if $ns_cmd netstat -an | grep -iw LISTENING | egrep -q "\s+$rpc_addr\$"; then
 				ret=0
 			fi
 		fi
@@ -301,7 +337,8 @@ function waitforlisten() {
 }
 
 function waitfornbd() {
-	nbd_name=$1
+	local nbd_name=$1
+	local i
 
 	for ((i=1; i<=20; i++)); do
 		if grep -q -w $nbd_name /proc/partitions; then
@@ -336,9 +373,11 @@ function killprocess() {
 		exit 1
 	fi
 
-	echo "killing process with pid $1"
-	kill $1
-	wait $1
+	if kill -0 $1; then
+		echo "killing process with pid $1"
+		kill $1
+		wait $1
+	fi
 }
 
 function iscsicleanup() {
@@ -424,19 +463,24 @@ function kill_stub() {
 
 function run_test() {
 	set +x
+	local test_type="$(echo $1 | tr 'a-z' 'A-Z')"
+	shift
 	echo "************************************"
-	echo "START TEST $1"
+	echo "START TEST $test_type $@"
 	echo "************************************"
 	set -x
 	time "$@"
 	set +x
 	echo "************************************"
-	echo "END TEST $1"
+	echo "END TEST $test_type $@"
 	echo "************************************"
 	set -x
 }
 
 function print_backtrace() {
+	# if errexit is not enabled, don't print a backtrace
+	[[ "$-" =~ e ]] || return 0
+
 	local shell_options="$-"
 	set +x
 	echo "========== Backtrace start: =========="
@@ -484,7 +528,7 @@ function part_dev_by_gpt () {
 		waitforlisten $nbd_pid $rpc_server
 
 		# Start bdev as a nbd device
-		$rootdir/scripts/rpc.py -s "$rpc_server" start_nbd_disk $devname $nbd_path
+		nbd_start_disks "$rpc_server" $devname $nbd_path
 
 		waitfornbd ${nbd_path:5}
 
@@ -502,7 +546,7 @@ function part_dev_by_gpt () {
 			dd if=/dev/zero of=$nbd_path bs=4096 count=8 oflag=direct
 		fi
 
-		$rootdir/scripts/rpc.py -s "$rpc_server" stop_nbd_disk $nbd_path
+		nbd_stop_disks "$rpc_server" $nbd_path
 
 		killprocess $nbd_pid
 		rm -f ${conf}.gpt
@@ -524,7 +568,7 @@ function discover_bdevs()
 
 	# Start the bdev service to query for the list of available
 	# bdevs.
-	$rootdir/test/app/bdev_svc/bdev_svc -r $rpc_server -i 0 -s 1024 -g \
+	$rootdir/test/app/bdev_svc/bdev_svc -r $rpc_server -i 0 \
 		-c $config_file &>/dev/null &
 	stubpid=$!
 	while ! [ -e /var/run/spdk_bdev0 ]; do
@@ -643,14 +687,28 @@ function get_bdev_size()
 function autotest_cleanup()
 {
 	$rootdir/scripts/setup.sh reset
+	$rootdir/scripts/setup.sh cleanup
+	if [ $(uname -s) = "Linux" ]; then
+		if grep -q '#define SPDK_CONFIG_IGB_UIO_DRIVER 1' $rootdir/include/spdk/config.h; then
+			rmmod igb_uio
+		else
+			modprobe -r uio_pci_generic
+		fi
+	fi
 }
 
 function freebsd_update_contigmem_mod()
 {
 	if [ `uname` = FreeBSD ]; then
 		kldunload contigmem.ko || true
-		cp -f $rootdir/dpdk/build/kmod/contigmem.ko /boot/modules/
-		cp -f $rootdir/dpdk/build/kmod/contigmem.ko /boot/kernel/
+		if [ ! -z "$WITH_DPDK_DIR" ]; then
+			echo "Warning: SPDK only works on FreeBSD with patches that only exist in SPDK's dpdk submodule"
+			cp -f "$WITH_DPDK_DIR/kmod/contigmem.ko" /boot/modules/
+			cp -f "$WITH_DPDK_DIR/kmod/contigmem.ko" /boot/kernel/
+		else
+			cp -f "$rootdir/dpdk/build/kmod/contigmem.ko" /boot/modules/
+			cp -f "$rootdir/dpdk/build/kmod/contigmem.ko" /boot/kernel/
+		fi
 	fi
 }
 

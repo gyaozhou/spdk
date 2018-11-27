@@ -142,7 +142,7 @@ _spdk_nvmf_subsystem_add_ctrlr(void *ctx)
 		return;
 	}
 
-	spdk_thread_send_msg(qpair->group->thread, _spdk_nvmf_ctrlr_add_admin_qpair, req);
+	spdk_thread_send_msg(ctrlr->thread, _spdk_nvmf_ctrlr_add_admin_qpair, req);
 }
 
 static struct spdk_nvmf_ctrlr *
@@ -152,9 +152,7 @@ spdk_nvmf_ctrlr_create(struct spdk_nvmf_subsystem *subsystem,
 		       struct spdk_nvmf_fabric_connect_data *connect_data)
 {
 	struct spdk_nvmf_ctrlr	*ctrlr;
-	struct spdk_nvmf_tgt	*tgt;
-
-	tgt = subsystem->tgt;
+	struct spdk_nvmf_transport *transport;
 
 	ctrlr = calloc(1, sizeof(*ctrlr));
 	if (ctrlr == NULL) {
@@ -164,8 +162,10 @@ spdk_nvmf_ctrlr_create(struct spdk_nvmf_subsystem *subsystem,
 
 	req->qpair->ctrlr = ctrlr;
 	ctrlr->subsys = subsystem;
+	ctrlr->thread = req->qpair->group->thread;
 
-	ctrlr->qpair_mask = spdk_bit_array_create(tgt->opts.max_qpairs_per_ctrlr);
+	transport = req->qpair->transport;
+	ctrlr->qpair_mask = spdk_bit_array_create(transport->opts.max_qpairs_per_ctrlr);
 	if (!ctrlr->qpair_mask) {
 		SPDK_ERRLOG("Failed to allocate controller qpair mask\n");
 		free(ctrlr);
@@ -177,14 +177,17 @@ spdk_nvmf_ctrlr_create(struct spdk_nvmf_subsystem *subsystem,
 	ctrlr->feat.volatile_write_cache.bits.wce = 1;
 
 	/* Subtract 1 for admin queue, 1 for 0's based */
-	ctrlr->feat.number_of_queues.bits.ncqr = tgt->opts.max_qpairs_per_ctrlr - 1 - 1;
-	ctrlr->feat.number_of_queues.bits.nsqr = tgt->opts.max_qpairs_per_ctrlr - 1 - 1;
+	ctrlr->feat.number_of_queues.bits.ncqr = transport->opts.max_qpairs_per_ctrlr - 1 -
+			1;
+	ctrlr->feat.number_of_queues.bits.nsqr = transport->opts.max_qpairs_per_ctrlr - 1 -
+			1;
 
 	memcpy(ctrlr->hostid, connect_data->hostid, sizeof(ctrlr->hostid));
 
 	ctrlr->vcprop.cap.raw = 0;
 	ctrlr->vcprop.cap.bits.cqr = 1; /* NVMe-oF specification required */
-	ctrlr->vcprop.cap.bits.mqes = tgt->opts.max_queue_depth - 1; /* max queue depth */
+	ctrlr->vcprop.cap.bits.mqes = transport->opts.max_queue_depth -
+				      1; /* max queue depth */
 	ctrlr->vcprop.cap.bits.ams = 0; /* optional arb mechanisms */
 	ctrlr->vcprop.cap.bits.to = 1; /* ready timeout - 500 msec units */
 	ctrlr->vcprop.cap.bits.dstrd = 0; /* fixed to 0 for NVMe-oF */
@@ -308,6 +311,7 @@ spdk_nvmf_ctrlr_connect(struct spdk_nvmf_request *req)
 	struct spdk_nvmf_ctrlr *ctrlr;
 	struct spdk_nvmf_subsystem *subsystem;
 	const char *subnqn, *hostnqn;
+	struct spdk_nvme_transport_id listen_trid = {};
 	void *end;
 
 	if (req->length < sizeof(struct spdk_nvmf_fabric_connect_data)) {
@@ -371,18 +375,40 @@ spdk_nvmf_ctrlr_connect(struct spdk_nvmf_request *req)
 		return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
 	}
 
+	if (spdk_nvmf_qpair_get_listen_trid(qpair, &listen_trid)) {
+		SPDK_ERRLOG("Subsystem '%s' is unable to enforce access control due to an internal error.\n",
+			    subnqn);
+		rsp->status.sct = SPDK_NVME_SCT_COMMAND_SPECIFIC;
+		rsp->status.sc = SPDK_NVMF_FABRIC_SC_INVALID_HOST;
+		return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
+	}
+
+	if (!spdk_nvmf_subsystem_listener_allowed(subsystem, &listen_trid)) {
+		SPDK_ERRLOG("Subsystem '%s' does not allow host '%s' to connect at this address.\n", subnqn,
+			    hostnqn);
+		rsp->status.sct = SPDK_NVME_SCT_COMMAND_SPECIFIC;
+		rsp->status.sc = SPDK_NVMF_FABRIC_SC_INVALID_HOST;
+		return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
+	}
+
 	/*
 	 * SQSIZE is a 0-based value, so it must be at least 1 (minimum queue depth is 2) and
 	 *  strictly less than max_queue_depth.
 	 */
-	if (cmd->sqsize == 0 || cmd->sqsize >= tgt->opts.max_queue_depth) {
+	if (cmd->sqsize == 0 || cmd->sqsize >= qpair->transport->opts.max_queue_depth) {
 		SPDK_ERRLOG("Invalid SQSIZE %u (min 1, max %u)\n",
-			    cmd->sqsize, tgt->opts.max_queue_depth - 1);
+			    cmd->sqsize, qpair->transport->opts.max_queue_depth - 1);
 		SPDK_NVMF_INVALID_CONNECT_CMD(rsp, sqsize);
 		return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
 	}
 	qpair->sq_head_max = cmd->sqsize;
 	qpair->qid = cmd->qid;
+
+	if (spdk_nvmf_transport_qpair_set_sqsize(qpair)) {
+		SPDK_ERRLOG("Can not create SQSIZE %u for qpair=%p\n", cmd->sqsize, qpair);
+		rsp->status.sc = SPDK_NVME_SC_INTERNAL_DEVICE_ERROR;
+		return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
+	}
 
 	if (cmd->qid == 0) {
 		SPDK_DEBUGLOG(SPDK_LOG_NVMF, "Connect Admin Queue for controller ID 0x%x\n", data->cntlid);
@@ -776,6 +802,8 @@ spdk_nvmf_ctrlr_set_features_volatile_write_cache(struct spdk_nvmf_request *req)
 	ctrlr->feat.volatile_write_cache.raw = cmd->cdw11;
 	ctrlr->feat.volatile_write_cache.bits.reserved = 0;
 
+	SPDK_DEBUGLOG(SPDK_LOG_NVMF, "Set Features - Volatile Write Cache %s\n",
+		      ctrlr->feat.volatile_write_cache.bits.wce ? "Enabled" : "Disabled");
 	return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
 }
 
@@ -865,7 +893,7 @@ spdk_nvmf_ctrlr_set_features_number_of_queues(struct spdk_nvmf_request *req)
 		      req->cmd->nvme_cmd.cdw11);
 
 	count = spdk_bit_array_count_set(ctrlr->qpair_mask);
-	/* verify that the contoller is ready to process commands */
+	/* verify that the controller is ready to process commands */
 	if (count > 1) {
 		SPDK_DEBUGLOG(SPDK_LOG_NVMF, "Queue pairs already active!\n");
 		rsp->status.sc = SPDK_NVME_SC_COMMAND_SEQUENCE_ERROR;
@@ -1116,12 +1144,14 @@ invalid_log_page:
 }
 
 static int
-spdk_nvmf_ctrlr_identify_ns(struct spdk_nvmf_subsystem *subsystem,
+spdk_nvmf_ctrlr_identify_ns(struct spdk_nvmf_ctrlr *ctrlr,
 			    struct spdk_nvme_cmd *cmd,
 			    struct spdk_nvme_cpl *rsp,
 			    struct spdk_nvme_ns_data *nsdata)
 {
+	struct spdk_nvmf_subsystem *subsystem = ctrlr->subsys;
 	struct spdk_nvmf_ns *ns;
+	uint32_t max_num_blocks;
 
 	if (cmd->nsid == 0 || cmd->nsid > subsystem->max_nsid) {
 		SPDK_ERRLOG("Identify Namespace for invalid NSID %u\n", cmd->nsid);
@@ -1143,26 +1173,35 @@ spdk_nvmf_ctrlr_identify_ns(struct spdk_nvmf_subsystem *subsystem,
 		return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
 	}
 
-	return spdk_nvmf_bdev_ctrlr_identify_ns(ns, nsdata);
+	spdk_nvmf_bdev_ctrlr_identify_ns(ns, nsdata);
+
+	/* Due to bug in the Linux kernel NVMe driver we have to set noiob no larger than mdts */
+	max_num_blocks = ctrlr->admin_qpair->transport->opts.max_io_size /
+			 (1U << nsdata->lbaf[nsdata->flbas.format].lbads);
+	if (nsdata->noiob > max_num_blocks) {
+		nsdata->noiob = max_num_blocks;
+	}
+
+	return SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE;
 }
 
 static int
 spdk_nvmf_ctrlr_identify_ctrlr(struct spdk_nvmf_ctrlr *ctrlr, struct spdk_nvme_ctrlr_data *cdata)
 {
 	struct spdk_nvmf_subsystem *subsystem = ctrlr->subsys;
-	struct spdk_nvmf_tgt *tgt = subsystem->tgt;
+	struct spdk_nvmf_transport *transport = ctrlr->admin_qpair->transport;
 
 	/*
 	 * Common fields for discovery and NVM subsystems
 	 */
 	spdk_strcpy_pad(cdata->fr, FW_VERSION, sizeof(cdata->fr), ' ');
-	assert((tgt->opts.max_io_size % 4096) == 0);
-	cdata->mdts = spdk_u32log2(tgt->opts.max_io_size / 4096);
+	assert((transport->opts.max_io_size % 4096) == 0);
+	cdata->mdts = spdk_u32log2(transport->opts.max_io_size / 4096);
 	cdata->cntlid = ctrlr->cntlid;
 	cdata->ver = ctrlr->vcprop.vs;
 	cdata->lpa.edlp = 1;
 	cdata->elpe = 127;
-	cdata->maxcmd = tgt->opts.max_queue_depth;
+	cdata->maxcmd = transport->opts.max_queue_depth;
 	cdata->sgls.supported = 1;
 	cdata->sgls.keyed_sgl = 1;
 	cdata->sgls.sgl_offset = 1;
@@ -1205,7 +1244,7 @@ spdk_nvmf_ctrlr_identify_ctrlr(struct spdk_nvmf_ctrlr *ctrlr, struct spdk_nvme_c
 		cdata->nvmf_specific.msdbd = 1; /* target supports single SGL in capsule */
 
 		/* TODO: this should be set by the transport */
-		cdata->nvmf_specific.ioccsz += tgt->opts.in_capsule_data_size / 16;
+		cdata->nvmf_specific.ioccsz += transport->opts.in_capsule_data_size / 16;
 
 		cdata->oncs.dsm = spdk_nvmf_ctrlr_dsm_supported(ctrlr);
 		cdata->oncs.write_zeroes = spdk_nvmf_ctrlr_write_zeroes_supported(ctrlr);
@@ -1348,7 +1387,7 @@ spdk_nvmf_ctrlr_identify(struct spdk_nvmf_request *req)
 
 	switch (cns) {
 	case SPDK_NVME_IDENTIFY_NS:
-		return spdk_nvmf_ctrlr_identify_ns(subsystem, cmd, rsp, req->data);
+		return spdk_nvmf_ctrlr_identify_ns(ctrlr, cmd, rsp, req->data);
 	case SPDK_NVME_IDENTIFY_CTRLR:
 		return spdk_nvmf_ctrlr_identify_ctrlr(ctrlr, req->data);
 	case SPDK_NVME_IDENTIFY_ACTIVE_NS_LIST:

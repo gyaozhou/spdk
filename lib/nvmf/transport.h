@@ -42,6 +42,7 @@
 struct spdk_nvmf_transport {
 	struct spdk_nvmf_tgt			*tgt;
 	const struct spdk_nvmf_transport_ops	*ops;
+	struct spdk_nvmf_transport_opts		opts;
 
 	TAILQ_ENTRY(spdk_nvmf_transport)	link;
 };
@@ -53,9 +54,14 @@ struct spdk_nvmf_transport_ops {
 	enum spdk_nvme_transport_type type;
 
 	/**
-	 * Create a transport for the given target
+	 * Initialize transport options to default value
 	 */
-	struct spdk_nvmf_transport *(*create)(struct spdk_nvmf_tgt *tgt);
+	void (*opts_init)(struct spdk_nvmf_transport_opts *opts);
+
+	/**
+	 * Create a transport for the given transport opts
+	 */
+	struct spdk_nvmf_transport *(*create)(struct spdk_nvmf_transport_opts *opts);
 
 	/**
 	 * Destroy the transport
@@ -129,14 +135,31 @@ struct spdk_nvmf_transport_ops {
 	 * True if the qpair has no pending IO.
 	 */
 	bool (*qpair_is_idle)(struct spdk_nvmf_qpair *qpair);
+
+	/*
+	 * Get the peer transport ID for the queue pair.
+	 */
+	int (*qpair_get_peer_trid)(struct spdk_nvmf_qpair *qpair,
+				   struct spdk_nvme_transport_id *trid);
+
+	/*
+	 * Get the local transport ID for the queue pair.
+	 */
+	int (*qpair_get_local_trid)(struct spdk_nvmf_qpair *qpair,
+				    struct spdk_nvme_transport_id *trid);
+
+	/*
+	 * Get the listener transport ID that accepted this qpair originally.
+	 */
+	int (*qpair_get_listen_trid)(struct spdk_nvmf_qpair *qpair,
+				     struct spdk_nvme_transport_id *trid);
+
+	/*
+	 * set the submission queue size of the queue pair
+	 */
+	int (*qpair_set_sqsize)(struct spdk_nvmf_qpair *qpair);
 };
 
-struct spdk_nvmf_transport *spdk_nvmf_transport_create(struct spdk_nvmf_tgt *tgt,
-		enum spdk_nvme_transport_type type);
-int spdk_nvmf_transport_destroy(struct spdk_nvmf_transport *transport);
-
-int spdk_nvmf_transport_listen(struct spdk_nvmf_transport *transport,
-			       const struct spdk_nvme_transport_id *trid);
 
 int spdk_nvmf_transport_stop_listen(struct spdk_nvmf_transport *transport,
 				    const struct spdk_nvme_transport_id *trid);
@@ -165,6 +188,20 @@ void spdk_nvmf_transport_qpair_fini(struct spdk_nvmf_qpair *qpair);
 
 bool spdk_nvmf_transport_qpair_is_idle(struct spdk_nvmf_qpair *qpair);
 
+int spdk_nvmf_transport_qpair_get_peer_trid(struct spdk_nvmf_qpair *qpair,
+		struct spdk_nvme_transport_id *trid);
+
+int spdk_nvmf_transport_qpair_get_local_trid(struct spdk_nvmf_qpair *qpair,
+		struct spdk_nvme_transport_id *trid);
+
+int spdk_nvmf_transport_qpair_get_listen_trid(struct spdk_nvmf_qpair *qpair,
+		struct spdk_nvme_transport_id *trid);
+int spdk_nvmf_transport_qpair_set_sqsize(struct spdk_nvmf_qpair *qpair);
+
+bool spdk_nvmf_transport_opts_init(enum spdk_nvme_transport_type type,
+				   struct spdk_nvmf_transport_opts *opts);
+
 extern const struct spdk_nvmf_transport_ops spdk_nvmf_transport_rdma;
+extern const struct spdk_nvmf_transport_ops spdk_nvmf_transport_tcp;
 
 #endif /* SPDK_NVMF_TRANSPORT_H */

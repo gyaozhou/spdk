@@ -792,6 +792,11 @@ spdk_check_iscsi_name(const char *name)
 	const unsigned char *up = (const unsigned char *) name;
 	size_t n;
 
+	/* valid iSCSI name no larger than 223 bytes */
+	if (strlen(name) > MAX_TARGET_NAME) {
+		return -1;
+	}
+
 	/* valid iSCSI name? */
 	for (n = 0; up[n] != 0; n++) {
 		if (up[n] > 0x00U && up[n] <= 0x2cU) {
@@ -1328,6 +1333,26 @@ spdk_iscsi_tgt_node_add_lun(struct spdk_iscsi_tgt_node *target,
 		SPDK_ERRLOG("spdk_scsi_dev_add_lun failed\n");
 		return -1;
 	}
+
+	return 0;
+}
+
+int
+spdk_iscsi_tgt_node_set_chap_params(struct spdk_iscsi_tgt_node *target,
+				    bool disable_chap, bool require_chap,
+				    bool mutual_chap, int32_t chap_group)
+{
+	if (!spdk_iscsi_check_chap_params(disable_chap, require_chap,
+					  mutual_chap, chap_group)) {
+		return -EINVAL;
+	}
+
+	pthread_mutex_lock(&target->mutex);
+	target->disable_chap = disable_chap;
+	target->require_chap = require_chap;
+	target->mutual_chap = mutual_chap;
+	target->chap_group = chap_group;
+	pthread_mutex_unlock(&target->mutex);
 
 	return 0;
 }

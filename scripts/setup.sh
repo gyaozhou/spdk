@@ -49,6 +49,9 @@ function usage()
 	echo "                  If empty or unset, all PCI devices will be bound."
 	echo "TARGET_USER       User that will own hugepage mountpoint directory and vfio groups."
 	echo "                  By default the current user will be used."
+	echo "DRIVER_OVERRIDE   Disable automatic vfio-pci/uio_pci_generic selection and forcefully"
+	echo "                  bind devices to the given driver."
+	echo "                  E.g. DRIVER_OVERRIDE=uio_pci_generic or DRIVER_OVERRIDE=vfio-pci"
 	exit 0
 }
 
@@ -164,14 +167,18 @@ function get_virtio_names_from_bdf {
 }
 
 function configure_linux_pci {
-	driver_name=vfio-pci
-	if [ -z "$(ls /sys/kernel/iommu_groups)" ]; then
-		# No IOMMU. Use uio.
-		driver_name=uio_pci_generic
+	if [ -z "${DRIVER_OVERRIDE}" ]; then
+		driver_name=vfio-pci
+		if [ -z "$(ls /sys/kernel/iommu_groups)" ]; then
+			# No IOMMU. Use uio.
+			driver_name=uio_pci_generic
+		fi
+	else
+		driver_name="${DRIVER_OVERRIDE}"
 	fi
 
 	# NVMe
-	modprobe $driver_name || true
+	modprobe $driver_name
 	for bdf in $(iter_pci_class_code 01 08 02); do
 		blkname=''
 		get_nvme_name_from_bdf "$bdf" blkname
@@ -203,6 +210,7 @@ function configure_linux_pci {
 				echo "Skipping un-whitelisted I/OAT device at $bdf"
 				continue
 			fi
+
 			linux_bind_driver "$bdf" "$driver_name"
 		done
 	done
@@ -238,7 +246,20 @@ function configure_linux_pci {
 }
 
 function cleanup_linux {
-	files_to_clean="$(echo /dev/shm/* | egrep '(spdk_tgt|iscsi|vhost|nvmf|rocksdb|bdevtest)_trace|spdk_iscsi_conns' || true)"
+	shopt -s extglob nullglob
+	dirs_to_clean=""
+	dirs_to_clean="$(echo {/var/run,/tmp}/dpdk/spdk{,_pid}+([0-9])) "
+	if [[ -d $XDG_RUNTIME_DIR && $XDG_RUNTIME_DIR != *" "* ]]; then
+		dirs_to_clean+="$(readlink -e assert_not_empty $XDG_RUNTIME_DIR/dpdk/spdk{,_pid}+([0-9]) || true) "
+	fi
+
+	files_to_clean=""
+	for dir in $dirs_to_clean; do
+		files_to_clean+="$(echo $dir/*) "
+	done
+	shopt -u extglob nullglob
+
+	files_to_clean+="$(echo /dev/shm/* | egrep '(spdk_tgt|iscsi|vhost|nvmf|rocksdb|bdevtest|bdevperf)_trace|spdk_iscsi_conns' || true) "
 	files_to_clean="$(readlink -e assert_not_empty $files_to_clean || true)"
 	if [[ -z "$files_to_clean" ]]; then
 		echo "Clean"
@@ -265,9 +286,18 @@ function cleanup_linux {
 			echo "Still open: $f"
 		fi
 	done
+
+	for dir in $dirs_to_clean; do
+	if ! echo "$opened_files" | egrep -q "^$dir\$"; then
+		echo "Removing:    $dir"
+		rmdir $dir
+	else
+		echo "Still open: $dir"
+	fi
+	done
 	echo "Clean"
 
-	unset files_to_clean opened_files
+	unset dirs_to_clean files_to_clean opened_files
 }
 
 function configure_linux {
@@ -570,6 +600,10 @@ else
 		configure_freebsd
 	elif [ "$mode" == "reset" ]; then
 		reset_freebsd
+	elif [ "$mode" == "cleanup" ]; then
+		echo "setup.sh cleanup function not yet supported on $(uname)"
+	elif [ "$mode" == "status" ]; then
+		echo "setup.sh status function not yet supported on $(uname)"
 	elif [ "$mode" == "help" ]; then
 		usage $0
 	else

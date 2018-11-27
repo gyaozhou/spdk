@@ -78,6 +78,9 @@ struct nbd_io {
 	 */
 	uint32_t		offset;
 
+	/* for bdev io_wait */
+	struct spdk_bdev_io_wait_entry bdev_io_wait;
+
 	TAILQ_ENTRY(nbd_io)	tailq;
 };
 
@@ -116,6 +119,9 @@ struct spdk_nbd_disk_globals {
 };
 
 static struct spdk_nbd_disk_globals g_spdk_nbd;
+
+static int
+nbd_submit_bdev_io(struct spdk_nbd_disk *nbd, struct nbd_io *io);
 
 int
 spdk_nbd_init(void)
@@ -211,7 +217,7 @@ spdk_nbd_disk_get_bdev_name(struct spdk_nbd_disk *nbd)
 }
 
 void
-spdk_nbd_write_config_json(struct spdk_json_write_ctx *w, struct spdk_event *done_ev)
+spdk_nbd_write_config_json(struct spdk_json_write_ctx *w)
 {
 	struct spdk_nbd_disk *nbd;
 
@@ -231,7 +237,6 @@ spdk_nbd_write_config_json(struct spdk_json_write_ctx *w, struct spdk_event *don
 	}
 
 	spdk_json_write_array_end(w);
-	spdk_event_call(done_ev);
 }
 
 void
@@ -452,6 +457,37 @@ nbd_io_done(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
 	}
 }
 
+static void
+nbd_resubmit_io(void *arg)
+{
+	struct nbd_io *io = (struct nbd_io *)arg;
+	struct spdk_nbd_disk *nbd = io->nbd;
+	int rc = 0;
+
+	rc = nbd_submit_bdev_io(nbd, io);
+	if (rc) {
+		SPDK_INFOLOG(SPDK_LOG_NBD, "nbd: io resubmit for dev %s , io_type %d, returned %d.\n",
+			     spdk_nbd_disk_get_bdev_name(nbd), from_be32(&io->req.type), rc);
+	}
+}
+
+static void
+nbd_queue_io(struct nbd_io *io)
+{
+	int rc;
+	struct spdk_bdev *bdev = io->nbd->bdev;
+
+	io->bdev_io_wait.bdev = bdev;
+	io->bdev_io_wait.cb_fn = nbd_resubmit_io;
+	io->bdev_io_wait.cb_arg = io;
+
+	rc = spdk_bdev_queue_io_wait(bdev, io->nbd->ch, &io->bdev_io_wait);
+	if (rc != 0) {
+		SPDK_ERRLOG("Queue io failed in nbd_queue_io, rc=%d.\n", rc);
+		nbd_io_done(NULL, false, io);
+	}
+}
+
 static int
 nbd_submit_bdev_io(struct spdk_nbd_disk *nbd, struct nbd_io *io)
 {
@@ -490,7 +526,13 @@ nbd_submit_bdev_io(struct spdk_nbd_disk *nbd, struct nbd_io *io)
 	}
 
 	if (rc < 0) {
-		nbd_io_done(NULL, false, io);
+		if (rc == -ENOMEM) {
+			SPDK_INFOLOG(SPDK_LOG_NBD, "No memory, start to queue io.\n");
+			nbd_queue_io(io);
+		} else {
+			SPDK_ERRLOG("nbd io failed in nbd_queue_io, rc=%d.\n", rc);
+			nbd_io_done(NULL, false, io);
+		}
 	}
 
 	return 0;
@@ -650,13 +692,19 @@ spdk_nbd_io_xmit_internal(struct spdk_nbd_disk *nbd)
 		return 0;
 	}
 
+	/* Remove IO from list now assuming it will be completed.  It will be inserted
+	 *  back to the head if it cannot be completed.  This approach is specifically
+	 *  taken to work around a scan-build use-after-free mischaracterization.
+	 */
+	TAILQ_REMOVE(&nbd->executed_io_list, io, tailq);
+
 	/* resp error and handler are already set in io_done */
 
 	if (io->state == NBD_IO_XMIT_RESP) {
 		ret = write_to_socket(nbd->spdk_sp_fd, (char *)&io->resp + io->offset,
 				      sizeof(io->resp) - io->offset);
 		if (ret <= 0) {
-			return ret;
+			goto reinsert;
 		}
 
 		io->offset += ret;
@@ -667,7 +715,6 @@ spdk_nbd_io_xmit_internal(struct spdk_nbd_disk *nbd)
 
 			/* transmit payload only when NBD_CMD_READ with no resp error */
 			if (from_be32(&io->req.type) != NBD_CMD_READ || io->resp.error != 0) {
-				TAILQ_REMOVE(&nbd->executed_io_list, io, tailq);
 				spdk_put_nbd_io(nbd, io);
 				return 0;
 			} else {
@@ -679,19 +726,21 @@ spdk_nbd_io_xmit_internal(struct spdk_nbd_disk *nbd)
 	if (io->state == NBD_IO_XMIT_PAYLOAD) {
 		ret = write_to_socket(nbd->spdk_sp_fd, io->payload + io->offset, io->payload_size - io->offset);
 		if (ret <= 0) {
-			return ret;
+			goto reinsert;
 		}
 
 		io->offset += ret;
 
 		/* read payload is fully transmitted */
 		if (io->offset == io->payload_size) {
-			TAILQ_REMOVE(&nbd->executed_io_list, io, tailq);
 			spdk_put_nbd_io(nbd, io);
+			return 0;
 		}
 	}
 
-	return 0;
+reinsert:
+	TAILQ_INSERT_HEAD(&nbd->executed_io_list, io, tailq);
+	return ret;
 }
 
 static int
@@ -788,30 +837,143 @@ spdk_nbd_bdev_hot_remove(void *remove_ctx)
 	spdk_nbd_stop(nbd);
 }
 
-struct spdk_nbd_disk *
-spdk_nbd_start(const char *bdev_name, const char *nbd_path)
-{
+struct spdk_nbd_start_ctx {
 	struct spdk_nbd_disk	*nbd;
-	struct spdk_bdev	*bdev;
-	pthread_t		tid;
-	int			rc;
-	int			sp[2];
-	int			flag;
+	spdk_nbd_start_cb	cb_fn;
+	void			*cb_arg;
+	struct spdk_poller	*poller;
+};
+
+static void
+spdk_nbd_start_complete(struct spdk_nbd_start_ctx *ctx)
+{
+	int		rc;
+	pthread_t	tid;
+	int		flag;
+
+#ifdef NBD_FLAG_SEND_TRIM
+	rc = ioctl(ctx->nbd->dev_fd, NBD_SET_FLAGS, NBD_FLAG_SEND_TRIM);
+	if (rc == -1) {
+		SPDK_ERRLOG("ioctl(NBD_SET_FLAGS) failed: %s\n", spdk_strerror(errno));
+		rc = -errno;
+		goto err;
+	}
+#endif
+
+	rc = pthread_create(&tid, NULL, nbd_start_kernel, (void *)(intptr_t)ctx->nbd->dev_fd);
+	if (rc != 0) {
+		SPDK_ERRLOG("could not create thread: %s\n", spdk_strerror(rc));
+		goto err;
+	}
+
+	rc = pthread_detach(tid);
+	if (rc != 0) {
+		SPDK_ERRLOG("could not detach thread for nbd kernel: %s\n", spdk_strerror(rc));
+		goto err;
+	}
+
+	flag = fcntl(ctx->nbd->spdk_sp_fd, F_GETFL);
+	if (fcntl(ctx->nbd->spdk_sp_fd, F_SETFL, flag | O_NONBLOCK) < 0) {
+		SPDK_ERRLOG("fcntl can't set nonblocking mode for socket, fd: %d (%s)\n",
+			    ctx->nbd->spdk_sp_fd, spdk_strerror(errno));
+		rc = -errno;
+		goto err;
+	}
+
+	ctx->nbd->nbd_poller = spdk_poller_register(spdk_nbd_poll, ctx->nbd, 0);
+
+	if (ctx->cb_fn) {
+		ctx->cb_fn(ctx->cb_arg, ctx->nbd, 0);
+	}
+
+	free(ctx);
+	return;
+
+err:
+	spdk_nbd_stop(ctx->nbd);
+	if (ctx->cb_fn) {
+		ctx->cb_fn(ctx->cb_arg, NULL, rc);
+	}
+	free(ctx);
+}
+
+static int
+spdk_nbd_enable_kernel(void *arg)
+{
+	struct spdk_nbd_start_ctx *ctx = arg;
+	int rc;
+
+	rc = ioctl(ctx->nbd->dev_fd, NBD_SET_SOCK, ctx->nbd->kernel_sp_fd);
+	if (rc == -1) {
+		if (errno == EBUSY) {
+			if (ctx->poller == NULL) {
+				ctx->poller = spdk_poller_register(spdk_nbd_enable_kernel, ctx, 20000);
+			}
+			/* If the kernel is busy, check back later */
+			return 0;
+		}
+
+
+		SPDK_ERRLOG("ioctl(NBD_SET_SOCK) failed: %s\n", spdk_strerror(errno));
+		if (ctx->poller) {
+			spdk_poller_unregister(&ctx->poller);
+		}
+
+		spdk_nbd_stop(ctx->nbd);
+
+		if (ctx->cb_fn) {
+			ctx->cb_fn(ctx->cb_arg, NULL, -errno);
+		}
+
+		free(ctx);
+		return 1;
+	}
+
+	if (ctx->poller) {
+		spdk_poller_unregister(&ctx->poller);
+	}
+
+	spdk_nbd_start_complete(ctx);
+
+	return 1;
+}
+
+void
+spdk_nbd_start(const char *bdev_name, const char *nbd_path,
+	       spdk_nbd_start_cb cb_fn, void *cb_arg)
+{
+	struct spdk_nbd_start_ctx	*ctx = NULL;
+	struct spdk_nbd_disk		*nbd = NULL;
+	struct spdk_bdev		*bdev;
+	int				rc;
+	int				sp[2];
 
 	bdev = spdk_bdev_get_by_name(bdev_name);
 	if (bdev == NULL) {
 		SPDK_ERRLOG("no bdev %s exists\n", bdev_name);
-		return NULL;
+		rc = -EINVAL;
+		goto err;
 	}
 
 	nbd = calloc(1, sizeof(*nbd));
 	if (nbd == NULL) {
-		return NULL;
+		rc = -ENOMEM;
+		goto err;
 	}
 
 	nbd->dev_fd = -1;
 	nbd->spdk_sp_fd = -1;
 	nbd->kernel_sp_fd = -1;
+
+	ctx = calloc(1, sizeof(*ctx));
+	if (ctx == NULL) {
+		rc = -ENOMEM;
+		goto err;
+	}
+
+	ctx->nbd = nbd;
+	ctx->cb_fn = cb_fn;
+	ctx->cb_arg = cb_arg;
 
 	rc = spdk_bdev_open(bdev, true, spdk_nbd_bdev_hot_remove, nbd, &nbd->bdev_desc);
 	if (rc != 0) {
@@ -835,6 +997,7 @@ spdk_nbd_start(const char *bdev_name, const char *nbd_path)
 	nbd->nbd_path = strdup(nbd_path);
 	if (!nbd->nbd_path) {
 		SPDK_ERRLOG("strdup allocation failure\n");
+		rc = -ENOMEM;
 		goto err;
 	}
 
@@ -850,71 +1013,52 @@ spdk_nbd_start(const char *bdev_name, const char *nbd_path)
 	nbd->dev_fd = open(nbd_path, O_RDWR);
 	if (nbd->dev_fd == -1) {
 		SPDK_ERRLOG("open(\"%s\") failed: %s\n", nbd_path, spdk_strerror(errno));
+		rc = -errno;
 		goto err;
 	}
 
 	rc = ioctl(nbd->dev_fd, NBD_SET_BLKSIZE, spdk_bdev_get_block_size(bdev));
 	if (rc == -1) {
 		SPDK_ERRLOG("ioctl(NBD_SET_BLKSIZE) failed: %s\n", spdk_strerror(errno));
+		rc = -errno;
 		goto err;
 	}
 
 	rc = ioctl(nbd->dev_fd, NBD_SET_SIZE_BLOCKS, spdk_bdev_get_num_blocks(bdev));
 	if (rc == -1) {
 		SPDK_ERRLOG("ioctl(NBD_SET_SIZE_BLOCKS) failed: %s\n", spdk_strerror(errno));
+		rc = -errno;
 		goto err;
 	}
 
 	rc = ioctl(nbd->dev_fd, NBD_CLEAR_SOCK);
 	if (rc == -1) {
 		SPDK_ERRLOG("ioctl(NBD_CLEAR_SOCK) failed: %s\n", spdk_strerror(errno));
+		rc = -errno;
 		goto err;
 	}
 
 	SPDK_INFOLOG(SPDK_LOG_NBD, "Enabling kernel access to bdev %s via %s\n",
 		     spdk_bdev_get_name(bdev), nbd_path);
 
-	rc = ioctl(nbd->dev_fd, NBD_SET_SOCK, nbd->kernel_sp_fd);
-	if (rc == -1) {
-		SPDK_ERRLOG("ioctl(NBD_SET_SOCK) failed: %s\n", spdk_strerror(errno));
-		goto err;
-	}
-
-#ifdef NBD_FLAG_SEND_TRIM
-	rc = ioctl(nbd->dev_fd, NBD_SET_FLAGS, NBD_FLAG_SEND_TRIM);
-	if (rc == -1) {
-		SPDK_ERRLOG("ioctl(NBD_SET_FLAGS) failed: %s\n", spdk_strerror(errno));
-		goto err;
-	}
-#endif
-
-	rc = pthread_create(&tid, NULL, nbd_start_kernel, (void *)(intptr_t)nbd->dev_fd);
-	if (rc != 0) {
-		SPDK_ERRLOG("could not create thread: %s\n", spdk_strerror(rc));
-		goto err;
-	}
-
-	rc = pthread_detach(tid);
-	if (rc != 0) {
-		SPDK_ERRLOG("could not detach thread for nbd kernel: %s\n", spdk_strerror(rc));
-		goto err;
-	}
-
-	flag = fcntl(nbd->spdk_sp_fd, F_GETFL);
-	if (fcntl(nbd->spdk_sp_fd, F_SETFL, flag | O_NONBLOCK) < 0) {
-		SPDK_ERRLOG("fcntl can't set nonblocking mode for socket, fd: %d (%s)\n",
-			    nbd->spdk_sp_fd, spdk_strerror(errno));
-		goto err;
-	}
-
-	nbd->nbd_poller = spdk_poller_register(spdk_nbd_poll, nbd, 0);
-
-	return nbd;
+	spdk_nbd_enable_kernel(ctx);
+	return;
 
 err:
-	spdk_nbd_stop(nbd);
+	free(ctx);
+	if (nbd) {
+		spdk_nbd_stop(nbd);
+	}
 
-	return NULL;
+	if (cb_fn) {
+		cb_fn(cb_arg, NULL, rc);
+	}
+}
+
+const char *
+spdk_nbd_get_path(struct spdk_nbd_disk *nbd)
+{
+	return nbd->nbd_path;
 }
 
 SPDK_LOG_REGISTER_COMPONENT("nbd", SPDK_LOG_NBD)

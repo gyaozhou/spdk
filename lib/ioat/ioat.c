@@ -350,7 +350,7 @@ ioat_process_channel_events(struct spdk_ioat_chan *ioat)
 	return 0;
 }
 
-static int
+static void
 ioat_channel_destruct(struct spdk_ioat_chan *ioat)
 {
 	ioat_unmap_pci_bar(ioat);
@@ -367,8 +367,6 @@ ioat_channel_destruct(struct spdk_ioat_chan *ioat)
 		spdk_dma_free((void *)ioat->comp_update);
 		ioat->comp_update = NULL;
 	}
-
-	return 0;
 }
 
 static int
@@ -568,7 +566,7 @@ spdk_ioat_probe(void *cb_ctx, spdk_ioat_probe_cb probe_cb, spdk_ioat_attach_cb a
 	return rc;
 }
 
-int
+void
 spdk_ioat_detach(struct spdk_ioat_chan *ioat)
 {
 	struct ioat_driver	*driver = &g_ioat_driver;
@@ -582,8 +580,6 @@ spdk_ioat_detach(struct spdk_ioat_chan *ioat)
 
 	ioat_channel_destruct(ioat);
 	free(ioat);
-
-	return 0;
 }
 
 #define _2MB_PAGE(ptr)		((ptr) & ~(0x200000 - 1))

@@ -103,7 +103,6 @@ static struct vfio_cfg g_vfio = {
 struct spdk_vtophys_pci_device {
 	struct rte_pci_device *pci_device;
 	TAILQ_ENTRY(spdk_vtophys_pci_device) tailq;
-	uint64_t ref;
 };
 
 static pthread_mutex_t g_vtophys_pci_devices_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -389,7 +388,7 @@ spdk_vtophys_notify(void *cb_ctx, struct spdk_mem_map *map,
 					}
 				}
 			}
-			/* Since PCI paddr can break the 2MiB physical alginment skip this check for that. */
+			/* Since PCI paddr can break the 2MiB physical alignment skip this check for that. */
 			if (!pci_phys && (paddr & MASK_2MB)) {
 				DEBUG_PRINT("invalid paddr 0x%" PRIx64 " - must be 2MB aligned\n", paddr);
 				return -EINVAL;
@@ -405,7 +404,11 @@ spdk_vtophys_notify(void *cb_ctx, struct spdk_mem_map *map,
 				 * we need to unmap the range from the IOMMU
 				 */
 				if (g_vfio.enabled) {
-					paddr = spdk_mem_map_translate(map, (uint64_t)vaddr, VALUE_2MB);
+					uint64_t buffer_len;
+					paddr = spdk_mem_map_translate(map, (uint64_t)vaddr, &buffer_len);
+					if (buffer_len != VALUE_2MB) {
+						return -EINVAL;
+					}
 					rc = vtophys_iommu_unmap_dma(paddr, VALUE_2MB);
 					if (rc) {
 						return -EFAULT;
@@ -441,6 +444,27 @@ spdk_vfio_enabled(void)
 #endif
 }
 
+/* Check if IOMMU is enabled on the system */
+static bool
+has_iommu_groups(void)
+{
+	struct dirent *d;
+	int count = 0;
+	DIR *dir = opendir("/sys/kernel/iommu_groups");
+
+	if (dir == NULL) {
+		return false;
+	}
+
+	while (count < 3 && (d = readdir(dir)) != NULL) {
+		count++;
+	}
+
+	closedir(dir);
+	/* there will always be ./ and ../ entries */
+	return count > 2;
+}
+
 static void
 spdk_vtophys_iommu_init(void)
 {
@@ -450,7 +474,7 @@ spdk_vtophys_iommu_init(void)
 	DIR *dir;
 	struct dirent *d;
 
-	if (!spdk_vfio_enabled()) {
+	if (!spdk_vfio_enabled() || !has_iommu_groups()) {
 		return;
 	}
 
@@ -493,26 +517,15 @@ void
 spdk_vtophys_pci_device_added(struct rte_pci_device *pci_device)
 {
 	struct spdk_vtophys_pci_device *vtophys_dev;
-	bool found = false;
 
 	pthread_mutex_lock(&g_vtophys_pci_devices_mutex);
-	TAILQ_FOREACH(vtophys_dev, &g_vtophys_pci_devices, tailq) {
-		if (vtophys_dev->pci_device == pci_device) {
-			vtophys_dev->ref++;
-			found = true;
-			break;
-		}
-	}
 
-	if (!found) {
-		vtophys_dev = calloc(1, sizeof(*vtophys_dev));
-		if (vtophys_dev) {
-			vtophys_dev->pci_device = pci_device;
-			vtophys_dev->ref = 1;
-			TAILQ_INSERT_TAIL(&g_vtophys_pci_devices, vtophys_dev, tailq);
-		} else {
-			DEBUG_PRINT("Memory allocation error\n");
-		}
+	vtophys_dev = calloc(1, sizeof(*vtophys_dev));
+	if (vtophys_dev) {
+		vtophys_dev->pci_device = pci_device;
+		TAILQ_INSERT_TAIL(&g_vtophys_pci_devices, vtophys_dev, tailq);
+	} else {
+		DEBUG_PRINT("Memory allocation error\n");
 	}
 	pthread_mutex_unlock(&g_vtophys_pci_devices_mutex);
 
@@ -554,11 +567,8 @@ spdk_vtophys_pci_device_removed(struct rte_pci_device *pci_device)
 	pthread_mutex_lock(&g_vtophys_pci_devices_mutex);
 	TAILQ_FOREACH(vtophys_dev, &g_vtophys_pci_devices, tailq) {
 		if (vtophys_dev->pci_device == pci_device) {
-			assert(vtophys_dev->ref > 0);
-			if (--vtophys_dev->ref == 0) {
-				TAILQ_REMOVE(&g_vtophys_pci_devices, vtophys_dev, tailq);
-				free(vtophys_dev);
-			}
+			TAILQ_REMOVE(&g_vtophys_pci_devices, vtophys_dev, tailq);
+			free(vtophys_dev);
 			break;
 		}
 	}
@@ -600,11 +610,16 @@ spdk_vtophys_pci_device_removed(struct rte_pci_device *pci_device)
 int
 spdk_vtophys_init(void)
 {
+	const struct spdk_mem_map_ops vtophys_map_ops = {
+		.notify_cb = spdk_vtophys_notify,
+		.are_contiguous = NULL
+	};
+
 #if SPDK_VFIO_ENABLED
 	spdk_vtophys_iommu_init();
 #endif
 
-	g_vtophys_map = spdk_mem_map_alloc(SPDK_VTOPHYS_ERROR, spdk_vtophys_notify, NULL);
+	g_vtophys_map = spdk_mem_map_alloc(SPDK_VTOPHYS_ERROR, &vtophys_map_ops, NULL);
 	if (g_vtophys_map == NULL) {
 		DEBUG_PRINT("vtophys map allocation failed\n");
 		return -1;
@@ -619,7 +634,7 @@ spdk_vtophys(void *buf)
 
 	vaddr = (uint64_t)buf;
 
-	paddr_2mb = spdk_mem_map_translate(g_vtophys_map, vaddr, VALUE_2MB);
+	paddr_2mb = spdk_mem_map_translate(g_vtophys_map, vaddr, NULL);
 
 	/*
 	 * SPDK_VTOPHYS_ERROR has all bits set, so if the lookup returned SPDK_VTOPHYS_ERROR,
@@ -634,3 +649,49 @@ spdk_vtophys(void *buf)
 		return paddr_2mb + ((uint64_t)buf & MASK_2MB);
 	}
 }
+
+static int
+spdk_bus_scan(void)
+{
+	return 0;
+}
+
+static int
+spdk_bus_probe(void)
+{
+	return 0;
+}
+
+static struct rte_device *
+spdk_bus_find_device(const struct rte_device *start,
+		     rte_dev_cmp_t cmp, const void *data)
+{
+	return NULL;
+}
+
+#if RTE_VERSION >= RTE_VERSION_NUM(17, 11, 0, 3)
+static enum rte_iova_mode
+spdk_bus_get_iommu_class(void) {
+	/* Since we register our PCI drivers after EAL init, we have no chance
+	 * of switching into RTE_IOVA_VA (virtual addresses as iova) iommu
+	 * class. DPDK uses RTE_IOVA_PA by default because for some platforms
+	 * it's the only supported mode, but then SPDK does not support those
+	 * platforms and doesn't mind defaulting to RTE_IOVA_VA. The rte_pci bus
+	 * will force RTE_IOVA_PA if RTE_IOVA_VA simply can not be used
+	 * (i.e. at least one device on the system is bound to uio_pci_generic),
+	 * so we simply return RTE_IOVA_VA here.
+	 */
+	return RTE_IOVA_VA;
+}
+#endif
+
+struct rte_bus spdk_bus = {
+	.scan = spdk_bus_scan,
+	.probe = spdk_bus_probe,
+	.find_device = spdk_bus_find_device,
+#if RTE_VERSION >= RTE_VERSION_NUM(17, 11, 0, 3)
+	.get_iommu_class = spdk_bus_get_iommu_class,
+#endif
+};
+
+RTE_REGISTER_BUS(spdk, spdk_bus);

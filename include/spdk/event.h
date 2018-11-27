@@ -105,6 +105,7 @@ struct spdk_app_opts {
 	bool			no_pci;
 	bool			hugepage_single_segments;
 	bool			unlink_hugepage;
+	const char		*hugedir;
 	enum spdk_log_level	print_level;
 	size_t			num_pci_addr;
 	struct spdk_pci_addr	*pci_blacklist;
@@ -121,6 +122,9 @@ struct spdk_app_opts {
 	 * when this flag is enabled.
 	 */
 	bool			delay_subsystem_init;
+
+	/* Number of trace entries allocated for each core */
+	uint64_t		num_entries;
 };
 
 struct spdk_reactor_tsc_stats {
@@ -216,7 +220,7 @@ int spdk_app_parse_core_mask(const char *mask, struct spdk_cpuset *cpumask);
  */
 struct spdk_cpuset *spdk_app_get_core_mask(void);
 
-#define SPDK_APP_GETOPT_STRING "c:de:ghi:m:n:p:qr:s:uwB:L:RW:"
+#define SPDK_APP_GETOPT_STRING "c:de:ghi:m:n:p:r:s:uB:L:RW:"
 
 enum spdk_app_parse_args_rvals {
 	SPDK_APP_PARSE_ARGS_HELP = 0,

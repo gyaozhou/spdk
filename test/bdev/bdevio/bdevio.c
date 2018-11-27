@@ -952,21 +952,22 @@ bdevio_parse_arg(int ch, char *arg)
 int
 main(int argc, char **argv)
 {
-	int			num_failures;
+	int			rc;
 	struct spdk_app_opts	opts = {};
 
 	spdk_app_opts_init(&opts);
 	opts.name = "bdevtest";
-	opts.config_file = "/usr/local/etc/spdk/iscsi.conf";
 	opts.rpc_addr = NULL;
 	opts.reactor_mask = "0x7";
-	opts.mem_size = 1024;
 
-	spdk_app_parse_args(argc, argv, &opts, "", NULL,
-			    bdevio_parse_arg, bdevio_usage);
+	if ((rc = spdk_app_parse_args(argc, argv, &opts, "", NULL,
+				      bdevio_parse_arg, bdevio_usage)) !=
+	    SPDK_APP_PARSE_ARGS_SUCCESS) {
+		return rc;
+	}
 
-	num_failures = spdk_app_start(&opts, test_main, NULL, NULL);
+	rc = spdk_app_start(&opts, test_main, NULL, NULL);
 	spdk_app_fini();
 
-	return num_failures;
+	return rc;
 }
