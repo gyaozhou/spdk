@@ -1,12 +1,21 @@
-#!/bin/bash
+#!/bin/sh
+
 
 date
-find . -type f \( -name "*.[ch]" -o -name "*.cpp" \) -print > cscope.files
+
+find lib -type f \( -name "*.[ch]" -o -name "*.cpp" \) -print > cscope.files
+find app -type f \( -name "*.[ch]" -o -name "*.cpp" \) -print >> cscope.files
+#find examples -type f \( -name "*.[ch]" -o -name "*.cpp" \) -print >> cscope.files
+find go -type f \( -name "*.[ch]" -o -name "*.cpp" \) -print >> cscope.files
+find include -type f \( -name "*.[ch]" -o -name "*.cpp" \) -print >> cscope.files
 
 cscope -b
-
-
-find  . -name \*.py -print | xargs etags
-
 date
 
+cd examples
+find . -type f \( -name "*.[ch]" -o -name "*.cpp" \) -print > cscope.files
+cscope -b
+cd -
+date
+
+#rsync -avr --exclude=.git/* --exclude=cscope.* dpdk-read orange:~/opensource/

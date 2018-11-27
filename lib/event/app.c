@@ -470,7 +470,9 @@ spdk_app_setup_env(struct spdk_app_opts *opts)
 	env_opts.pci_blacklist = opts->pci_blacklist;
 	env_opts.pci_whitelist = opts->pci_whitelist;
 
+    // zhou:
 	rc = spdk_env_init(&env_opts);
+
 	free(env_opts.pci_blacklist);
 	free(env_opts.pci_whitelist);
 
@@ -516,6 +518,7 @@ spdk_app_setup_trace(struct spdk_app_opts *opts)
 	return 0;
 }
 
+// zhou:
 int
 spdk_app_start(struct spdk_app_opts *opts, spdk_event_fn start_fn,
 	       void *arg1, void *arg2)
@@ -567,6 +570,7 @@ spdk_app_start(struct spdk_app_opts *opts, spdk_event_fn start_fn,
 	spdk_log_set_level(SPDK_APP_DEFAULT_LOG_LEVEL);
 	spdk_log_open();
 
+    // zhou:
 	if (spdk_app_setup_env(opts) < 0) {
 		goto app_start_log_close_err;
 	}

@@ -386,6 +386,8 @@ int spdk_env_init(const struct spdk_env_opts *opts)
 	fflush(stdout);
 	orig_optind = optind;
 	optind = 1;
+
+    // zhou:
 	rc = rte_eal_init(eal_cmdline_argcount, dpdk_args);
 	optind = orig_optind;
 
