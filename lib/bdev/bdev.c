@@ -253,14 +253,19 @@ struct spdk_bdev_channel {
 
 };
 
+// zhou: represents a handle to a given block device.
+//       "Descriptors are used to establish and track permissions to use the underlying
+//       block device, much like a file descriptor on UNIX systems."
 struct spdk_bdev_desc {
 	struct spdk_bdev		*bdev;
+
 	struct spdk_thread		*thread;
 	spdk_bdev_remove_cb_t		remove_cb;
 	void				*remove_ctx;
 	bool				remove_scheduled;
 	bool				closed;
 	bool				write;
+
 	TAILQ_ENTRY(spdk_bdev_desc)	link;
 };
 
@@ -862,6 +867,7 @@ spdk_bdev_init_failed(void *cb_arg)
 	spdk_bdev_finish(spdk_bdev_init_failed_complete, NULL);
 }
 
+// zhou: entry
 void
 spdk_bdev_initialize(spdk_bdev_init_cb cb_fn, void *cb_arg)
 {
@@ -1637,6 +1643,9 @@ _spdk_bdev_io_type_supported(struct spdk_bdev *bdev, enum spdk_bdev_io_type io_t
 	return bdev->fn_table->io_type_supported(bdev->ctxt, io_type);
 }
 
+// zhou: "Some I/O request types are optional and may not be supported by a given bdev.
+//       To query a bdev for the I/O request types it supports, call
+//       spdk_bdev_io_type_supported()."
 bool
 spdk_bdev_io_type_supported(struct spdk_bdev *bdev, enum spdk_bdev_io_type io_type)
 {
@@ -1810,6 +1819,10 @@ _spdk_bdev_enable_qos(struct spdk_bdev *bdev, struct spdk_bdev_channel *ch)
 	}
 }
 
+// zhou: "Descriptors may be passed to and used from multiple threads simultaneously.
+//       However, for each thread a separate I/O channel must be obtained by
+//       calling spdk_bdev_get_io_channel(). This will allocate the necessary
+//       per-thread resources to submit I/O requests to the bdev without taking locks."
 static int
 spdk_bdev_channel_create(void *io_device, void *ctx_buf)
 {
@@ -2328,6 +2341,33 @@ spdk_bdev_io_valid_blocks(struct spdk_bdev *bdev, uint64_t offset_blocks, uint64
 	return true;
 }
 
+// zhou:
+/*
+  "Once a descriptor and a channel have been obtained, I/O may be sent by
+  calling the various I/O submission functions such as spdk_bdev_read(). These
+  calls each take a callback as an argument which will be called some time
+  later with a handle to an spdk_bdev_io object.
+  In response to that completion, the user must call spdk_bdev_free_io() to
+  release the resources. Within this callback, the user may also use the
+  functions spdk_bdev_io_get_nvme_status() and spdk_bdev_io_get_scsi_status()
+  to obtain error information in the format of their choosing."
+
+  "I/O submission is performed by calling functions such as spdk_bdev_read()
+  or spdk_bdev_write(). These functions take as an argument a pointer to a region
+  of memory or a scatter gather list describing memory that will be transferred to
+  the block device. This memory must be allocated through spdk_dma_malloc() or its
+  variants. For a full explanation of why the memory must come from a special
+  allocation pool, see Memory Management for User Space Drivers. Where possible,
+  data in memory will be directly transferred to the block device using Direct
+  Memory Access. That means it is not copied."
+
+  "All I/O submission functions are asynchronous and non-blocking. They will not
+  block or stall the thread for any reason. However, the I/O submission functions
+  may fail in one of two ways. First, they may fail immediately and return an error
+  code. In that case, the provided callback will not be called. Second, they may
+  fail asynchronously. In that case, the associated spdk_bdev_io will be passed to
+  the callback and it will report error information."
+*/
 int
 spdk_bdev_read(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
 	       void *buf, uint64_t offset, uint64_t nbytes,
@@ -2770,6 +2810,19 @@ _spdk_bdev_channel_start_reset(struct spdk_bdev_channel *ch)
 	pthread_mutex_unlock(&bdev->internal.mutex);
 }
 
+// zhou:
+/*
+  In order to handle unexpected failure conditions, the bdev library provides a
+  mechanism to perform a device reset by calling spdk_bdev_reset(). This will pass
+  a message to every other thread for which an I/O channel exists for the bdev,
+  pause it, then forward a reset request to the underlying bdev module and wait for
+  completion. Upon completion, the I/O channels will resume and the reset will
+  complete. The specific behavior inside the bdev module is module-specific.
+  For example, NVMe devices will delete all queue pairs, perform an NVMe reset,
+  then recreate the queue pairs and continue. Most importantly, regardless of
+  device type, all I/O outstanding to the block device will be completed prior to
+  the reset completing.
+*/
 int
 spdk_bdev_reset(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
 		spdk_bdev_io_completion_cb cb, void *cb_arg)
@@ -3601,6 +3654,14 @@ spdk_bdev_unregister(struct spdk_bdev *bdev, spdk_bdev_unregister_cb cb_fn, void
 	spdk_bdev_fini(bdev);
 }
 
+// zhou: open block device.
+//       "Multiple users may have a bdev open at the same time, and coordination
+//       of reads and writes between users must be handled by some higher level
+//       mechanism outside of the bdev layer. Opening a bdev with write permission
+//       may fail if a virtual bdev module has claimed the bdev. Virtual bdev modules
+//       implement logic like RAID or logical volume management and forward their
+//       I/O to lower level bdevs, so they mark these lower level bdevs as claimed
+//       to prevent outside users from issuing writes."
 int
 spdk_bdev_open(struct spdk_bdev *bdev, bool write, spdk_bdev_remove_cb_t remove_cb,
 	       void *remove_ctx, struct spdk_bdev_desc **_desc)

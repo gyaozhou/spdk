@@ -238,6 +238,7 @@ struct spdk_bdev_alias {
 typedef TAILQ_HEAD(, spdk_bdev_io) bdev_io_tailq_t;
 typedef STAILQ_HEAD(, spdk_bdev_io) bdev_io_stailq_t;
 
+// zhou: always refer to as a "bdev", represents a generic block device.
 struct spdk_bdev {
 	/** User context passed in by the backend */
 	void *ctxt;
@@ -363,6 +364,9 @@ typedef void (*spdk_bdev_io_get_buf_cb)(struct spdk_io_channel *ch, struct spdk_
 
 #define BDEV_IO_NUM_CHILD_IOV 32
 
+// zhou: represents a Requests to the block device, which is asynchronous.
+//       "Requests must be submitted on an associated I/O channel. The motivation
+//       and design of I/O channels is described in Message Passing and Concurrency."
 struct spdk_bdev_io {
 	/** The block device that this I/O belongs to. */
 	struct spdk_bdev *bdev;

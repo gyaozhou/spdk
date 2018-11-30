@@ -193,6 +193,13 @@ spdk_thread_lib_fini(void)
 	}
 }
 
+// zhou:
+/*
+  "spdk_thread is an abstraction for a thread of execution and spdk_poller is an
+  abstraction for a function that should be periodically called on the given thread.
+  On each system thread that the user wishes to use with SPDK, they must first call
+  spdk_allocate_thread()"
+*/
 struct spdk_thread *
 spdk_allocate_thread(spdk_thread_pass_msg msg_fn,
 		     spdk_start_poller start_poller_fn,
@@ -798,6 +805,7 @@ spdk_io_device_unregister(void *io_device, spdk_io_device_unregister_cb unregist
 	_spdk_io_device_free(dev);
 }
 
+// zhou: README, different channel multiplex over this thread to avoid locking.
 struct spdk_io_channel *
 spdk_get_io_channel(void *io_device)
 {

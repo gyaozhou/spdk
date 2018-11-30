@@ -257,6 +257,7 @@ spdk_app_opts_validate(const char *app_opts)
 	return 0;
 }
 
+// zhou: default options
 void
 spdk_app_opts_init(struct spdk_app_opts *opts)
 {
@@ -354,6 +355,7 @@ spdk_app_start_rpc(void *arg1, void *arg2)
 	}
 }
 
+// zhou:
 static struct spdk_conf *
 spdk_app_setup_conf(const char *config_file)
 {
@@ -549,7 +551,7 @@ spdk_app_setup_trace(struct spdk_app_opts *opts)
 	return 0;
 }
 
-// zhou:
+// zhou: SPDK, Event Framework to facilate APP development.
 int
 spdk_app_start(struct spdk_app_opts *opts, spdk_event_fn start_fn,
 	       void *arg1, void *arg2)

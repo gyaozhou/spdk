@@ -598,6 +598,7 @@ fgets_line(FILE *fp)
 	return NULL;
 }
 
+// zhou: README,
 int
 spdk_conf_read(struct spdk_conf *cp, const char *file)
 {
