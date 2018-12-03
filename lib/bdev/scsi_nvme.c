@@ -34,6 +34,7 @@
 
 #include "spdk/nvme_spec.h"
 
+// zhou: README, SCSI Command transfer to NVMe Command ?
 void
 spdk_scsi_nvme_translate(const struct spdk_bdev_io *bdev_io, int *sc, int *sk,
 			 int *asc, int *ascq)

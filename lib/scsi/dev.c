@@ -116,6 +116,7 @@ spdk_scsi_dev_find_lowest_free_lun_id(struct spdk_scsi_dev *dev)
 	return -1;
 }
 
+// zhou:
 int
 spdk_scsi_dev_add_lun(struct spdk_scsi_dev *dev, const char *bdev_name, int lun_id,
 		      void (*hotremove_cb)(const struct spdk_scsi_lun *, void *),

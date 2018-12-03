@@ -565,6 +565,7 @@ _spdk_setup_lvs_opts(struct spdk_bs_opts *bs_opts, struct spdk_lvs_opts *o)
 	bs_opts->cluster_sz = o->cluster_sz;
 }
 
+// zhou:
 int
 spdk_lvs_init(struct spdk_bs_dev *bs_dev, struct spdk_lvs_opts *o,
 	      spdk_lvs_op_with_handle_complete cb_fn, void *cb_arg)
@@ -1030,6 +1031,7 @@ _spdk_lvs_verify_lvol_name(struct spdk_lvol_store *lvs, const char *name)
 	return 0;
 }
 
+// zhou: README, Thin Provision
 int
 spdk_lvol_create(struct spdk_lvol_store *lvs, const char *name, uint64_t sz,
 		 bool thin_provision, spdk_lvol_op_with_handle_complete cb_fn, void *cb_arg)
@@ -1090,6 +1092,8 @@ spdk_lvol_create(struct spdk_lvol_store *lvs, const char *name, uint64_t sz,
 	return 0;
 }
 
+
+// zhou: README, Snapshot
 void
 spdk_lvol_create_snapshot(struct spdk_lvol *origlvol, const char *snapshot_name,
 			  spdk_lvol_op_with_handle_complete cb_fn, void *cb_arg)
@@ -1154,6 +1158,7 @@ spdk_lvol_create_snapshot(struct spdk_lvol *origlvol, const char *snapshot_name,
 				_spdk_lvol_create_cb, req);
 }
 
+// zhou: README, Clone
 void
 spdk_lvol_create_clone(struct spdk_lvol *origlvol, const char *clone_name,
 		       spdk_lvol_op_with_handle_complete cb_fn, void *cb_arg)

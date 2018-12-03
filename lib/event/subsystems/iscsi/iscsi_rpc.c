@@ -40,6 +40,7 @@
 
 #include "spdk_internal/log.h"
 
+// zhou:
 static const struct spdk_json_object_decoder rpc_set_iscsi_opts_decoders[] = {
 	{"auth_file", offsetof(struct spdk_iscsi_opts, authfile), spdk_json_decode_string, true},
 	{"node_base", offsetof(struct spdk_iscsi_opts, nodebase), spdk_json_decode_string, true},

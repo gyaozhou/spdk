@@ -857,6 +857,7 @@ spdk_iscsi_check_chap_params(bool disable, bool require, bool mutual, int group)
 	return false;
 }
 
+// zhou:
 _spdk_iscsi_tgt_node *
 spdk_iscsi_tgt_node_construct(int target_index,
 			      const char *name, const char *alias,
@@ -1304,6 +1305,7 @@ void spdk_iscsi_tgt_node_delete_map(struct spdk_iscsi_portal_grp *portal_group,
 	pthread_mutex_unlock(&g_spdk_iscsi.mutex);
 }
 
+// zhou: README,
 int
 spdk_iscsi_tgt_node_add_lun(struct spdk_iscsi_tgt_node *target,
 			    const char *bdev_name, int lun_id)

@@ -79,6 +79,7 @@ struct spdk_lvol_with_handle_req {
 	struct spdk_lvol		*lvol;
 };
 
+// zhou: README,
 struct spdk_lvol_store {
 	struct spdk_bs_dev		*bs_dev;
 	struct spdk_blob_store		*blobstore;

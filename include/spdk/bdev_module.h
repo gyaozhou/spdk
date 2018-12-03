@@ -170,6 +170,8 @@ typedef void (*spdk_bdev_unregister_cb)(void *cb_arg, int rc);
  * communication with a backend. The main commands are read/write API
  * calls for I/O via submit_request.
  */
+// zhou: bdev provide uniform interface to upper commponents, and all kinds of
+//       backend storage should provide such interface.
 struct spdk_bdev_fn_table {
 	/** Destroy the backend block device object */
 	int (*destruct)(void *ctx);

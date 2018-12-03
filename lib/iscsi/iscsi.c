@@ -4184,6 +4184,7 @@ spdk_init_login_reject_response(struct spdk_iscsi_pdu *pdu, struct spdk_iscsi_pd
 	rsph->itt = pdu->bhs.itt;
 }
 
+// zhou: README, iSCSI protocol handler
 int
 spdk_iscsi_execute(struct spdk_iscsi_conn *conn, struct spdk_iscsi_pdu *pdu)
 {

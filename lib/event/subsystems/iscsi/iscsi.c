@@ -69,6 +69,7 @@ spdk_iscsi_subsystem_config_json(struct spdk_json_write_ctx *w,
 	spdk_event_call(done_ev);
 }
 
+// zhou:
 static struct spdk_subsystem g_spdk_subsystem_iscsi = {
 	.name = "iscsi",
 	.init = spdk_iscsi_subsystem_init,

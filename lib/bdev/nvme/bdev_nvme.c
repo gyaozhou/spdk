@@ -732,6 +732,7 @@ bdev_nvme_get_spin_time(struct spdk_io_channel *ch)
 	return spin_time;
 }
 
+// zhou: README, NVMe Stroage as backend storage of bdev.
 static const struct spdk_bdev_fn_table nvmelib_fn_table = {
 	.destruct		= bdev_nvme_destruct,
 	.submit_request		= bdev_nvme_submit_request,

@@ -86,6 +86,7 @@ typedef void (*spdk_sighandler_t)(int signal);
 /**
  * \brief Event framework initialization options
  */
+// zhou: README,
 struct spdk_app_opts {
 	const char *name;
 	const char *config_file;

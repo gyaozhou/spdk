@@ -178,6 +178,7 @@ invalid:
 	spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS, "Invalid parameters");
 	free_rpc_initiator_group(&req);
 }
+
 SPDK_RPC_REGISTER("add_initiator_group", spdk_rpc_add_initiator_group, SPDK_RPC_RUNTIME)
 
 static const struct spdk_json_object_decoder rpc_add_or_delete_initiators_decoders[] = {
