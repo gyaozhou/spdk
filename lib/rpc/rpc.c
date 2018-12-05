@@ -199,12 +199,14 @@ spdk_rpc_listen(const char *listen_addr)
 	return 0;
 }
 
+// zhou: registered in polling event.
 void
 spdk_rpc_accept(void)
 {
 	spdk_jsonrpc_server_poll(g_jsonrpc_server);
 }
 
+// zhou: README,
 void
 spdk_rpc_register_method(const char *method, spdk_rpc_method_handler func, uint32_t state_mask)
 {

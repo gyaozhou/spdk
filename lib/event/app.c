@@ -355,7 +355,6 @@ spdk_app_start_rpc(void *arg1, void *arg2)
 	}
 }
 
-// zhou:
 static struct spdk_conf *
 spdk_app_setup_conf(const char *config_file)
 {
@@ -500,7 +499,7 @@ spdk_app_setup_env(struct spdk_app_opts *opts)
 	env_opts.pci_blacklist = opts->pci_blacklist;
 	env_opts.pci_whitelist = opts->pci_whitelist;
 
-    // zhou:
+    // zhou: DPDK init.
 	rc = spdk_env_init(&env_opts);
 
 	free(env_opts.pci_blacklist);
@@ -576,6 +575,7 @@ spdk_app_start(struct spdk_app_opts *opts, spdk_event_fn start_fn,
 	    isatty(STDERR_FILENO) &&
 	    tty &&
 	    !strncmp(tty, "/dev/tty", strlen("/dev/tty"))) {
+
 		printf("Warning: printing stderr to console terminal without -q option specified.\n");
 		printf("Suggest using --silence-noticelog to disable logging to stderr and\n");
 		printf("monitor syslog, or redirect stderr to a file.\n");
@@ -594,6 +594,7 @@ spdk_app_start(struct spdk_app_opts *opts, spdk_event_fn start_fn,
 	}
 #endif
 
+
 	config = spdk_app_setup_conf(opts->config_file);
 	if (config == NULL) {
 		goto app_start_setup_conf_err;
@@ -606,7 +607,8 @@ spdk_app_start(struct spdk_app_opts *opts, spdk_event_fn start_fn,
 	spdk_log_set_level(SPDK_APP_DEFAULT_LOG_LEVEL);
 	spdk_log_set_backtrace_level(SPDK_APP_DEFAULT_BACKTRACE_LOG_LEVEL);
 
-    // zhou:
+
+    // zhou: env == DPDK
 	if (spdk_app_setup_env(opts) < 0) {
 		goto app_start_setup_conf_err;
 	}
@@ -614,6 +616,7 @@ spdk_app_start(struct spdk_app_opts *opts, spdk_event_fn start_fn,
 	spdk_log_open();
 	SPDK_NOTICELOG("Total cores available: %d\n", spdk_env_get_core_count());
 
+    // zhou: message memory pool.
 	spdk_thread_lib_init();
 
 	/*
@@ -646,18 +649,37 @@ spdk_app_start(struct spdk_app_opts *opts, spdk_event_fn start_fn,
 	g_spdk_app.shm_id = opts->shm_id;
 	g_spdk_app.shutdown_cb = opts->shutdown_cb;
 	g_spdk_app.rc = 0;
+
 	g_init_lcore = spdk_env_get_current_core();
 	g_delay_subsystem_init = opts->delay_subsystem_init;
 	g_app_start_event = spdk_event_allocate(g_init_lcore, start_fn, arg1, arg2);
 
+    // zhou: RPC start event, callback function preparation
 	rpc_start_event = spdk_event_allocate(g_init_lcore, spdk_app_start_rpc,
 					      (void *)opts->rpc_addr, NULL);
+
+    // zhou: Deferred initialization
+    /* "SPDK applications progress through a set of states beginning with STARTUP and
+       ending with RUNTIME.
+
+       If the --wait-for-rpc parameter is provided SPDK will pause just before starting
+       subsystem initialization. This state is called STARTUP. The JSON RPC server is
+       ready but only a small subsystem of commands are available to set up
+       initialization parameters. Those parameters can't be changed after the SPDK
+       application enters RUNTIME state. When the client finishes configuring the SPDK
+       subsystems it needs to issue the start_subsystem_init RPC command to begin the
+       initialization process. After rpc_start_subsystem_init returns true SPDK will
+       enter the RUNTIME state and the list of available commands becomes much larger."
+    */
 
 	if (!g_delay_subsystem_init) {
 		spdk_subsystem_init(rpc_start_event);
 	} else {
+        // zhou: enqueue, will be started according RPC.
+        //       when reactor start to work, this event will be handle firstly.
 		spdk_event_call(rpc_start_event);
 	}
+
 
 	/* This blocks until spdk_app_stop is called */
 	spdk_reactors_start();

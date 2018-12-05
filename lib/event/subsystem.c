@@ -42,10 +42,13 @@ struct spdk_subsystem_list g_subsystems = TAILQ_HEAD_INITIALIZER(g_subsystems);
 struct spdk_subsystem_depend_list g_subsystems_deps = TAILQ_HEAD_INITIALIZER(g_subsystems_deps);
 static struct spdk_subsystem *g_next_subsystem;
 static bool g_subsystems_initialized = false;
+
 static struct spdk_event *g_app_start_event;
 static struct spdk_event *g_app_stop_event;
+
 static uint32_t g_fini_core;
 
+// zhou: these two functions will be invoked before main(). Be careful !
 void
 spdk_add_subsystem(struct spdk_subsystem *subsystem)
 {
@@ -57,6 +60,7 @@ spdk_add_subsystem_depend(struct spdk_subsystem_depend *depend)
 {
 	TAILQ_INSERT_TAIL(&g_subsystems_deps, depend, tailq);
 }
+
 
 struct spdk_subsystem *
 spdk_subsystem_find(struct spdk_subsystem_list *list, const char *name)
@@ -166,6 +170,7 @@ spdk_subsystem_verify(void *arg1, void *arg2)
 	spdk_subsystem_init_next(0);
 }
 
+// zhou: README,
 void
 spdk_subsystem_init(struct spdk_event *app_start_event)
 {

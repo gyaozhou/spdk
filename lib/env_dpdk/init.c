@@ -342,6 +342,7 @@ spdk_build_eal_cmdline(const struct spdk_env_opts *opts)
 	return argcount;
 }
 
+// zhou: DPDK initilization
 int spdk_env_init(const struct spdk_env_opts *opts)
 {
 	char **dpdk_args = NULL;

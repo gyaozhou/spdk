@@ -52,6 +52,7 @@ enum spdk_reactor_state {
 	SPDK_REACTOR_STATE_SHUTDOWN = 4,
 };
 
+// zhou:
 struct spdk_reactor {
 	/* Logical core number for this reactor. */
 	uint32_t					lcore;
@@ -118,6 +119,7 @@ spdk_event_allocate(uint32_t lcore, spdk_event_fn fn, void *arg1, void *arg2)
 	return event;
 }
 
+// zhou: enqueue event
 void
 spdk_event_call(struct spdk_event *event)
 {
@@ -133,6 +135,7 @@ spdk_event_call(struct spdk_event *event)
 	}
 }
 
+// zhou: handle event queue
 static inline uint32_t
 _spdk_event_queue_run_batch(struct spdk_reactor *reactor)
 {
@@ -156,6 +159,7 @@ _spdk_event_queue_run_batch(struct spdk_reactor *reactor)
 	for (i = 0; i < count; i++) {
 		struct spdk_event *event = events[i];
 
+        // zhou: just like Fibre.
 		assert(event != NULL);
 		event->fn(event->arg1, event->arg2);
 	}
@@ -273,6 +277,7 @@ spdk_reactor_get_tsc_stats(struct spdk_reactor_tsc_stats *tsc_stats, uint32_t co
 	return 0;
 }
 
+// zhou: main loop.
 static int
 _spdk_reactor_run(void *arg)
 {
@@ -286,6 +291,7 @@ _spdk_reactor_run(void *arg)
 	char			thread_name[32];
 
 	snprintf(thread_name, sizeof(thread_name), "reactor_%u", reactor->lcore);
+    // zhou: SPDK private data.
 	thread = spdk_allocate_thread(NULL, NULL, NULL, NULL, thread_name);
 	if (!thread) {
 		return -1;
@@ -293,15 +299,18 @@ _spdk_reactor_run(void *arg)
 	SPDK_NOTICELOG("Reactor started on core %u\n", reactor->lcore);
 
 	sleep_cycles = reactor->max_delay_us * spdk_get_ticks_hz() / SPDK_SEC_TO_USEC;
+
 	if (g_context_switch_monitor_enabled) {
 		_spdk_reactor_context_switch_monitor_start(reactor, NULL);
 	}
+
 	now = spdk_get_ticks();
 	reactor->tsc_last = now;
 
 	while (1) {
 		bool took_action = false;
 
+        // zhou: handle events
 		event_count = _spdk_event_queue_run_batch(reactor);
 		if (event_count > 0) {
 			rc = 1;
@@ -310,6 +319,7 @@ _spdk_reactor_run(void *arg)
 			took_action = true;
 		}
 
+        // zhou: handle message and run pollers.
 		rc = spdk_thread_poll(thread, 0);
 		if (rc != 0) {
 			now = spdk_get_ticks();
@@ -351,6 +361,7 @@ _spdk_reactor_run(void *arg)
 	return 0;
 }
 
+// zhou: create "rte_ring" for buffer events in each thread.
 static void
 spdk_reactor_construct(struct spdk_reactor *reactor, uint32_t lcore, uint64_t max_delay_us)
 {
@@ -384,6 +395,7 @@ spdk_app_get_core_mask(void)
 	return g_spdk_app_core_mask;
 }
 
+// zhou:
 void
 spdk_reactors_start(void)
 {
@@ -398,6 +410,8 @@ spdk_reactors_start(void)
 	SPDK_ENV_FOREACH_CORE(i) {
 		if (i != current_core) {
 			reactor = spdk_reactor_get(i);
+
+            // zhou: "rte_eal_remote_launch()" new thread.
 			rc = spdk_env_thread_launch_pinned(reactor->lcore, _spdk_reactor_run, reactor);
 			if (rc < 0) {
 				SPDK_ERRLOG("Unable to start reactor thread on core %u\n", reactor->lcore);
@@ -405,11 +419,13 @@ spdk_reactors_start(void)
 				return;
 			}
 		}
+
 		spdk_cpuset_set_cpu(g_spdk_app_core_mask, i, true);
 	}
 
 	/* Start the master reactor */
 	reactor = spdk_reactor_get(current_core);
+
 	_spdk_reactor_run(reactor);
 
 	spdk_env_thread_wait_all();
@@ -425,6 +441,7 @@ spdk_reactors_stop(void *arg1, void *arg2)
 	g_reactor_state = SPDK_REACTOR_STATE_EXITING;
 }
 
+// zhou:
 int
 spdk_reactors_init(unsigned int max_delay_us)
 {

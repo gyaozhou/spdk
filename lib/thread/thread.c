@@ -53,6 +53,7 @@
 
 static pthread_mutex_t g_devlist_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+// zhou:
 struct io_device {
 	void				*io_device;
 	char				*name;
@@ -101,6 +102,7 @@ struct spdk_poller {
 	void				*arg;
 };
 
+// zhou: SPDK thread private data.
 struct spdk_thread {
 	pthread_t			thread_id;
 	spdk_thread_pass_msg		msg_fn;
@@ -111,6 +113,7 @@ struct spdk_thread {
 	TAILQ_ENTRY(spdk_thread)	tailq;
 	char				*name;
 
+    // zhou: poller list
 	/*
 	 * Contains pollers actively running on this thread.  Pollers
 	 *  are run round-robin. The thread takes one poller from the head
@@ -160,6 +163,7 @@ _set_thread_name(const char *thread_name)
 #endif
 }
 
+// zhou: message memory pool for inter-threads communication.
 int
 spdk_thread_lib_init(void)
 {
@@ -193,7 +197,8 @@ spdk_thread_lib_fini(void)
 	}
 }
 
-// zhou:
+// zhou: "spdk_poller" is used to poll periodically, the polling callback function
+//       will be registered by spdk_poller_register().
 /*
   "spdk_thread is an abstraction for a thread of execution and spdk_poller is an
   abstraction for a function that should be periodically called on the given thread.
@@ -235,6 +240,7 @@ spdk_allocate_thread(spdk_thread_pass_msg msg_fn,
 	thread->start_poller_fn = start_poller_fn;
 	thread->stop_poller_fn = stop_poller_fn;
 	thread->thread_ctx = thread_ctx;
+
 	TAILQ_INIT(&thread->io_channels);
 	TAILQ_INSERT_TAIL(&g_threads, thread, tailq);
 
@@ -300,6 +306,7 @@ spdk_free_thread(void)
 	pthread_mutex_unlock(&g_devlist_mutex);
 }
 
+// zhou: handle messages
 static inline uint32_t
 _spdk_msg_queue_run_batch(struct spdk_thread *thread, uint32_t max_msgs)
 {
@@ -360,6 +367,7 @@ _spdk_poller_insert_timer(struct spdk_thread *thread, struct spdk_poller *poller
 	TAILQ_INSERT_HEAD(&thread->timer_pollers, poller, tailq);
 }
 
+// zhou: go through poller list and handle messages between threads
 int
 spdk_thread_poll(struct spdk_thread *thread, uint32_t max_msgs)
 {
@@ -367,11 +375,13 @@ spdk_thread_poll(struct spdk_thread *thread, uint32_t max_msgs)
 	struct spdk_poller *poller;
 	int rc = 0;
 
+    // zhou: handle messages
 	msg_count = _spdk_msg_queue_run_batch(thread, max_msgs);
 	if (msg_count) {
 		rc = 1;
 	}
 
+    // zhou: go through poller
 	poller = TAILQ_FIRST(&thread->active_pollers);
 	if (poller) {
 		int poller_rc;
@@ -477,6 +487,8 @@ spdk_thread_get_name(const struct spdk_thread *thread)
 	return thread->name;
 }
 
+// zhou: message is also a Fibre which inter-thread.
+//       Pay attention, not allowed to revoke message which already been sent out.
 void
 spdk_thread_send_msg(const struct spdk_thread *thread, spdk_thread_fn fn, void *ctx)
 {
@@ -510,6 +522,7 @@ spdk_thread_send_msg(const struct spdk_thread *thread, spdk_thread_fn fn, void *
 	}
 }
 
+// zhou: register poller's callback function.
 struct spdk_poller *
 spdk_poller_register(spdk_poller_fn fn,
 		     void *arg,
@@ -558,6 +571,7 @@ spdk_poller_register(spdk_poller_fn fn,
 	return poller;
 }
 
+// zhou: cancel poller
 void
 spdk_poller_unregister(struct spdk_poller **ppoller)
 {
@@ -668,6 +682,11 @@ spdk_for_each_thread(spdk_thread_fn fn, void *ctx, spdk_thread_fn cpl)
 	spdk_thread_send_msg(ct->cur_thread, spdk_on_thread, ct);
 }
 
+// zhou: IO device and IO channel are abstraction, you can think of EthDev, which
+//       owns several queues, and each queue could be assgined to a dedicated thread.
+//       Then, these threads could submit IO without lock.
+//       The Ethdev is a instance of IO device, and the queue is a instance of IO channel.
+//       Any object working in this pattern, could be represented by them, e.g. NVMe.
 void
 spdk_io_device_register(void *io_device, spdk_io_channel_create_cb create_cb,
 			spdk_io_channel_destroy_cb destroy_cb, uint32_t ctx_size,

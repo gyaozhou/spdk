@@ -3428,6 +3428,7 @@ _spdk_bdev_qos_config(struct spdk_bdev *bdev)
 	return;
 }
 
+// zhou: README,
 static int
 spdk_bdev_init(struct spdk_bdev *bdev)
 {
@@ -3477,6 +3478,7 @@ spdk_bdev_init(struct spdk_bdev *bdev)
 
 	_spdk_bdev_qos_config(bdev);
 
+    // zhou:
 	spdk_io_device_register(__bdev_to_io_dev(bdev),
 				spdk_bdev_channel_create, spdk_bdev_channel_destroy,
 				sizeof(struct spdk_bdev_channel),
