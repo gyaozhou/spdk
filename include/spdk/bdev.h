@@ -164,6 +164,7 @@ typedef void (*spdk_bdev_fini_cb)(void *cb_arg);
 typedef void (*spdk_bdev_get_device_stat_cb)(struct spdk_bdev *bdev,
 		struct spdk_bdev_io_stat *stat, void *cb_arg, int rc);
 
+// zhou: README,
 /**
  * Initialize block device modules.
  *

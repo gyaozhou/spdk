@@ -198,7 +198,9 @@ copy_create_cb(void *io_device, void *ctx_buf)
 
 	copy_ch->ch = mem_copy_engine->get_io_channel();
 	assert(copy_ch->ch != NULL);
+
 	copy_ch->engine = mem_copy_engine;
+
 	return 0;
 }
 
@@ -245,10 +247,12 @@ spdk_copy_engine_module_initialize(void)
 	}
 }
 
+// zhou: README,
 int
 spdk_copy_engine_initialize(void)
 {
 	spdk_copy_engine_module_initialize();
+
 	/*
 	 * We need a unique identifier for the copy engine framework, so use the
 	 *  spdk_copy_module_list address for this purpose.

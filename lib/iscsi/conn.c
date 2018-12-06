@@ -1290,6 +1290,7 @@ spdk_iscsi_conn_write_pdu(struct spdk_iscsi_conn *conn, struct spdk_iscsi_pdu *p
 
 #define GET_PDU_LOOP_COUNT	16
 
+// zhou:
 static int
 spdk_iscsi_conn_handle_incoming_pdus(struct spdk_iscsi_conn *conn)
 {
@@ -1298,6 +1299,7 @@ spdk_iscsi_conn_handle_incoming_pdus(struct spdk_iscsi_conn *conn)
 
 	/* Read new PDUs from network */
 	for (i = 0; i < GET_PDU_LOOP_COUNT; i++) {
+        // zhou:
 		rc = spdk_iscsi_read_pdu(conn, &pdu);
 		if (rc == 0) {
 			break;

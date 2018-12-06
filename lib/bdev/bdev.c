@@ -867,7 +867,7 @@ spdk_bdev_init_failed(void *cb_arg)
 	spdk_bdev_finish(spdk_bdev_init_failed_complete, NULL);
 }
 
-// zhou: entry
+// zhou: README,
 void
 spdk_bdev_initialize(spdk_bdev_init_cb cb_fn, void *cb_arg)
 {
@@ -1575,6 +1575,7 @@ _spdk_bdev_io_submit(void *ctx)
 	bdev_io->internal.in_submit_request = false;
 }
 
+// zhou: transform READ and WRITE to IO Submit.
 static void
 spdk_bdev_io_submit(struct spdk_bdev_io *bdev_io)
 {
@@ -2382,6 +2383,7 @@ spdk_bdev_read(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
 	return spdk_bdev_read_blocks(desc, ch, buf, offset_blocks, num_blocks, cb, cb_arg);
 }
 
+// zhou:
 int
 spdk_bdev_read_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
 		      void *buf, uint64_t offset_blocks, uint64_t num_blocks,
@@ -2415,6 +2417,7 @@ spdk_bdev_read_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
 	return 0;
 }
 
+// zhou:
 int
 spdk_bdev_readv(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
 		struct iovec *iov, int iovcnt,
@@ -2430,6 +2433,7 @@ spdk_bdev_readv(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
 	return spdk_bdev_readv_blocks(desc, ch, iov, iovcnt, offset_blocks, num_blocks, cb, cb_arg);
 }
 
+// zhou:
 int spdk_bdev_readv_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
 			   struct iovec *iov, int iovcnt,
 			   uint64_t offset_blocks, uint64_t num_blocks,

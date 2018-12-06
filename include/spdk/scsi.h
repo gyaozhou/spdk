@@ -151,6 +151,7 @@ struct spdk_scsi_desc;
 
 typedef void (*spdk_scsi_remove_cb_t)(struct spdk_scsi_lun *, void *);
 
+// zhou: README, provide SCSI interface.
 /**
  * Initialize SCSI layer.
  *

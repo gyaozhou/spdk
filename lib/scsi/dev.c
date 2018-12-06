@@ -256,6 +256,7 @@ spdk_scsi_dev_queue_mgmt_task(struct spdk_scsi_dev *dev,
 	spdk_scsi_lun_task_mgmt_execute(task, func);
 }
 
+// zhou:
 void
 spdk_scsi_dev_queue_task(struct spdk_scsi_dev *dev,
 			 struct spdk_scsi_task *task)

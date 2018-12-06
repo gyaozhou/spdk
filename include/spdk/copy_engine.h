@@ -63,6 +63,8 @@ struct spdk_io_channel;
 
 struct spdk_copy_task;
 
+// zhou: README,
+
 /**
  * Initialize the copy engine.
  *

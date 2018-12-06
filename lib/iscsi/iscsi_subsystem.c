@@ -1322,6 +1322,7 @@ spdk_iscsi_parse_globals(void)
 	return 0;
 }
 
+// zhou: README,
 void
 spdk_iscsi_init(spdk_iscsi_init_cb cb_fn, void *cb_arg)
 {

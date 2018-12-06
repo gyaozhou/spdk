@@ -18,4 +18,5 @@ cscope -b
 cd -
 date
 
-#rsync -avr --exclude=.git/* --exclude=cscope.* dpdk-read orange:~/opensource/
+#rsync -avr --exclude=.git/* --exclude=cscope.* spdk-read orange:~/opensource/
+#rsync -avr --exclude=.git/* --exclude=cscope.* dpdk-read/* orange:~/opensource/spdk-read/dpdk/

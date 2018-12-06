@@ -1316,6 +1316,7 @@ spdk_bdev_scsi_queue_io(struct spdk_scsi_task *task, spdk_bdev_io_wait_cb cb_fn,
 	}
 }
 
+// zhou: README,
 static int
 spdk_bdev_scsi_read(struct spdk_bdev *bdev, struct spdk_bdev_desc *bdev_desc,
 		    struct spdk_io_channel *bdev_ch, struct spdk_scsi_task *task,
@@ -1336,6 +1337,7 @@ spdk_bdev_scsi_read(struct spdk_bdev *bdev, struct spdk_bdev_desc *bdev_desc,
 		      "Read: lba=%"PRIu64", len=%"PRIu64"\n",
 		      lba, (uint64_t)task->length / blen);
 
+    // zhou:
 	rc = spdk_bdev_readv(bdev_desc, bdev_ch, task->iovs,
 			     task->iovcnt, offset, nbytes,
 			     spdk_bdev_scsi_task_complete_cmd, task);
@@ -1679,6 +1681,7 @@ spdk_bdev_scsi_unmap(struct spdk_bdev *bdev, struct spdk_bdev_desc *bdev_desc,
 	return SPDK_SCSI_TASK_PENDING;
 }
 
+// zhou: handle SCSI Command
 static int
 spdk_bdev_scsi_process_block(struct spdk_scsi_task *task)
 {

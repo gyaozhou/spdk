@@ -83,6 +83,7 @@ spdk_rpc_construct_malloc_bdev(struct spdk_jsonrpc_request *request,
 		uuid = &decoded_uuid;
 	}
 
+    // zhou:
 	bdev = create_malloc_disk(req.name, uuid, req.num_blocks, req.block_size);
 	if (bdev == NULL) {
 		goto invalid;

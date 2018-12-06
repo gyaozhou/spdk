@@ -36,6 +36,7 @@
 
 struct spdk_scsi_globals g_spdk_scsi;
 
+// zhou: README
 int
 spdk_scsi_init(void)
 {

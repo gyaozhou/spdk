@@ -1348,6 +1348,7 @@ spdk_vhost_unlock(void)
 	pthread_mutex_unlock(&g_spdk_vhost_mutex);
 }
 
+// zhou: README,
 int
 spdk_vhost_init(void)
 {

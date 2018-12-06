@@ -316,6 +316,7 @@ static int _bdev_malloc_submit_request(struct spdk_io_channel *ch, struct spdk_b
 	return 0;
 }
 
+// zhou: API for IO
 static void bdev_malloc_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io)
 {
 	if (_bdev_malloc_submit_request(ch, bdev_io) != 0) {
@@ -367,6 +368,7 @@ bdev_malloc_write_json_config(struct spdk_bdev *bdev, struct spdk_json_write_ctx
 	spdk_json_write_object_end(w);
 }
 
+// zhou: callback functions to handle disk operation request
 static const struct spdk_bdev_fn_table malloc_fn_table = {
 	.destruct		= bdev_malloc_destruct,
 	.submit_request		= bdev_malloc_submit_request,
@@ -375,6 +377,7 @@ static const struct spdk_bdev_fn_table malloc_fn_table = {
 	.write_config_json	= bdev_malloc_write_json_config,
 };
 
+// zhou: create memory based disk.
 struct spdk_bdev *create_malloc_disk(const char *name, const struct spdk_uuid *uuid,
 				     uint64_t num_blocks, uint32_t block_size)
 {
@@ -460,6 +463,8 @@ static int bdev_malloc_initialize(void)
 	uint64_t size;
 	struct spdk_bdev *bdev;
 
+    // zhou: when component init, create disk according to config file firstly.
+    //       We can create more via RPC.
 	if (sp != NULL) {
 		NumberOfLuns = spdk_conf_section_get_intval(sp, "NumberOfLuns");
 		LunSizeInMB = spdk_conf_section_get_intval(sp, "LunSizeInMB");
@@ -474,6 +479,7 @@ static int bdev_malloc_initialize(void)
 		}
 		size = (uint64_t)LunSizeInMB * 1024 * 1024;
 		for (i = 0; i < NumberOfLuns; i++) {
+            // zhou: create disk based on memory.
 			bdev = create_malloc_disk(NULL, NULL, size / BlockSize, BlockSize);
 			if (bdev == NULL) {
 				SPDK_ERRLOG("Could not create malloc disk\n");
