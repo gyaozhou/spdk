@@ -66,6 +66,7 @@
 #define HAVE_ARC4RANDOM 1
 #endif
 
+// zhou:
 struct spdk_iscsi_globals g_spdk_iscsi = {
 	.mutex = PTHREAD_MUTEX_INITIALIZER,
 	.portal_head = TAILQ_HEAD_INITIALIZER(g_spdk_iscsi.portal_head),

@@ -315,9 +315,11 @@ struct spdk_iscsi_opts {
 	uint32_t min_connections_per_core;
 };
 
+// zhou:
 struct spdk_iscsi_globals {
 	char *authfile;
 	char *nodebase;
+
 	pthread_mutex_t mutex;
 	TAILQ_HEAD(, spdk_iscsi_portal)		portal_head;
 	TAILQ_HEAD(, spdk_iscsi_portal_grp)	pg_head;
@@ -327,9 +329,15 @@ struct spdk_iscsi_globals {
 
 	int32_t timeout;
 	int32_t nopininterval;
+
+    // zhou: CHAP for discovery session should be disabled (default: false)
 	bool disable_chap;
+    // zhou: CHAP for discovery session should be required (default: false)
 	bool require_chap;
+    // zhou: CHAP for discovery session should be unidirectional (false) or
+    //       bidirectional (true) (default: false)
 	bool mutual_chap;
+    // zhou: CHAP group ID for discovery session (default: 0)
 	int32_t chap_group;
 
 	uint32_t MaxSessions;

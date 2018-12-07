@@ -1142,6 +1142,7 @@ static const struct spdk_json_object_decoder rpc_discovery_auth_decoders[] = {
 	{"chap_group", offsetof(struct rpc_discovery_auth, chap_group), spdk_json_decode_int32, true},
 };
 
+// zhou: Set CHAP authentication for sessions dynamically.
 static void
 spdk_rpc_set_iscsi_discovery_auth(struct spdk_jsonrpc_request *request,
 				  const struct spdk_json_val *params)

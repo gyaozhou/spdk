@@ -398,10 +398,12 @@ spdk_iscsi_opts_init(struct spdk_iscsi_opts *opts)
 	opts->ErrorRecoveryLevel = DEFAULT_ERRORRECOVERYLEVEL;
 	opts->timeout = DEFAULT_TIMEOUT;
 	opts->nopininterval = DEFAULT_NOPININTERVAL;
+
 	opts->disable_chap = false;
 	opts->require_chap = false;
 	opts->mutual_chap = false;
 	opts->chap_group = 0;
+
 	opts->authfile = NULL;
 	opts->nodebase = NULL;
 	opts->min_connections_per_core = DEFAULT_CONNECTIONS_PER_LCORE;
@@ -473,15 +475,18 @@ spdk_iscsi_opts_copy(struct spdk_iscsi_opts *src)
 	dst->ErrorRecoveryLevel = src->ErrorRecoveryLevel;
 	dst->timeout = src->timeout;
 	dst->nopininterval = src->nopininterval;
+
 	dst->disable_chap = src->disable_chap;
 	dst->require_chap = src->require_chap;
 	dst->mutual_chap = src->mutual_chap;
 	dst->chap_group = src->chap_group;
+
 	dst->min_connections_per_core = src->min_connections_per_core;
 
 	return dst;
 }
 
+// zhou: parse config file,
 static int
 spdk_iscsi_read_config_file_params(struct spdk_conf_section *sp,
 				   struct spdk_iscsi_opts *opts)
@@ -584,6 +589,7 @@ spdk_iscsi_read_config_file_params(struct spdk_conf_section *sp,
 			if (val == NULL) {
 				break;
 			}
+
 			if (strcasecmp(val, "CHAP") == 0) {
 				opts->require_chap = true;
 			} else if (strcasecmp(val, "Mutual") == 0) {
@@ -606,6 +612,7 @@ spdk_iscsi_read_config_file_params(struct spdk_conf_section *sp,
 			return -EINVAL;
 		}
 	}
+
 	val = spdk_conf_section_get_val(sp, "DiscoveryAuthGroup");
 	if (val != NULL) {
 		ag_tag = val;
@@ -708,6 +715,7 @@ spdk_iscsi_opts_verify(struct spdk_iscsi_opts *opts)
 	return 0;
 }
 
+// zhou:
 static int
 spdk_iscsi_parse_options(struct spdk_iscsi_opts **popts)
 {
@@ -723,6 +731,8 @@ spdk_iscsi_parse_options(struct spdk_iscsi_opts **popts)
 
 	/* Process parameters */
 	SPDK_DEBUGLOG(SPDK_LOG_ISCSI, "spdk_iscsi_read_config_file_parmas\n");
+
+    // zhou: only take care section "iSCSI" of config file
 	sp = spdk_conf_find_section(NULL, "iSCSI");
 	if (sp != NULL) {
 		rc = spdk_iscsi_read_config_file_params(sp, opts);
@@ -774,6 +784,7 @@ spdk_iscsi_set_global_params(struct spdk_iscsi_opts *opts)
 	g_spdk_iscsi.ErrorRecoveryLevel = opts->ErrorRecoveryLevel;
 	g_spdk_iscsi.timeout = opts->timeout;
 	g_spdk_iscsi.nopininterval = opts->nopininterval;
+
 	g_spdk_iscsi.disable_chap = opts->disable_chap;
 	g_spdk_iscsi.require_chap = opts->require_chap;
 	g_spdk_iscsi.mutual_chap = opts->mutual_chap;
@@ -786,6 +797,7 @@ spdk_iscsi_set_global_params(struct spdk_iscsi_opts *opts)
 	return 0;
 }
 
+// zhou: Set CHAP authentication for sessions dynamically.
 int
 spdk_iscsi_set_discovery_auth(bool disable_chap, bool require_chap, bool mutual_chap,
 			      int32_t chap_group)
@@ -796,6 +808,7 @@ spdk_iscsi_set_discovery_auth(bool disable_chap, bool require_chap, bool mutual_
 		return -EINVAL;
 	}
 
+    // zhou: will be checked for each session login.
 	pthread_mutex_lock(&g_spdk_iscsi.mutex);
 	g_spdk_iscsi.disable_chap = disable_chap;
 	g_spdk_iscsi.require_chap = require_chap;
