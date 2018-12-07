@@ -117,6 +117,7 @@ subsystem_sort(void)
 	}
 }
 
+// zhou: find next subsystem in list to init.
 void
 spdk_subsystem_init_next(int rc)
 {
@@ -145,6 +146,7 @@ spdk_subsystem_init_next(int rc)
 	}
 }
 
+// zhou: verify subsystem dependency and init each one.
 static void
 spdk_subsystem_verify(void *arg1, void *arg2)
 {
@@ -167,10 +169,12 @@ spdk_subsystem_verify(void *arg1, void *arg2)
 
 	subsystem_sort();
 
+    // zhou: start to init each subsystem
 	spdk_subsystem_init_next(0);
 }
 
-// zhou: README,
+// zhou: APP start to init registered subsystem (by SPDK_SUBSYSTEM_REGISTER() )
+//       one by one.
 void
 spdk_subsystem_init(struct spdk_event *app_start_event)
 {
@@ -179,6 +183,8 @@ spdk_subsystem_init(struct spdk_event *app_start_event)
 	g_app_start_event = app_start_event;
 
 	verify_event = spdk_event_allocate(spdk_env_get_current_core(), spdk_subsystem_verify, NULL, NULL);
+
+    // zhou: enqueue to event list
 	spdk_event_call(verify_event);
 }
 
@@ -227,6 +233,7 @@ spdk_subsystem_fini_next(void)
 	}
 }
 
+// zhou: be notified to stop registered subsystem one by one.
 void
 spdk_subsystem_fini(struct spdk_event *app_stop_event)
 {
@@ -236,6 +243,7 @@ spdk_subsystem_fini(struct spdk_event *app_stop_event)
 	spdk_subsystem_fini_next();
 }
 
+// zhou: ask each registered subsystem to read config file.
 void
 spdk_subsystem_config(FILE *fp)
 {

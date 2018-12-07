@@ -1322,7 +1322,8 @@ spdk_iscsi_parse_globals(void)
 	return 0;
 }
 
-// zhou: README,
+// zhou: subsystem init, support async init completed, using "cb_fn".
+//       It's a good support async completion.
 void
 spdk_iscsi_init(spdk_iscsi_init_cb cb_fn, void *cb_arg)
 {
@@ -1345,6 +1346,7 @@ spdk_iscsi_init(spdk_iscsi_init_cb cb_fn, void *cb_arg)
 	 */
 }
 
+// zhou: subsystem stop, support async stop completed, using "cb_fn"
 void
 spdk_iscsi_fini(spdk_iscsi_fini_cb cb_fn, void *cb_arg)
 {
@@ -1383,12 +1385,16 @@ spdk_shutdown_iscsi_conns_done(void)
 	}
 }
 
+// zhou: be asked to parse config file.
 void
 spdk_iscsi_config_text(FILE *fp)
 {
 	spdk_iscsi_globals_config_text(fp);
+
 	spdk_iscsi_portal_grps_config_text(fp);
+
 	spdk_iscsi_init_grps_config_text(fp);
+
 	spdk_iscsi_tgt_nodes_config_text(fp);
 }
 

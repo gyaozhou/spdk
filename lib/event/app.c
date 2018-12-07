@@ -190,6 +190,8 @@ spdk_app_get_running_config(char **config_str, char *name)
 	setvbuf(fp, vbuf, _IOFBF, BUFSIZ);
 
 	spdk_app_config_dump_global_section(fp);
+
+    // zhou: ask each registered subsystem to read config file.
 	spdk_subsystem_config(fp);
 
 	length = ftell(fp);
@@ -714,6 +716,8 @@ _spdk_app_stop(void *arg1, void *arg2)
 	spdk_rpc_finish();
 
 	app_stop_event = spdk_event_allocate(spdk_env_get_current_core(), spdk_reactors_stop, NULL, NULL);
+
+    // zhou: notify each subsystem that the APP stop.
 	spdk_subsystem_fini(app_stop_event);
 }
 

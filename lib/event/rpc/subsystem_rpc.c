@@ -94,6 +94,7 @@ rpc_get_subsystem_config_done(void *arg1, void *arg2)
 	spdk_jsonrpc_end_result(request, w);
 }
 
+// zhou:
 static void
 spdk_rpc_get_subsystem_config(struct spdk_jsonrpc_request *request,
 			      const struct spdk_json_val *params)

@@ -37,12 +37,14 @@
 
 #include "spdk_internal/event.h"
 
+// zhou: current subsystem init done.
 static void
 spdk_iscsi_subsystem_init_complete(void *cb_arg, int rc)
 {
 	spdk_subsystem_init_next(rc);
 }
 
+// zhou: start to init current subsystem.
 static void
 spdk_iscsi_subsystem_init(void)
 {
