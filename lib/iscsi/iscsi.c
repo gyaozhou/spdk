@@ -346,6 +346,8 @@ spdk_iscsi_pdu_calc_data_digest(struct spdk_iscsi_pdu *pdu)
 	return crc32c;
 }
 
+// zhou: receive from TCP and decode into "struct spdk_iscsi_pdu"
+//       README,
 int
 spdk_iscsi_read_pdu(struct spdk_iscsi_conn *conn, struct spdk_iscsi_pdu **_pdu)
 {
@@ -4244,6 +4246,7 @@ spdk_iscsi_execute(struct spdk_iscsi_conn *conn, struct spdk_iscsi_pdu *pdu)
 		SPDK_ERRLOG("Connection has no associated session!\n");
 		return SPDK_ISCSI_CONNECTION_FATAL;
 	}
+
 	I_bit = reqh->immediate;
 	if (I_bit == 0) {
 		if (SN32_LT(pdu->cmd_sn, sess->ExpCmdSN) ||

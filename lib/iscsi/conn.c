@@ -883,6 +883,8 @@ spdk_iscsi_drop_conns(struct spdk_iscsi_conn *conn, const char *conn_match,
  *
  * Otherwise returns the number of bytes successfully read.
  */
+// zhou: in order to simplify the decode PDU, just copy dedicate length data
+//       from stack. It's not efficient but easy way.
 int
 spdk_iscsi_conn_read_data(struct spdk_iscsi_conn *conn, int bytes,
 			  void *buf)
@@ -1301,7 +1303,7 @@ spdk_iscsi_conn_write_pdu(struct spdk_iscsi_conn *conn, struct spdk_iscsi_pdu *p
 
 #define GET_PDU_LOOP_COUNT	16
 
-// zhou:
+// zhou: register callback function for each connection in Portal Group.
 static int
 spdk_iscsi_conn_handle_incoming_pdus(struct spdk_iscsi_conn *conn)
 {
@@ -1310,7 +1312,7 @@ spdk_iscsi_conn_handle_incoming_pdus(struct spdk_iscsi_conn *conn)
 
 	/* Read new PDUs from network */
 	for (i = 0; i < GET_PDU_LOOP_COUNT; i++) {
-        // zhou:
+        // zhou: receive and decode
 		rc = spdk_iscsi_read_pdu(conn, &pdu);
 		if (rc == 0) {
 			break;
@@ -1324,9 +1326,10 @@ spdk_iscsi_conn_handle_incoming_pdus(struct spdk_iscsi_conn *conn)
 			return SPDK_ISCSI_CONNECTION_FATAL;
 		}
 
-        // zhou:
+        // zhou: handle received PDU.
 		rc = spdk_iscsi_execute(conn, pdu);
 
+        // zhou: release memory
 		spdk_put_pdu(pdu);
 		if (rc != 0) {
 			SPDK_ERRLOG("spdk_iscsi_execute() fatal error on %s(%s)\n",
