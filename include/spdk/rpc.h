@@ -84,7 +84,7 @@ void spdk_rpc_register_method(const char *method, spdk_rpc_method_handler func,
 #define SPDK_RPC_STARTUP	0x1
 #define SPDK_RPC_RUNTIME	0x2
 
-// zhou: register RPC handler
+// zhou: register RPC handler, "state_mask"
 #define SPDK_RPC_REGISTER(method, func, state_mask) \
 static void __attribute__((constructor)) rpc_register_##func(void) \
 { \

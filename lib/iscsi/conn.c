@@ -61,6 +61,7 @@
 	memset(&(conn)->portal, 0, sizeof(*(conn)) -	\
 		offsetof(struct spdk_iscsi_conn, portal));
 
+// zhou: "min_connections_per_core"
 static int g_connections_per_lcore;
 static uint32_t *g_num_connections;
 
@@ -118,6 +119,7 @@ spdk_find_iscsi_connection_by_id(int cid)
 	}
 }
 
+// zhou: connection array.
 int spdk_initialize_iscsi_conns(void)
 {
 	size_t conns_size = sizeof(struct spdk_iscsi_conn) * MAX_ISCSI_CONNECTIONS;
@@ -125,6 +127,7 @@ int spdk_initialize_iscsi_conns(void)
 
 	SPDK_DEBUGLOG(SPDK_LOG_ISCSI, "spdk_iscsi_init\n");
 
+    // zhou: why put "g_conns_array[]" in shared memory ?
 	snprintf(g_shm_name, sizeof(g_shm_name), "/spdk_iscsi_conns.%d", spdk_app_get_shm_id());
 	g_conns_array_fd = shm_open(g_shm_name, O_RDWR | O_CREAT, 0600);
 	if (g_conns_array_fd < 0) {
@@ -175,6 +178,7 @@ err:
 	return -1;
 }
 
+// zhou:
 static void
 spdk_iscsi_poll_group_add_conn_sock(struct spdk_iscsi_conn *conn)
 {
@@ -185,6 +189,7 @@ spdk_iscsi_poll_group_add_conn_sock(struct spdk_iscsi_conn *conn)
 
 	poll_group = &g_spdk_iscsi.poll_group[conn->lcore];
 
+    // zhou:
 	rc = spdk_sock_group_add_sock(poll_group->sock_group, conn->sock, spdk_iscsi_conn_sock_cb, conn);
 	if (rc < 0) {
 		SPDK_ERRLOG("Failed to add sock=%p of conn=%p\n", conn->sock, conn);
@@ -207,6 +212,7 @@ spdk_iscsi_poll_group_remove_conn_sock(struct spdk_iscsi_conn *conn)
 	}
 }
 
+// zhou:
 static void
 spdk_iscsi_poll_group_add_conn(struct spdk_iscsi_conn *conn)
 {
@@ -218,6 +224,8 @@ spdk_iscsi_poll_group_add_conn(struct spdk_iscsi_conn *conn)
 
 	conn->is_stopped = false;
 	STAILQ_INSERT_TAIL(&poll_group->connections, conn, link);
+
+    // zhou:
 	spdk_iscsi_poll_group_add_conn_sock(conn);
 }
 
@@ -248,6 +256,7 @@ spdk_iscsi_poll_group_remove_conn(struct spdk_iscsi_conn *conn)
  *
  * \endcode
  */
+// zhou:
 int
 spdk_iscsi_conn_construct(struct spdk_iscsi_portal *portal,
 			  struct spdk_sock *sock)
@@ -350,7 +359,9 @@ error_return:
 	conn->lcore = spdk_env_get_current_core();
 	__sync_fetch_and_add(&g_num_connections[conn->lcore], 1);
 
+    // zhou:
 	spdk_iscsi_poll_group_add_conn(conn);
+
 	return 0;
 }
 
@@ -1313,7 +1324,9 @@ spdk_iscsi_conn_handle_incoming_pdus(struct spdk_iscsi_conn *conn)
 			return SPDK_ISCSI_CONNECTION_FATAL;
 		}
 
+        // zhou:
 		rc = spdk_iscsi_execute(conn, pdu);
+
 		spdk_put_pdu(pdu);
 		if (rc != 0) {
 			SPDK_ERRLOG("spdk_iscsi_execute() fatal error on %s(%s)\n",
@@ -1331,6 +1344,7 @@ spdk_iscsi_conn_handle_incoming_pdus(struct spdk_iscsi_conn *conn)
 	return i;
 }
 
+// zhou:
 static void
 spdk_iscsi_conn_sock_cb(void *arg, struct spdk_sock_group *group, struct spdk_sock *sock)
 {
@@ -1344,6 +1358,7 @@ spdk_iscsi_conn_sock_cb(void *arg, struct spdk_sock_group *group, struct spdk_so
 		return;
 	}
 
+    // zhou:
 	/* Handle incoming PDUs */
 	rc = spdk_iscsi_conn_handle_incoming_pdus(conn);
 	if (rc < 0) {

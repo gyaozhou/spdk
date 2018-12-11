@@ -66,7 +66,8 @@
 #define HAVE_ARC4RANDOM 1
 #endif
 
-// zhou:
+// zhou: dynamic configuration, firstly were set by config file or RPC
+//       "set_iscsi_options". Then part of them could be updated by other RPC.
 struct spdk_iscsi_globals g_spdk_iscsi = {
 	.mutex = PTHREAD_MUTEX_INITIALIZER,
 	.portal_head = TAILQ_HEAD_INITIALIZER(g_spdk_iscsi.portal_head),
@@ -1172,6 +1173,7 @@ spdk_iscsi_op_login_update_param(struct spdk_iscsi_conn *conn,
  * 0, success;
  * otherwise: error;
  */
+// zhou:
 static int
 spdk_iscsi_op_login_session_discovery_chap(struct spdk_iscsi_conn *conn)
 {
@@ -1625,6 +1627,7 @@ spdk_iscsi_op_login_set_target_info(struct spdk_iscsi_conn *conn,
  * SPDK_ISCSI_LOGIN_ERROR_PARAMETER, parameter error;
  * SPDK_ISCSI_LOGIN_ERROR_RESPONSE,  used to notify the login fail.
  */
+// zhou:
 static int
 spdk_iscsi_op_login_phase_none(struct spdk_iscsi_conn *conn,
 			       struct spdk_iscsi_pdu *rsp_pdu,
@@ -2072,6 +2075,7 @@ spdk_iscsi_op_login_rsp_handle(struct spdk_iscsi_conn *conn,
 	return rc;
 }
 
+// zhou:
 static int
 spdk_iscsi_op_login(struct spdk_iscsi_conn *conn, struct spdk_iscsi_pdu *pdu)
 {
@@ -4208,6 +4212,7 @@ spdk_iscsi_execute(struct spdk_iscsi_conn *conn, struct spdk_iscsi_pdu *pdu)
 
 	SPDK_DEBUGLOG(SPDK_LOG_ISCSI, "opcode %x\n", opcode);
 
+    // zhou:
 	if (opcode == ISCSI_OP_LOGIN) {
 		rc = spdk_iscsi_op_login(conn, pdu);
 		if (rc < 0) {

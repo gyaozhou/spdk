@@ -285,6 +285,7 @@ struct spdk_iscsi_sess {
 	uint32_t current_text_itt;
 };
 
+// zhou: integrate iSCSI with Event Framework.
 struct spdk_iscsi_poll_group {
 	uint32_t					core;
 	struct spdk_poller				*poller;
@@ -293,6 +294,7 @@ struct spdk_iscsi_poll_group {
 	struct spdk_sock_group				*sock_group;
 };
 
+// zhou: all these fields could be set by config file or RPC "set_iscsi_options"
 struct spdk_iscsi_opts {
 	char *authfile;
 	char *nodebase;
@@ -315,12 +317,14 @@ struct spdk_iscsi_opts {
 	uint32_t min_connections_per_core;
 };
 
-// zhou:
+// zhou: core configuration
 struct spdk_iscsi_globals {
 	char *authfile;
 	char *nodebase;
 
 	pthread_mutex_t mutex;
+    // zhou: "TAILQ_HEAD(tailhead, entry) head;"
+    //       Network Entity.
 	TAILQ_HEAD(, spdk_iscsi_portal)		portal_head;
 	TAILQ_HEAD(, spdk_iscsi_portal_grp)	pg_head;
 	TAILQ_HEAD(, spdk_iscsi_init_grp)	ig_head;
@@ -344,6 +348,7 @@ struct spdk_iscsi_globals {
 	uint32_t MaxConnectionsPerSession;
 	uint32_t MaxConnections;
 	uint32_t MaxQueueDepth;
+
 	uint32_t DefaultTime2Wait;
 	uint32_t DefaultTime2Retain;
 	uint32_t FirstBurstLength;
@@ -357,7 +362,9 @@ struct spdk_iscsi_globals {
 	struct spdk_mempool *session_pool;
 	struct spdk_mempool *task_pool;
 
+    // zhou: session array should be allocated in initialization.
 	struct spdk_iscsi_sess	**session;
+    // zhou:
 	struct spdk_iscsi_poll_group *poll_group;
 };
 

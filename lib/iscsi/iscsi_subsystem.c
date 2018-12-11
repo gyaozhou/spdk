@@ -47,6 +47,13 @@
 #include "spdk_internal/event.h"
 #include "spdk_internal/log.h"
 
+// zhou: "g_spdk_iscsi_opts" was used in two place:
+//       1. temporary variable for config file's section [iSCSI]. And will be
+//       set NUll again. The config file will be firstly parsed when APP start.
+//       2. then RPC will be used before subsystem init. And this variable will
+//       be used to control this RPC will be called only once.
+//
+//       So, it will be used in initilized phase only.
 struct spdk_iscsi_opts *g_spdk_iscsi_opts = NULL;
 
 static spdk_iscsi_init_cb g_init_cb_fn = NULL;
@@ -486,7 +493,7 @@ spdk_iscsi_opts_copy(struct spdk_iscsi_opts *src)
 	return dst;
 }
 
-// zhou: parse config file,
+// zhou: fill "struct spdk_iscsi_opts", by section [iSCSI].
 static int
 spdk_iscsi_read_config_file_params(struct spdk_conf_section *sp,
 				   struct spdk_iscsi_opts *opts)
@@ -715,7 +722,7 @@ spdk_iscsi_opts_verify(struct spdk_iscsi_opts *opts)
 	return 0;
 }
 
-// zhou:
+// zhou: iSCSI configuration from config file section [iSCSI].
 static int
 spdk_iscsi_parse_options(struct spdk_iscsi_opts **popts)
 {
@@ -732,7 +739,7 @@ spdk_iscsi_parse_options(struct spdk_iscsi_opts **popts)
 	/* Process parameters */
 	SPDK_DEBUGLOG(SPDK_LOG_ISCSI, "spdk_iscsi_read_config_file_parmas\n");
 
-    // zhou: only take care section "iSCSI" of config file
+    // zhou: find section [iSCSI]
 	sp = spdk_conf_find_section(NULL, "iSCSI");
 	if (sp != NULL) {
 		rc = spdk_iscsi_read_config_file_params(sp, opts);
@@ -748,6 +755,7 @@ spdk_iscsi_parse_options(struct spdk_iscsi_opts **popts)
 	return 0;
 }
 
+// zhou: copy to "g_spdk_iscsi"
 static int
 spdk_iscsi_set_global_params(struct spdk_iscsi_opts *opts)
 {
@@ -790,6 +798,7 @@ spdk_iscsi_set_global_params(struct spdk_iscsi_opts *opts)
 	g_spdk_iscsi.mutual_chap = opts->mutual_chap;
 	g_spdk_iscsi.chap_group = opts->chap_group;
 
+    // zhou: default 4
 	spdk_iscsi_conn_set_min_per_core(opts->min_connections_per_core);
 
 	spdk_iscsi_log_globals();
@@ -808,7 +817,7 @@ spdk_iscsi_set_discovery_auth(bool disable_chap, bool require_chap, bool mutual_
 		return -EINVAL;
 	}
 
-    // zhou: will be checked for each session login.
+    // zhou: update CHAP.
 	pthread_mutex_lock(&g_spdk_iscsi.mutex);
 	g_spdk_iscsi.disable_chap = disable_chap;
 	g_spdk_iscsi.require_chap = require_chap;
@@ -1133,11 +1142,14 @@ spdk_iscsi_chap_get_authinfo(struct iscsi_chap_auth *auth, const char *authuser,
 	return 0;
 }
 
+// zhou: init "g_spdk_iscsi" by config file section [iSCSI] if have.
 static int
 spdk_iscsi_initialize_global_params(void)
 {
 	int rc;
 
+    // zhou: not set, means RPC "set_iscsi_options" not invoked. Use config file.
+    //       Otherwise, means the "g_spdk_iscsi_opts" was set by RPC.
 	if (!g_spdk_iscsi_opts) {
 		rc = spdk_iscsi_parse_options(&g_spdk_iscsi_opts);
 		if (rc != 0) {
@@ -1146,6 +1158,10 @@ spdk_iscsi_initialize_global_params(void)
 		}
 	}
 
+    // zhou: at this time, "g_spdk_iscsi_opts" comes from RPC or config file.
+    //       RPC takes higher priority.
+
+    // zhou: copy from "g_spdk_iscsi_opts" to "g_spdk_iscsi".
 	rc = spdk_iscsi_set_global_params(g_spdk_iscsi_opts);
 	if (rc != 0) {
 		SPDK_ERRLOG("spdk_iscsi_set_global_params() failed\n");
@@ -1169,6 +1185,7 @@ spdk_iscsi_init_complete(int rc)
 	cb_fn(cb_arg, rc);
 }
 
+// zhou:
 static int
 spdk_iscsi_poll_group_poll(void *ctx)
 {
@@ -1180,11 +1197,13 @@ spdk_iscsi_poll_group_poll(void *ctx)
 		return 0;
 	}
 
+    // zhou: handle socket.
 	rc = spdk_sock_group_poll(group->sock_group);
 	if (rc < 0) {
 		SPDK_ERRLOG("Failed to poll sock_group=%p\n", group->sock_group);
 	}
 
+    // zhou: clean up useless connections.
 	STAILQ_FOREACH_SAFE(conn, &group->connections, link, tmp) {
 		if (conn->state == ISCSI_CONN_STATE_EXITING) {
 			spdk_iscsi_conn_destruct(conn);
@@ -1207,6 +1226,7 @@ spdk_iscsi_poll_group_handle_nop(void *ctx)
 	return -1;
 }
 
+// zhou: register callback function to poll received messages.
 static void
 iscsi_create_poll_group(void *ctx)
 {
@@ -1240,39 +1260,46 @@ iscsi_unregister_poll_group(void *ctx)
 	spdk_poller_unregister(&pg->nop_poller);
 }
 
+// zhou: register socket handler to event framework.
 static void
 spdk_initialize_iscsi_poll_group(spdk_thread_fn cpl)
 {
 	size_t g_num_poll_groups = spdk_env_get_last_core() + 1;
 
 	g_spdk_iscsi.poll_group = calloc(g_num_poll_groups, sizeof(struct spdk_iscsi_poll_group));
+
 	if (!g_spdk_iscsi.poll_group) {
 		SPDK_ERRLOG("Failed to allocated iscsi poll group\n");
 		spdk_iscsi_init_complete(-1);
 		return;
 	}
 
+    // zhou: send fibre to each threads. Fibre will execute "iscsi_create_poll_group()"
 	/* Send a message to each thread and create a poll group */
 	spdk_for_each_thread(iscsi_create_poll_group, NULL, cpl);
 }
 
+// zhou: run in each threads, to parse Portal Group, Initiator Group, Target Nodes.
 static void
 spdk_iscsi_parse_configuration(void *ctx)
 {
 	int rc;
 
+    // zhou: build Portal Group from Config file if possible.
 	rc = spdk_iscsi_parse_portal_grps();
 	if (rc < 0) {
 		SPDK_ERRLOG("spdk_iscsi_parse_portal_grps() failed\n");
 		goto end;
 	}
 
+    // zhou: build Initiator Group from Config file if possible.
 	rc = spdk_iscsi_parse_init_grps();
 	if (rc < 0) {
 		SPDK_ERRLOG("spdk_iscsi_parse_init_grps() failed\n");
 		goto end;
 	}
 
+    // zhou: build Target Node from Config file if possbile.
 	rc = spdk_iscsi_parse_tgt_nodes();
 	if (rc < 0) {
 		SPDK_ERRLOG("spdk_iscsi_parse_tgt_nodes() failed\n");
@@ -1294,17 +1321,21 @@ end:
 	spdk_iscsi_init_complete(rc);
 }
 
+// zhou: solid work of init iSCSI and start to work.
 static int
 spdk_iscsi_parse_globals(void)
 {
 	int rc;
 
+    // zhou: set "g_spdk_iscsi" by RPC or config file, excluding Portal,
+    //       Portal Group, Initiator Group, Target, Auth Group.
 	rc = spdk_iscsi_initialize_global_params();
 	if (rc != 0) {
 		SPDK_ERRLOG("spdk_iscsi_initialize_iscsi_global_params() failed\n");
 		return rc;
 	}
 
+    // zhou: Max iSCSI session supported.
 	g_spdk_iscsi.session = spdk_dma_zmalloc(sizeof(void *) * g_spdk_iscsi.MaxSessions, 0, NULL);
 	if (!g_spdk_iscsi.session) {
 		SPDK_ERRLOG("spdk_dma_zmalloc() failed for session array\n");
@@ -1319,24 +1350,31 @@ spdk_iscsi_parse_globals(void)
 	 */
 	g_spdk_iscsi.MaxConnections = g_spdk_iscsi.MaxSessions;
 
+    // zhou: init "pdu", "session", "task" object pools.
 	rc = spdk_iscsi_initialize_all_pools();
 	if (rc != 0) {
 		SPDK_ERRLOG("spdk_initialize_all_pools() failed\n");
 		return -1;
 	}
 
+    // zhou: init "connection" object array.
 	rc = spdk_initialize_iscsi_conns();
 	if (rc < 0) {
 		SPDK_ERRLOG("spdk_initialize_iscsi_conns() failed\n");
 		return rc;
 	}
 
+    // zhou: ask each thread to register socket handler to event framework.
+    //       The network entity including Portal, Port Group, Initator Group,
+    //       will be parsed here and could be updated when running.
 	spdk_initialize_iscsi_poll_group(spdk_iscsi_parse_configuration);
 	return 0;
 }
 
-// zhou: subsystem init, support async init completed, using "cb_fn".
+// zhou: subsystem init, async init completed, using "cb_fn".
 //       It's a good support async completion.
+//       In case of deferred initialization, this function execution will be
+//       deferred.
 void
 spdk_iscsi_init(spdk_iscsi_init_cb cb_fn, void *cb_arg)
 {
@@ -1346,12 +1384,14 @@ spdk_iscsi_init(spdk_iscsi_init_cb cb_fn, void *cb_arg)
 	g_init_cb_fn = cb_fn;
 	g_init_cb_arg = cb_arg;
 
+    // zhou: set "struct spdk_iscsi_globals g_spdk_iscsi" and start to work.
 	rc = spdk_iscsi_parse_globals();
 	if (rc < 0) {
 		SPDK_ERRLOG("spdk_iscsi_parse_globals() failed\n");
 		spdk_iscsi_init_complete(-1);
 	}
 
+    // zhou: pay attention to this comment.
 	/*
 	 * spdk_iscsi_parse_configuration() will be called as the callback to
 	 * spdk_initialize_iscsi_poll_group() and will complete iSCSI

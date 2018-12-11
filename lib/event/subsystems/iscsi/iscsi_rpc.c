@@ -66,6 +66,7 @@ static const struct spdk_json_object_decoder rpc_set_iscsi_opts_decoders[] = {
 	{"min_connections_per_core", offsetof(struct spdk_iscsi_opts, min_connections_per_core), spdk_json_decode_uint32, true},
 };
 
+// zhou:
 static void
 spdk_rpc_iscsi_set_opts(struct spdk_jsonrpc_request *request,
 			const struct spdk_json_val *params)
@@ -73,6 +74,9 @@ spdk_rpc_iscsi_set_opts(struct spdk_jsonrpc_request *request,
 	struct spdk_iscsi_opts *opts;
 	struct spdk_json_write_ctx *w;
 
+    // zhou: "set_iscsi_options method, Set global parameters for iSCSI targets.
+    //       This RPC may only be called before SPDK subsystems have been initialized.
+    //       This RPC can be called only once."
 	if (g_spdk_iscsi_opts != NULL) {
 		SPDK_ERRLOG("this RPC must not be called more than once.\n");
 		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
@@ -117,4 +121,7 @@ spdk_rpc_iscsi_set_opts(struct spdk_jsonrpc_request *request,
 	spdk_json_write_bool(w, true);
 	spdk_jsonrpc_end_result(request, w);
 }
+// zhou: "set_iscsi_options method, Set global parameters for iSCSI targets.
+//       This RPC may only be called before SPDK subsystems have been initialized.
+//       This RPC can be called only once."
 SPDK_RPC_REGISTER("set_iscsi_options", spdk_rpc_iscsi_set_opts, SPDK_RPC_STARTUP)

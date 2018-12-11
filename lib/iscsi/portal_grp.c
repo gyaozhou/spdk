@@ -172,6 +172,7 @@ spdk_iscsi_portal_destroy(struct spdk_iscsi_portal *p)
 
 }
 
+// zhou: README,
 static int
 spdk_iscsi_portal_open(struct spdk_iscsi_portal *p)
 {
@@ -200,6 +201,7 @@ spdk_iscsi_portal_open(struct spdk_iscsi_portal *p)
 	 * the requests will be queued by the nonzero backlog of the socket
 	 * or resend by TCP.
 	 */
+    // zhou:
 	spdk_iscsi_acceptor_start(p);
 
 	return 0;
@@ -216,6 +218,7 @@ spdk_iscsi_portal_close(struct spdk_iscsi_portal *p)
 	}
 }
 
+// zhou:
 static int
 spdk_iscsi_parse_portal(const char *portalstring, struct spdk_iscsi_portal **ip,
 			int dry_run)
@@ -392,6 +395,7 @@ spdk_iscsi_portal_grp_add_portal(struct spdk_iscsi_portal_grp *pg,
 	TAILQ_INSERT_TAIL(&pg->head, p, per_pg_tailq);
 }
 
+// zhou: README,
 static int
 spdk_iscsi_parse_portal_grp(struct spdk_conf_section *sp)
 {
@@ -434,6 +438,7 @@ spdk_iscsi_parse_portal_grp(struct spdk_conf_section *sp)
 		return -1;
 	}
 
+    // zhou:
 	pg = spdk_iscsi_portal_grp_create(spdk_conf_section_get_num(sp));
 	if (!pg) {
 		SPDK_ERRLOG("portal group malloc error (%s)\n", spdk_conf_section_get_name(sp));
@@ -461,6 +466,7 @@ spdk_iscsi_parse_portal_grp(struct spdk_conf_section *sp)
 		spdk_iscsi_portal_grp_add_portal(pg, p);
 	}
 
+    // zhou:
 	rc = spdk_iscsi_portal_grp_open(pg);
 	if (rc != 0) {
 		SPDK_ERRLOG("portal_grp_open failed\n");
@@ -495,6 +501,7 @@ spdk_iscsi_portal_grp_find_by_tag(int tag)
 	return NULL;
 }
 
+// zhou:
 int
 spdk_iscsi_parse_portal_grps(void)
 {
@@ -538,6 +545,7 @@ spdk_iscsi_portal_grps_destroy(void)
 	pthread_mutex_unlock(&g_spdk_iscsi.mutex);
 }
 
+// zhou:
 int
 spdk_iscsi_portal_grp_open(struct spdk_iscsi_portal_grp *pg)
 {
@@ -545,6 +553,7 @@ spdk_iscsi_portal_grp_open(struct spdk_iscsi_portal_grp *pg)
 	int rc;
 
 	TAILQ_FOREACH(p, &pg->head, per_pg_tailq) {
+        // zhou:
 		rc = spdk_iscsi_portal_open(p);
 		if (rc < 0) {
 			return rc;

@@ -86,30 +86,59 @@ typedef void (*spdk_sighandler_t)(int signal);
 /**
  * \brief Event framework initialization options
  */
-// zhou: README,
+// zhou: CLI options
 struct spdk_app_opts {
+    // zhou: user defined App name.
 	const char *name;
+    // zhou: "-c", deprecated, SPDK APP were configured using a configuration file.
 	const char *config_file;
+    // zhou: "-r", RPC listen address
 	const char *rpc_addr; /* Can be UNIX domain socket path or IP address + TCP port */
+    // zhou: "-m", application CPU mask
 	const char *reactor_mask;
+    // zhou: "-e", "SPDK has an experimental low overhead tracing framework.
+    //       Tracepoints in this framework are organized into tracepoint groups.
+    //       By default, all tracepoint groups are disabled. --tpoint-group-mask
+    //       can be used to enable a specific subset of tracepoint groups in the
+    //       application."
 	const char *tpoint_group_mask;
-
+    // zhou: "-i", used in multi process mode.
 	int shm_id;
 
 	spdk_app_shutdown_cb	shutdown_cb;
 	spdk_sighandler_t	usr1_handler;
-
+    // zhou: "-d"
 	bool			enable_coredump;
+    // zhou: "-n"
 	int			mem_channel;
+    // zhou: "-p"
 	int			master_core;
+    // zhou: "-s"
 	int			mem_size;
+    // zhou: "-u", disable PCI access,
+    //       "If SPDK is run with PCI access disabled it won't detect any PCI
+    //       devices. This includes primarily NVMe and IOAT devices. Also, the
+    //       VFIO and UIO kernel modules are not required in this mode."
 	bool			no_pci;
+    // zhou: "-g",
 	bool			hugepage_single_segments;
+    // zhou: "-R",
+    //       "By default, each DPDK-based application tries to remove any orphaned
+    //       hugetlbfs files during its initialization. This option removes
+    //       hugetlbfs files of the current process as soon as they're created,
+    //       but is not compatible with --shm-id."
 	bool			unlink_hugepage;
+    // zhou: "--huge-dir", allocate hugepages from a specific mount
 	const char		*hugedir;
+    // zhou: "-L",
+    //       "with --logflag all enabling all of them. Debug logs are only
+    //       available in debug builds of SPDK."
 	enum spdk_log_level	print_level;
+
 	size_t			num_pci_addr;
+    // zhou: "-B",
 	struct spdk_pci_addr	*pci_blacklist;
+    // zhou: "-W",
 	struct spdk_pci_addr	*pci_whitelist;
 
 	/* The maximum latency allowed when passing an event
@@ -119,6 +148,7 @@ struct spdk_app_opts {
 	 */
 	uint64_t		max_delay_us;
 
+    // zhou: "–wait-for-rpc"
 	/* Wait for the associated RPC before initializing subsystems
 	 * when this flag is enabled.
 	 */
@@ -221,6 +251,7 @@ int spdk_app_parse_core_mask(const char *mask, struct spdk_cpuset *cpumask);
  */
 struct spdk_cpuset *spdk_app_get_core_mask(void);
 
+// zhou: SPDK support CLI options.
 #define SPDK_APP_GETOPT_STRING "c:de:ghi:m:n:p:r:s:uB:L:RW:"
 
 enum spdk_app_parse_args_rvals {

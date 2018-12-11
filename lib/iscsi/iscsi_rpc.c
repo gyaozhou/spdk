@@ -825,6 +825,7 @@ spdk_rpc_add_portal_group(struct spdk_jsonrpc_request *request,
 		spdk_iscsi_portal_grp_add_portal(pg, portal);
 	}
 
+    // zhou:
 	rc = spdk_iscsi_portal_grp_open(pg);
 	if (rc != 0) {
 		SPDK_ERRLOG("portal_grp_open failed\n");

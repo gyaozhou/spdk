@@ -626,6 +626,7 @@ spdk_iscsi_init_grp_find_by_tag(int tag)
 	return NULL;
 }
 
+// zhou:
 int
 spdk_iscsi_parse_init_grps(void)
 {

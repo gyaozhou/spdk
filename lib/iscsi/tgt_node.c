@@ -1198,6 +1198,7 @@ spdk_iscsi_parse_tgt_node(struct spdk_conf_section *sp)
 	return 0;
 }
 
+// zhou:
 int spdk_iscsi_parse_tgt_nodes(void)
 {
 	struct spdk_conf_section *sp;

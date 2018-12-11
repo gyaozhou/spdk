@@ -239,6 +239,7 @@ __shutdown_event_cb(void *arg1, void *arg2)
 	g_spdk_app.shutdown_cb();
 }
 
+// zhou: check whether user APP dedicatd CLI options conflicted with SPDK's.
 static int
 spdk_app_opts_validate(const char *app_opts)
 {
@@ -357,6 +358,7 @@ spdk_app_start_rpc(void *arg1, void *arg2)
 	}
 }
 
+// zhou: parse config file into tree
 static struct spdk_conf *
 spdk_app_setup_conf(const char *config_file)
 {
@@ -365,18 +367,22 @@ spdk_app_setup_conf(const char *config_file)
 
 	config = spdk_conf_allocate();
 	assert(config != NULL);
+
 	if (config_file) {
 		rc = spdk_conf_read(config, config_file);
 		if (rc != 0) {
 			SPDK_ERRLOG("Could not read config file %s\n", config_file);
 			goto error;
 		}
+        // zhou: check whether there is valid content.
 		if (spdk_conf_first_section(config) == NULL) {
 			SPDK_ERRLOG("Invalid config file %s\n", config_file);
 			goto error;
 		}
 	}
+
 	spdk_conf_set_as_default(config);
+
 	return config;
 
 error:
@@ -406,6 +412,7 @@ spdk_app_opts_add_pci_addr(struct spdk_app_opts *opts, struct spdk_pci_addr **li
 	return 0;
 }
 
+// zhou: combine CLI options and config file.
 static int
 spdk_app_read_config_file_global_params(struct spdk_app_opts *opts)
 {
@@ -585,6 +592,7 @@ spdk_app_start(struct spdk_app_opts *opts, spdk_event_fn start_fn,
 		sleep(10);
 	}
 
+    // zhou: apply log level firstly.
 	spdk_log_set_print_level(opts->print_level);
 
 #ifndef SPDK_NO_RLIMIT
@@ -596,12 +604,13 @@ spdk_app_start(struct spdk_app_opts *opts, spdk_event_fn start_fn,
 	}
 #endif
 
-
+    // zhou: parse config file in "struct spdk_config"
 	config = spdk_app_setup_conf(opts->config_file);
 	if (config == NULL) {
 		goto app_start_setup_conf_err;
 	}
 
+    // zhou: update CLI options according to config file.
 	if (spdk_app_read_config_file_global_params(opts) < 0) {
 		goto app_start_setup_conf_err;
 	}
@@ -618,7 +627,7 @@ spdk_app_start(struct spdk_app_opts *opts, spdk_event_fn start_fn,
 	spdk_log_open();
 	SPDK_NOTICELOG("Total cores available: %d\n", spdk_env_get_core_count());
 
-    // zhou: message memory pool.
+    // zhou: message memory pool setup.
 	spdk_thread_lib_init();
 
 	/*
@@ -779,7 +788,7 @@ usage(void (*app_usage)(void))
 	}
 }
 
-// zhou: README,
+// zhou: parse SPDK and customer defined CLI options in one line.
 spdk_app_parse_args_rvals_t
 spdk_app_parse_args(int argc, char **argv, struct spdk_app_opts *opts,
 		    const char *app_getopt_str, struct option *app_long_opts,
@@ -793,6 +802,8 @@ spdk_app_parse_args(int argc, char **argv, struct spdk_app_opts *opts,
 
 	memcpy(&g_default_opts, opts, sizeof(g_default_opts));
 
+    // zhou: although specified the config file in CLI, once it is not accesible,
+    //       ignore it.
 	if (opts->config_file && access(opts->config_file, F_OK) != 0) {
 		opts->config_file = NULL;
 	}
@@ -806,19 +817,20 @@ spdk_app_parse_args(int argc, char **argv, struct spdk_app_opts *opts,
 	}
 
 	global_long_opts_len = SPDK_COUNTOF(g_cmdline_options);
-
 	cmdline_options = calloc(global_long_opts_len + app_long_opts_len + 1, sizeof(*cmdline_options));
 	if (!cmdline_options) {
 		fprintf(stderr, "Out of memory\n");
 		return SPDK_APP_PARSE_ARGS_FAIL;
 	}
 
+    // zhou: combine user App dedicated CLI long options and SPDK support CLI options.
 	memcpy(&cmdline_options[0], g_cmdline_options, sizeof(g_cmdline_options));
 	if (app_long_opts) {
 		memcpy(&cmdline_options[global_long_opts_len], app_long_opts,
 		       app_long_opts_len * sizeof(*app_long_opts));
 	}
 
+    // zhou: check whether user APP dedicatd CLI options conflicted with SPDK's.
 	if (app_getopt_str != NULL) {
 		ch = spdk_app_opts_validate(app_getopt_str);
 		if (ch) {
@@ -828,6 +840,7 @@ spdk_app_parse_args(int argc, char **argv, struct spdk_app_opts *opts,
 		}
 	}
 
+    // zhou: combine user App dedicated CLI short options and SPDK support CLI options.
 	cmdline_short_opts = spdk_sprintf_alloc("%s%s", app_getopt_str, SPDK_APP_GETOPT_STRING);
 	if (!cmdline_short_opts) {
 		fprintf(stderr, "Out of memory\n");
@@ -985,6 +998,8 @@ spdk_app_parse_args(int argc, char **argv, struct spdk_app_opts *opts,
 			usage(app_usage);
 			goto out;
 		default:
+            // zhou: all else CLI options should be parsed by client callback
+            //       function.
 			app_parse(ch, optarg);
 		}
 	}

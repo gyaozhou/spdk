@@ -70,10 +70,14 @@
 enum iscsi_op {
 	/* Initiator opcodes */
 	ISCSI_OP_NOPOUT         = 0x00,
+    // zhou: SCSI Command Block Descriptor
 	ISCSI_OP_SCSI           = 0x01,
+    // zhou: SCSI Task Management
 	ISCSI_OP_TASK           = 0x02,
 	ISCSI_OP_LOGIN          = 0x03,
+    // zhou: iSCSI TEXT Command
 	ISCSI_OP_TEXT           = 0x04,
+    // zhou: SCSI Data used in write
 	ISCSI_OP_SCSI_DATAOUT   = 0x05,
 	ISCSI_OP_LOGOUT         = 0x06,
 	ISCSI_OP_SNACK          = 0x10,

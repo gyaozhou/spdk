@@ -69,6 +69,7 @@
 
 struct spdk_poller;
 
+// zhou:
 struct spdk_iscsi_conn {
 	int				id;
 	int				is_valid;

@@ -45,6 +45,7 @@
 
 #define ACCEPT_TIMEOUT_US 1000 /* 1ms */
 
+// zhou:
 static int
 spdk_iscsi_portal_accept(void *arg)
 {
@@ -60,6 +61,7 @@ spdk_iscsi_portal_accept(void *arg)
 	while (1) {
 		sock = spdk_sock_accept(portal->sock);
 		if (sock != NULL) {
+            // zhou:
 			rc = spdk_iscsi_conn_construct(portal, sock);
 			if (rc < 0) {
 				spdk_sock_close(&sock);
@@ -78,6 +80,7 @@ spdk_iscsi_portal_accept(void *arg)
 	return count;
 }
 
+// zhou:
 void
 spdk_iscsi_acceptor_start(struct spdk_iscsi_portal *p)
 {

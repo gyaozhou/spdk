@@ -39,26 +39,38 @@
 #include "spdk/log.h"
 
 struct spdk_conf_value {
+    // zhou: refer to next value of this key-value pair
 	struct spdk_conf_value *next;
+    // zhou: value
 	char *value;
 };
 
 struct spdk_conf_item {
+    // zhou: refer to next key-value in this section
 	struct spdk_conf_item *next;
+
+    // zhou: key
 	char *key;
+    // zhou: head of value list
 	struct spdk_conf_value *val;
 };
 
 struct spdk_conf_section {
+    // zhou: refer to next section in list
 	struct spdk_conf_section *next;
+    // zhou: section name
 	char *name;
 	int num;
+
+    // zhou: head of key-value list
 	struct spdk_conf_item *item;
 };
 
+// zhou: tree of config file
 struct spdk_conf {
 	char *file;
 	struct spdk_conf_section *current_section;
+    // zhou: head of section list
 	struct spdk_conf_section *section;
 };
 
@@ -66,6 +78,7 @@ struct spdk_conf {
 
 #define LIB_MAX_TMPBUF 1024
 
+// zhou: default config means before subsystem init.
 static struct spdk_conf *default_config = NULL;
 
 struct spdk_conf *
@@ -598,7 +611,7 @@ fgets_line(FILE *fp)
 	return NULL;
 }
 
-// zhou: README,
+// zhou: README, parse all sections and related key-value pair into spdk_conf.
 int
 spdk_conf_read(struct spdk_conf *cp, const char *file)
 {
