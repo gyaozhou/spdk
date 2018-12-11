@@ -67,17 +67,19 @@
 
 #define ISCSI_TEXT_MAX_KEY_LEN 63
 
+// zhou: refer to RFC 7143, Chaper 11.
 enum iscsi_op {
 	/* Initiator opcodes */
 	ISCSI_OP_NOPOUT         = 0x00,
-    // zhou: SCSI Command Block Descriptor
+    // zhou: SCSI Command (encapsulates a SCSI Command Descriptor Block)
 	ISCSI_OP_SCSI           = 0x01,
-    // zhou: SCSI Task Management
+    // zhou: SCSI Task Management Function Request
 	ISCSI_OP_TASK           = 0x02,
+    // zhou: Login Request
 	ISCSI_OP_LOGIN          = 0x03,
-    // zhou: iSCSI TEXT Command
+    // zhou: Text Request
 	ISCSI_OP_TEXT           = 0x04,
-    // zhou: SCSI Data used in write
+    // zhou: SCSI Data-Out (for write operations)
 	ISCSI_OP_SCSI_DATAOUT   = 0x05,
 	ISCSI_OP_LOGOUT         = 0x06,
 	ISCSI_OP_SNACK          = 0x10,

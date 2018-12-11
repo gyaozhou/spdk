@@ -362,6 +362,7 @@ spdk_sock_group_close(struct spdk_sock_group **group)
 	return 0;
 }
 
+// zhou: only support "posix" and "VPP". VPP could utilize DPDK.
 void
 spdk_net_impl_register(struct spdk_net_impl *impl)
 {

@@ -60,6 +60,7 @@ struct spdk_conf_section {
 	struct spdk_conf_section *next;
     // zhou: section name
 	char *name;
+    // zhou: ID for the same Section Name. "PortalGroup1", 1 is num.
 	int num;
 
     // zhou: head of key-value list
@@ -364,6 +365,7 @@ spdk_conf_section_get_name(const struct spdk_conf_section *sp)
 	return sp->name;
 }
 
+// zhou: Section Tag, which following Section Name, e.g. "PortalGroup1"
 int
 spdk_conf_section_get_num(const struct spdk_conf_section *sp)
 {

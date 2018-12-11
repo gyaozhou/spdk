@@ -51,10 +51,12 @@ struct spdk_iscsi_portal {
 	TAILQ_ENTRY(spdk_iscsi_portal)	g_tailq;
 };
 
+// zhou: Portal Group list entry.
 struct spdk_iscsi_portal_grp {
 	int ref;
 	int tag;
 	TAILQ_ENTRY(spdk_iscsi_portal_grp)	tailq;
+    // zhou: Portal list.
 	TAILQ_HEAD(, spdk_iscsi_portal)		head;
 };
 

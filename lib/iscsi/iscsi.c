@@ -1322,6 +1322,7 @@ spdk_iscsi_op_login_check_target(struct spdk_iscsi_conn *conn,
 		rsph->status_detail = ISCSI_LOGIN_TARGET_NOT_FOUND;
 		return SPDK_ISCSI_LOGIN_ERROR_RESPONSE;
 	}
+    // zhou:
 	result = spdk_iscsi_tgt_node_access(conn, *target,
 					    conn->initiator_name,
 					    conn->initiator_addr);

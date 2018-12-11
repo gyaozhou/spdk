@@ -49,11 +49,18 @@ struct spdk_iscsi_initiator_netmask {
 
 struct spdk_iscsi_init_grp {
 	int ninitiators;
+    // zhou: "InitiatorName ANY"
 	TAILQ_HEAD(, spdk_iscsi_initiator_name) initiator_head;
+
 	int nnetmasks;
+    // zhou: "Netmask 192.168.2.0/24"
 	TAILQ_HEAD(, spdk_iscsi_initiator_netmask) netmask_head;
+
 	int ref;
+    // zhou: "InitiatorGroup1"
 	int tag;
+
+    // zhou: link to Initiator Group list.
 	TAILQ_ENTRY(spdk_iscsi_init_grp)	tailq;
 };
 
@@ -67,9 +74,13 @@ int spdk_iscsi_init_grp_add_initiators_from_initiator_list(int tag,
 int spdk_iscsi_init_grp_delete_initiators_from_initiator_list(int tag,
 		int num_initiator_names, char **initiator_names,
 		int num_initiator_masks, char **initiator_masks);
+
 int spdk_iscsi_init_grp_register(struct spdk_iscsi_init_grp *ig);
 struct spdk_iscsi_init_grp *spdk_iscsi_init_grp_unregister(int tag);
+
+// zhou:
 struct spdk_iscsi_init_grp *spdk_iscsi_init_grp_find_by_tag(int tag);
+
 void spdk_iscsi_init_grp_destroy(struct spdk_iscsi_init_grp *ig);
 int spdk_iscsi_parse_init_grps(void);
 void spdk_iscsi_init_grps_destroy(void);

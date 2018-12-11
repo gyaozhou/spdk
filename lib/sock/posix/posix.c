@@ -580,6 +580,7 @@ spdk_posix_sock_group_impl_close(struct spdk_sock_group_impl *_group)
 	return close(group->fd);
 }
 
+// zhou: Posix
 static struct spdk_net_impl g_posix_net_impl = {
 	.name		= "posix",
 	.getaddr	= spdk_posix_sock_getaddr,

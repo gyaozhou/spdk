@@ -80,7 +80,7 @@ spdk_iscsi_portal_accept(void *arg)
 	return count;
 }
 
-// zhou:
+// zhou: register "acceptor" poller.
 void
 spdk_iscsi_acceptor_start(struct spdk_iscsi_portal *p)
 {

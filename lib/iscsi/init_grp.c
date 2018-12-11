@@ -330,6 +330,7 @@ cleanup:
 	return -1;
 }
 
+// zhou: Initiator Portal only includes source IP.
 /* Read spdk iscsi target's config file and create initiator group */
 static int
 spdk_iscsi_parse_init_grp(struct spdk_conf_section *sp)
@@ -445,6 +446,7 @@ cleanup:
 	return rc;
 }
 
+// zhou: link to "g_spdk_iscsi.ig_head"
 int
 spdk_iscsi_init_grp_register(struct spdk_iscsi_init_grp *ig)
 {
@@ -626,7 +628,7 @@ spdk_iscsi_init_grp_find_by_tag(int tag)
 	return NULL;
 }
 
-// zhou:
+// zhou: alloc "InitiatorGroupXX"
 int
 spdk_iscsi_parse_init_grps(void)
 {

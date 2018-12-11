@@ -1285,14 +1285,15 @@ spdk_iscsi_parse_configuration(void *ctx)
 {
 	int rc;
 
-    // zhou: build Portal Group from Config file if possible.
+    // zhou: build Portal Group and Portal from Config file if possible.
+    //       Will add "accept" poller to Event Framework.
 	rc = spdk_iscsi_parse_portal_grps();
 	if (rc < 0) {
 		SPDK_ERRLOG("spdk_iscsi_parse_portal_grps() failed\n");
 		goto end;
 	}
 
-    // zhou: build Initiator Group from Config file if possible.
+    // zhou: build Initiator Group and Portal from Config file if possible.
 	rc = spdk_iscsi_parse_init_grps();
 	if (rc < 0) {
 		SPDK_ERRLOG("spdk_iscsi_parse_init_grps() failed\n");

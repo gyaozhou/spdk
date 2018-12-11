@@ -324,11 +324,15 @@ struct spdk_iscsi_globals {
 
 	pthread_mutex_t mutex;
     // zhou: "TAILQ_HEAD(tailhead, entry) head;"
-    //       Network Entity.
+
 	TAILQ_HEAD(, spdk_iscsi_portal)		portal_head;
+    // zhou: Portal Group list
 	TAILQ_HEAD(, spdk_iscsi_portal_grp)	pg_head;
+    // zhou: Initator Group list
 	TAILQ_HEAD(, spdk_iscsi_init_grp)	ig_head;
+    // zhou: Target Node list
 	TAILQ_HEAD(, spdk_iscsi_tgt_node)	target_head;
+
 	TAILQ_HEAD(, spdk_iscsi_auth_group)	auth_group_head;
 
 	int32_t timeout;

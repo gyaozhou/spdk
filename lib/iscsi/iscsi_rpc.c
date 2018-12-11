@@ -565,6 +565,7 @@ spdk_rpc_add_pg_ig_maps(struct spdk_jsonrpc_request *request,
 		ig_tags[i] = req.pg_ig_maps.maps[i].ig_tag;
 	}
 
+    // zhou:
 	rc = spdk_iscsi_tgt_node_add_pg_ig_maps(target, pg_tags, ig_tags,
 						req.pg_ig_maps.num_maps);
 	if (rc < 0) {

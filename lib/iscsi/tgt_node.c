@@ -229,6 +229,7 @@ static struct spdk_iscsi_pg_map *
 spdk_iscsi_tgt_node_find_pg_map(struct spdk_iscsi_tgt_node *target,
 				struct spdk_iscsi_portal_grp *pg);
 
+// zhou:
 bool
 spdk_iscsi_tgt_node_access(struct spdk_iscsi_conn *conn,
 			   struct spdk_iscsi_tgt_node *target, const char *iqn, const char *addr)
@@ -246,11 +247,14 @@ spdk_iscsi_tgt_node_access(struct spdk_iscsi_conn *conn,
 
 	SPDK_DEBUGLOG(SPDK_LOG_ISCSI, "pg=%d, iqn=%s, addr=%s\n",
 		      pg->tag, iqn, addr);
+
+    // zhou:
 	pg_map = spdk_iscsi_tgt_node_find_pg_map(target, pg);
 	if (pg_map == NULL) {
 		return false;
 	}
 	TAILQ_FOREACH(ig_map, &pg_map->ig_map_head, tailq) {
+        // zhou: check whether Initiator is allowed.
 		rc = spdk_iscsi_init_grp_allow_iscsi_name(ig_map->ig, iqn, &allowed);
 		if (rc == 0) {
 			if (allowed == false) {
@@ -296,6 +300,8 @@ spdk_iscsi_tgt_node_allow_iscsi_name(struct spdk_iscsi_tgt_node *target, const c
 	return false;
 }
 
+// zhou: refer to RFC7143, Appendix C. SendTargets Opoeration.
+//       README,
 int
 spdk_iscsi_send_tgts(struct spdk_iscsi_conn *conn, const char *iiqn,
 		     const char *iaddr, const char *tiqn, uint8_t *data, int alloc_len,
@@ -694,7 +700,7 @@ spdk_iscsi_tgt_node_add_pg_ig_map(struct spdk_iscsi_tgt_node *target,
 		SPDK_ERRLOG("%s: PortalGroup%d not found\n", target->name, pg_tag);
 		return -ENOENT;
 	}
-	ig = spdk_iscsi_init_grp_find_by_tag(ig_tag);
+[	ig = spdk_iscsi_init_grp_find_by_tag(ig_tag);
 	if (ig == NULL) {
 		SPDK_ERRLOG("%s: InitiatorGroup%d not found\n", target->name, ig_tag);
 		return -ENOENT;
@@ -857,7 +863,7 @@ spdk_iscsi_check_chap_params(bool disable, bool require, bool mutual, int group)
 	return false;
 }
 
-// zhou:
+// zhou: "spdk_iscsi_tgt_node{}"
 _spdk_iscsi_tgt_node *
 spdk_iscsi_tgt_node_construct(int target_index,
 			      const char *name, const char *alias,
@@ -966,6 +972,7 @@ spdk_iscsi_tgt_node_construct(int target_index,
 		target->queue_depth = g_spdk_iscsi.MaxQueueDepth;
 	}
 
+    // zhou: link to "g_spdk_iscsi.target_head"
 	rc = spdk_iscsi_tgt_node_register(target);
 	if (rc != 0) {
 		SPDK_ERRLOG("register target is failed\n");
@@ -1173,6 +1180,7 @@ spdk_iscsi_parse_tgt_node(struct spdk_conf_section *sp)
 		return -1;
 	}
 
+    // zhou: alloc "spdk_iscsi_tgt_node{}"
 	target = spdk_iscsi_tgt_node_construct(target_num, name, alias,
 					       pg_tag_list, ig_tag_list, num_target_maps,
 					       bdev_name_list, lun_id_list, num_luns, queue_depth,
@@ -1198,7 +1206,11 @@ spdk_iscsi_parse_tgt_node(struct spdk_conf_section *sp)
 	return 0;
 }
 
-// zhou:
+// zhou: Target Node defines backend disks they own.
+//       Define the Portal Group which can access it. One Portal Group can
+//       access more than one Target Node.
+//       Define Initiator Group who were allowed to visit their backend disk.
+//       One Initiator Group can visit more than more Target Node.
 int spdk_iscsi_parse_tgt_nodes(void)
 {
 	struct spdk_conf_section *sp;
@@ -1215,6 +1227,7 @@ int spdk_iscsi_parse_tgt_nodes(void)
 				SPDK_ERRLOG("tag %d is invalid\n", tag);
 				return -1;
 			}
+            // zhou:
 			rc = spdk_iscsi_parse_tgt_node(sp);
 			if (rc < 0) {
 				SPDK_ERRLOG("spdk_iscsi_parse_tgt_node() failed\n");
