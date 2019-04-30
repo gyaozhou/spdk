@@ -72,11 +72,13 @@ struct io_device {
 
 static TAILQ_HEAD(, io_device) g_io_devices = TAILQ_HEAD_INITIALIZER(g_io_devices);
 
+// zhou: just like Fibre, which includes callback function and context.
 struct spdk_msg {
 	spdk_thread_fn		fn;
 	void			*arg;
 };
 
+// zhou: "struct spdk_msg" pool
 static struct spdk_mempool *g_spdk_msg_mempool = NULL;
 
 enum spdk_poller_state {
@@ -90,6 +92,7 @@ enum spdk_poller_state {
 	SPDK_POLLER_STATE_UNREGISTERED,
 };
 
+// zhou:
 struct spdk_poller {
 	TAILQ_ENTRY(spdk_poller)	tailq;
 
@@ -105,9 +108,11 @@ struct spdk_poller {
 // zhou: SPDK thread private data.
 struct spdk_thread {
 	pthread_t			thread_id;
+    // zhou: callback function to handle received messages.
 	spdk_thread_pass_msg		msg_fn;
 	spdk_start_poller		start_poller_fn;
 	spdk_stop_poller		stop_poller_fn;
+
 	void				*thread_ctx;
 	TAILQ_HEAD(, spdk_io_channel)	io_channels;
 	TAILQ_ENTRY(spdk_thread)	tailq;
@@ -127,6 +132,7 @@ struct spdk_thread {
 	 */
 	TAILQ_HEAD(timer_pollers_head, spdk_poller) timer_pollers;
 
+    // zhou: message list.
 	struct spdk_ring		*messages;
 };
 
@@ -197,7 +203,8 @@ spdk_thread_lib_fini(void)
 	}
 }
 
-// zhou: "spdk_poller" is used to poll periodically, the polling callback function
+// zhou: README,
+//       "spdk_poller" is used to poll periodically, the polling callback function
 //       will be registered by spdk_poller_register().
 /*
   "spdk_thread is an abstraction for a thread of execution and spdk_poller is an
@@ -306,7 +313,7 @@ spdk_free_thread(void)
 	pthread_mutex_unlock(&g_devlist_mutex);
 }
 
-// zhou: handle messages
+// zhou: handle spdk_msg
 static inline uint32_t
 _spdk_msg_queue_run_batch(struct spdk_thread *thread, uint32_t max_msgs)
 {
@@ -375,13 +382,13 @@ spdk_thread_poll(struct spdk_thread *thread, uint32_t max_msgs)
 	struct spdk_poller *poller;
 	int rc = 0;
 
-    // zhou: handle messages
+    // zhou: handle spdk_msg
 	msg_count = _spdk_msg_queue_run_batch(thread, max_msgs);
 	if (msg_count) {
 		rc = 1;
 	}
 
-    // zhou: go through poller
+    // zhou: go through busy poller
 	poller = TAILQ_FIRST(&thread->active_pollers);
 	if (poller) {
 		int poller_rc;
@@ -389,6 +396,8 @@ spdk_thread_poll(struct spdk_thread *thread, uint32_t max_msgs)
 		TAILQ_REMOVE(&thread->active_pollers, poller, tailq);
 		poller->state = SPDK_POLLER_STATE_RUNNING;
 		poller_rc = poller->fn(poller->arg);
+
+        // zhou: stop or schedule again.
 		if (poller->state == SPDK_POLLER_STATE_UNREGISTERED) {
 			free(poller);
 		} else {
@@ -407,6 +416,7 @@ spdk_thread_poll(struct spdk_thread *thread, uint32_t max_msgs)
 		}
 	}
 
+    // zhou: go through timer poller.
 	poller = TAILQ_FIRST(&thread->timer_pollers);
 	if (poller) {
 		uint64_t now = spdk_get_ticks();
@@ -523,6 +533,9 @@ spdk_thread_send_msg(const struct spdk_thread *thread, spdk_thread_fn fn, void *
 }
 
 // zhou: register poller's callback function.
+//       Once the "period_microseconds" == 0, will be automatically append to
+//       tail of queue when completed.
+//       Once the "period_microseconds" > 0, will work like a repeatly timer.
 struct spdk_poller *
 spdk_poller_register(spdk_poller_fn fn,
 		     void *arg,

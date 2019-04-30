@@ -197,6 +197,7 @@ spdk_str_trim(char *s)
 		*q = '\0';
 	}
 
+    // zhou: move valid string in the middle to the begining.
 	/* if remove header, move */
 	if (p != s) {
 		q = s;

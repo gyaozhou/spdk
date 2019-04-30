@@ -86,10 +86,11 @@ typedef void (*spdk_sighandler_t)(int signal);
 /**
  * \brief Event framework initialization options
  */
-// zhou: CLI options
+// zhou: CLI options, used to setup basic running environment.
 struct spdk_app_opts {
     // zhou: user defined App name.
 	const char *name;
+
     // zhou: "-c", deprecated, SPDK APP were configured using a configuration file.
 	const char *config_file;
     // zhou: "-r", RPC listen address

@@ -43,6 +43,7 @@ struct spdk_subsystem_depend_list g_subsystems_deps = TAILQ_HEAD_INITIALIZER(g_s
 static struct spdk_subsystem *g_next_subsystem;
 static bool g_subsystems_initialized = false;
 
+// zhou: callback function, to notify all subsystem init done.
 static struct spdk_event *g_app_start_event;
 static struct spdk_event *g_app_stop_event;
 
@@ -133,8 +134,10 @@ spdk_subsystem_init_next(int rc)
 		g_next_subsystem = TAILQ_NEXT(g_next_subsystem, tailq);
 	}
 
+    // zhou: no more subsystem need to be inited.
 	if (!g_next_subsystem) {
 		g_subsystems_initialized = true;
+        // zhou: schedule event to notify APP.
 		spdk_event_call(g_app_start_event);
 		return;
 	}
@@ -180,6 +183,8 @@ spdk_subsystem_init(struct spdk_event *app_start_event)
 {
 	struct spdk_event *verify_event;
 
+    // zhou: register event, that will be schedule to excute when all subsytems
+    //       are inited to notify APP to start.
 	g_app_start_event = app_start_event;
 
 	verify_event = spdk_event_allocate(spdk_env_get_current_core(), spdk_subsystem_verify, NULL, NULL);

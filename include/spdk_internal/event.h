@@ -39,6 +39,7 @@
 #include "spdk/event.h"
 #include "spdk/json.h"
 
+// zhou: looks like "struct spdk_msg"
 struct spdk_event {
 	uint32_t		lcore;
 	spdk_event_fn		fn;

@@ -164,6 +164,8 @@ invalid:
 					 spdk_strerror(-rc));
 	free_rpc_construct_lvol_store(&req);
 }
+
+// zhou: Then, using like "rpc.py construct_lvol_store Malloc2 lvs -c 4096"
 SPDK_RPC_REGISTER("construct_lvol_store", spdk_rpc_construct_lvol_store, SPDK_RPC_RUNTIME)
 
 struct rpc_rename_lvol_store {

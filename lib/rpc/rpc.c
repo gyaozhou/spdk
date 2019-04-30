@@ -206,7 +206,8 @@ spdk_rpc_accept(void)
 	spdk_jsonrpc_server_poll(g_jsonrpc_server);
 }
 
-// zhou: README,
+// zhou: just append RPC "method" and callback "func",
+//       Then, using like "rpc.py construct_lvol_store Malloc2 lvs -c 4096"
 void
 spdk_rpc_register_method(const char *method, spdk_rpc_method_handler func, uint32_t state_mask)
 {

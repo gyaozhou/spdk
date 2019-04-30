@@ -251,6 +251,7 @@ spdk_mempool_free(struct spdk_mempool *mp)
 #endif
 }
 
+// zhou: Get one object from the mempool.
 void *
 spdk_mempool_get(struct spdk_mempool *mp)
 {

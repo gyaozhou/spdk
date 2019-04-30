@@ -641,6 +641,7 @@ spdk_nvme_ns_cmd_read_with_md(struct spdk_nvme_ns *ns, struct spdk_nvme_qpair *q
 	}
 }
 
+// zhou: README,
 int
 spdk_nvme_ns_cmd_readv(struct spdk_nvme_ns *ns, struct spdk_nvme_qpair *qpair,
 		       uint64_t lba, uint32_t lba_count,

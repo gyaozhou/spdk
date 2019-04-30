@@ -187,6 +187,7 @@ struct spdk_blob_store {
 	bool                            clean;
 };
 
+// zhou:
 struct spdk_bs_channel {
 	struct spdk_bs_request_set	*req_mem;
 	TAILQ_HEAD(, spdk_bs_request_set) reqs;

@@ -52,6 +52,7 @@ spdk_rpc_subsystem_poll(void *arg)
 	return -1;
 }
 
+// zhou: init RPC server
 void
 spdk_rpc_initialize(const char *listen_addr)
 {

@@ -203,6 +203,7 @@ end:
 	return;
 }
 
+// zhou: Construct a logical volume store.
 int
 vbdev_lvs_create(struct spdk_bdev *base_bdev, const char *name, uint32_t cluster_sz,
 		 spdk_lvs_op_with_handle_complete cb_fn, void *cb_arg)
@@ -283,6 +284,7 @@ _vbdev_lvs_rename_cb(void *cb_arg, int lvserrno)
 	free(req);
 }
 
+// zhou: rename a logical volume store
 void
 vbdev_lvs_rename(struct spdk_lvol_store *lvs, const char *new_lvs_name,
 		 spdk_lvs_op_complete cb_fn, void *cb_arg)
@@ -1007,7 +1009,7 @@ end:
 	free(req);
 }
 
-// zhou:
+// zhou: create a logical volume on a logical volume store
 int
 vbdev_lvol_create(struct spdk_lvol_store *lvs, const char *name, uint64_t sz,
 		  bool thin_provision, spdk_lvol_op_with_handle_complete cb_fn, void *cb_arg)

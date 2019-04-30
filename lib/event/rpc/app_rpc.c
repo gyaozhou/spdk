@@ -111,6 +111,8 @@ invalid:
 SPDK_RPC_REGISTER("kill_instance", spdk_rpc_kill_instance, SPDK_RPC_RUNTIME)
 
 
+////////////////////////////////////////////////////////////////////////////////
+// zhou: RPC for thread usage collection
 struct rpc_context_switch_monitor {
 	bool enabled;
 };
@@ -153,3 +155,5 @@ spdk_rpc_context_switch_monitor(struct spdk_jsonrpc_request *request,
 }
 
 SPDK_RPC_REGISTER("context_switch_monitor", spdk_rpc_context_switch_monitor, SPDK_RPC_RUNTIME)
+
+////////////////////////////////////////////////////////////////////////////////

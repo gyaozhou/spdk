@@ -1070,6 +1070,7 @@ spdk_lvol_create(struct spdk_lvol_store *lvs, const char *name, uint64_t sz,
 		SPDK_ERRLOG("Cannot alloc memory for lvol base pointer\n");
 		return -ENOMEM;
 	}
+
 	lvol->lvol_store = lvs;
 	num_clusters = divide_round_up(sz, spdk_bs_get_cluster_size(bs));
 	lvol->thin_provision = thin_provision;

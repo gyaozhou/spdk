@@ -54,6 +54,7 @@ spdk_env_get_first_core(void)
 	return rte_get_next_lcore(-1, 0, 0);
 }
 
+// zhou: get last DPDK enabled core index.
 uint32_t
 spdk_env_get_last_core(void)
 {

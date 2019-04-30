@@ -54,6 +54,7 @@
 #define SPDK_APP_DPDK_DEFAULT_MEM_CHANNEL	-1
 #define SPDK_APP_DPDK_DEFAULT_CORE_MASK		"0x1"
 
+// zhou: APP object
 struct spdk_app {
 	struct spdk_conf		*config;
 	int				shm_id;
@@ -62,9 +63,11 @@ struct spdk_app {
 };
 
 static struct spdk_app g_spdk_app;
+// zhou: event of client mainloop callback function
 static struct spdk_event *g_app_start_event = NULL;
 static struct spdk_event *g_shutdown_event = NULL;
 static int g_init_lcore;
+// zhou: delay some subsystem init, wait for RPC
 static bool g_delay_subsystem_init = false;
 static bool g_shutdown_sig_received = false;
 static char *g_executable_name;
@@ -260,7 +263,7 @@ spdk_app_opts_validate(const char *app_opts)
 	return 0;
 }
 
-// zhou: default options
+// zhou: setup default options
 void
 spdk_app_opts_init(struct spdk_app_opts *opts)
 {
@@ -340,13 +343,16 @@ spdk_app_setup_signal_handlers(struct spdk_app_opts *opts)
 	return 0;
 }
 
+// zhou: make RPC server in running state, and schedule client main loop event.
 static void
 spdk_app_start_application(void)
 {
 	spdk_rpc_set_state(SPDK_RPC_RUNTIME);
+
 	spdk_event_call(g_app_start_event);
 }
 
+// zhou: init RPC server, and may start APP.
 static void
 spdk_app_start_rpc(void *arg1, void *arg2)
 {
@@ -663,6 +669,9 @@ spdk_app_start(struct spdk_app_opts *opts, spdk_event_fn start_fn,
 
 	g_init_lcore = spdk_env_get_current_core();
 	g_delay_subsystem_init = opts->delay_subsystem_init;
+
+    // zhou: client's main loop callback function.
+    //       When system init completed, invoke  it.
 	g_app_start_event = spdk_event_allocate(g_init_lcore, start_fn, arg1, arg2);
 
     // zhou: RPC start event, callback function preparation
@@ -684,13 +693,17 @@ spdk_app_start(struct spdk_app_opts *opts, spdk_event_fn start_fn,
     */
 
 	if (!g_delay_subsystem_init) {
+        // zhou: init all registered subsystem, and shedule event
+        //       "rpc_start_event" when init done.
 		spdk_subsystem_init(rpc_start_event);
 	} else {
         // zhou: enqueue, will be started according RPC.
-        //       when reactor start to work, this event will be handle firstly.
+        //       when spdk_reactors_start(), this event will be handle firstly.
+        //       And RPC server init to handle RPC to init more.
 		spdk_event_call(rpc_start_event);
 	}
 
+    // zhou: blocking until DPDK thread stop to work.
 
 	/* This blocks until spdk_app_stop is called */
 	spdk_reactors_start();
@@ -1035,12 +1048,15 @@ spdk_app_usage(void)
 	usage(NULL);
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// zhou: RPC "start_subsystem_init" handler
 static void
 spdk_rpc_start_subsystem_init_cpl(void *arg1, void *arg2)
 {
 	struct spdk_jsonrpc_request *request = arg1;
 	struct spdk_json_write_ctx *w;
 
+    // zhou: start APP.
 	spdk_app_start_application();
 
 	w = spdk_jsonrpc_begin_result(request);
@@ -1068,7 +1084,10 @@ spdk_rpc_start_subsystem_init(struct spdk_jsonrpc_request *request,
 				       request, NULL);
 	spdk_subsystem_init(cb_event);
 }
+
 SPDK_RPC_REGISTER("start_subsystem_init", spdk_rpc_start_subsystem_init, SPDK_RPC_STARTUP)
+
+////////////////////////////////////////////////////////////////////////////////
 
 struct subsystem_init_poller_ctx {
 	struct spdk_poller *init_poller;
@@ -1123,3 +1142,5 @@ spdk_rpc_wait_subsystem_init(struct spdk_jsonrpc_request *request,
 }
 SPDK_RPC_REGISTER("wait_subsystem_init", spdk_rpc_wait_subsystem_init,
 		  SPDK_RPC_STARTUP | SPDK_RPC_RUNTIME)
+
+////////////////////////////////////////////////////////////////////////////////
