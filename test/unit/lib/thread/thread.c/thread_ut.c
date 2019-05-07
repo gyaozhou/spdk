@@ -35,6 +35,8 @@
 
 #include "spdk_cunit.h"
 
+#include "spdk_internal/thread.h"
+
 #include "thread/thread.c"
 #include "common/lib/ut_multithread.c"
 
@@ -342,22 +344,28 @@ thread_name(void)
 	struct spdk_thread *thread;
 	const char *name;
 
+	spdk_thread_lib_init(NULL, 0);
+
 	/* Create thread with no name, which automatically generates one */
-	spdk_allocate_thread(NULL, NULL, NULL, NULL, NULL);
+	thread = spdk_thread_create(NULL, NULL);
+	spdk_set_thread(thread);
 	thread = spdk_get_thread();
 	SPDK_CU_ASSERT_FATAL(thread != NULL);
 	name = spdk_thread_get_name(thread);
 	CU_ASSERT(name != NULL);
-	spdk_free_thread();
+	spdk_thread_exit(thread);
 
 	/* Create thread named "test_thread" */
-	spdk_allocate_thread(NULL, NULL, NULL, NULL, "test_thread");
+	thread = spdk_thread_create("test_thread", NULL);
+	spdk_set_thread(thread);
 	thread = spdk_get_thread();
 	SPDK_CU_ASSERT_FATAL(thread != NULL);
 	name = spdk_thread_get_name(thread);
 	SPDK_CU_ASSERT_FATAL(name != NULL);
 	CU_ASSERT(strcmp(name, "test_thread") == 0);
-	spdk_free_thread();
+	spdk_thread_exit(thread);
+
+	spdk_thread_lib_fini();
 }
 
 static uint64_t device1;
@@ -407,12 +415,12 @@ destroy_cb_2(void *io_device, void *ctx_buf)
 static void
 channel(void)
 {
-	struct spdk_thread *thread;
 	struct spdk_io_channel *ch1, *ch2;
 	void *ctx;
 
-	thread = spdk_allocate_thread(NULL, NULL, NULL, NULL, "thread0");
-	SPDK_CU_ASSERT_FATAL(thread != NULL);
+	allocate_threads(1);
+	set_thread(0);
+
 	spdk_io_device_register(&device1, create_cb_1, destroy_cb_1, sizeof(ctx1), NULL);
 	spdk_io_device_register(&device2, create_cb_2, destroy_cb_2, sizeof(ctx2), NULL);
 
@@ -429,7 +437,7 @@ channel(void)
 
 	g_destroy_cb_calls = 0;
 	spdk_put_io_channel(ch2);
-	while (spdk_thread_poll(thread, 0) > 0) {}
+	poll_threads();
 	CU_ASSERT(g_destroy_cb_calls == 0);
 
 	g_create_cb_calls = 0;
@@ -443,23 +451,23 @@ channel(void)
 
 	g_destroy_cb_calls = 0;
 	spdk_put_io_channel(ch1);
-	while (spdk_thread_poll(thread, 0) > 0) {}
+	poll_threads();
 	CU_ASSERT(g_destroy_cb_calls == 1);
 
 	g_destroy_cb_calls = 0;
 	spdk_put_io_channel(ch2);
-	while (spdk_thread_poll(thread, 0) > 0) {}
+	poll_threads();
 	CU_ASSERT(g_destroy_cb_calls == 1);
 
 	ch1 = spdk_get_io_channel(&device3);
 	CU_ASSERT(ch1 == NULL);
 
 	spdk_io_device_unregister(&device1, NULL);
-	while (spdk_thread_poll(thread, 0) > 0) {}
+	poll_threads();
 	spdk_io_device_unregister(&device2, NULL);
-	while (spdk_thread_poll(thread, 0) > 0) {}
+	poll_threads();
 	CU_ASSERT(TAILQ_EMPTY(&g_io_devices));
-	spdk_free_thread();
+	free_threads();
 	CU_ASSERT(TAILQ_EMPTY(&g_threads));
 }
 
@@ -491,12 +499,12 @@ destroy_cb(void *io_device, void *ctx_buf)
 static void
 channel_destroy_races(void)
 {
-	struct spdk_thread *thread;
 	uint64_t device;
 	struct spdk_io_channel *ch;
 
-	thread = spdk_allocate_thread(NULL, NULL, NULL, NULL, "thread0");
-	SPDK_CU_ASSERT_FATAL(thread != NULL);
+	allocate_threads(1);
+	set_thread(0);
+
 	spdk_io_device_register(&device, create_cb, destroy_cb, sizeof(uint64_t), NULL);
 
 	ch = spdk_get_io_channel(&device);
@@ -508,13 +516,13 @@ channel_destroy_races(void)
 	SPDK_CU_ASSERT_FATAL(ch != NULL);
 
 	spdk_put_io_channel(ch);
-	while (spdk_thread_poll(thread, 0) > 0) {}
+	poll_threads();
 
 	spdk_io_device_unregister(&device, NULL);
-	while (spdk_thread_poll(thread, 0) > 0) {}
+	poll_threads();
 
 	CU_ASSERT(TAILQ_EMPTY(&g_io_devices));
-	spdk_free_thread();
+	free_threads();
 	CU_ASSERT(TAILQ_EMPTY(&g_threads));
 }
 

@@ -39,7 +39,7 @@ endif
 endif
 
 include $(SPDK_ROOT_DIR)/mk/config.mk
-
+-include $(SPDK_ROOT_DIR)/mk/cc.flags.mk
 -include $(SPDK_ROOT_DIR)/mk/cc.mk
 
 ifneq ($(V),1)
@@ -81,6 +81,9 @@ endif
 ifeq ($(TARGET_MACHINE),x86_64)
 COMMON_CFLAGS += -march=native
 endif
+ifeq ($(TARGET_MACHINE),aarch64)
+COMMON_CFLAGS += -march=armv8-a+crc
+endif
 
 ifeq ($(CONFIG_WERROR), y)
 COMMON_CFLAGS += -Werror
@@ -89,6 +92,16 @@ endif
 ifeq ($(CONFIG_LTO),y)
 COMMON_CFLAGS += -flto
 LDFLAGS += -flto
+endif
+
+ifeq ($(CONFIG_PGO_CAPTURE),y)
+COMMON_CFLAGS += -fprofile-generate=$(SPDK_ROOT_DIR)/build/pgo
+LDFLAGS += -fprofile-generate=$(SPDK_ROOT_DIR)/build/pgo
+endif
+
+ifeq ($(CONFIG_PGO_USE),y)
+COMMON_CFLAGS += -fprofile-use=$(SPDK_ROOT_DIR)/build/pgo
+LDFLAGS += -fprofile-use=$(SPDK_ROOT_DIR)/build/pgo
 endif
 
 COMMON_CFLAGS += -Wformat -Wformat-security
@@ -112,9 +125,18 @@ LDFLAGS += -Wl,-z,relro,-z,now
 # This is the default in most environments, but it doesn't hurt to set it explicitly.
 LDFLAGS += -Wl,-z,noexecstack
 
+# Specify the linker to use
+ifneq ($(LD_TYPE),)
+LDFLAGS += -fuse-ld=$(LD_TYPE)
+endif
+
 ifeq ($(OS),FreeBSD)
 SYS_LIBS += -L/usr/local/lib
 COMMON_CFLAGS += -I/usr/local/include
+# Default to lld on FreeBSD
+ifeq ($(origin LD),default)
+LD = ld.lld
+endif
 endif
 
 # Attach only if PMDK lib specified with configure
@@ -130,6 +152,14 @@ endif
 
 ifeq ($(CONFIG_RDMA),y)
 SYS_LIBS += -libverbs -lrdmacm
+endif
+
+IPSEC_MB_DIR=$(SPDK_ROOT_DIR)/intel-ipsec-mb
+
+ISAL_DIR=$(SPDK_ROOT_DIR)/isa-l
+ifeq ($(CONFIG_ISAL), y)
+SYS_LIBS += -L$(ISAL_DIR)/.libs -lisal
+COMMON_CFLAGS += -I$(ISAL_DIR)/..
 endif
 
 #Attach only if FreeBSD and RDMA is specified with configure
@@ -219,11 +249,11 @@ COMPILE_CXX=\
 # Link $(OBJS) and $(LIBS) into $@ (app)
 LINK_C=\
 	$(Q)echo "  LINK $S/$@"; \
-	$(CC) -o $@ $(CPPFLAGS) $(LDFLAGS) $(OBJS) $(LIBS) $(SYS_LIBS)
+	$(CC) -o $@ $(CPPFLAGS) $(LDFLAGS) $(OBJS) $(LIBS) $(ENV_LINKER_ARGS) $(SYS_LIBS)
 
 LINK_CXX=\
 	$(Q)echo "  LINK $S/$@"; \
-	$(CXX) -o $@ $(CPPFLAGS) $(LDFLAGS) $(OBJS) $(LIBS) $(SYS_LIBS)
+	$(CXX) -o $@ $(CPPFLAGS) $(LDFLAGS) $(OBJS) $(LIBS) $(ENV_LINKER_ARGS) $(SYS_LIBS)
 
 #
 # Variables to use for versioning shared libs
@@ -235,7 +265,7 @@ SO_SUFFIX_ALL := $(SO_VER).$(SO_MINOR)
 # Provide function to ease build of a shared lib
 define spdk_build_realname_shared_lib
 	$(CC) -o $@ -shared $(CPPFLAGS) $(LDFLAGS) \
-	    -Wl,--soname,$(patsubst %.so.$(SO_SUFFIX_ALL),%.so.$(SO_VER),$(notdir $@)) \
+	    -Wl,--soname,$(patsubst %.so.$(SO_SUFFIX_ALL),%.so.$(SO_SUFFIX_ALL),$(notdir $@)) \
 	    -Wl,--whole-archive $(1) -Wl,--no-whole-archive \
 	    -Wl,--version-script=$(2) \
 	    $(3)
@@ -286,6 +316,11 @@ INSTALL_APP=\
 	$(Q)echo "  INSTALL $(DESTDIR)$(bindir)/$(APP)"; \
 	install -d -m 755 "$(DESTDIR)$(bindir)"; \
 	install -m 755 "$(APP)" "$(DESTDIR)$(bindir)/"
+
+INSTALL_EXAMPLE=\
+	$(Q)echo "  INSTALL $(DESTDIR)$(bindir)/spdk_$(strip $(subst /,_,$(subst $(SPDK_ROOT_DIR)/examples/, ,$(CURDIR))))"; \
+	install -d -m 755 "$(DESTDIR)$(bindir)"; \
+	install -m 755 "$(APP)" "$(DESTDIR)$(bindir)/spdk_$(strip $(subst /,_,$(subst $(SPDK_ROOT_DIR)/examples/, ,$(CURDIR))))"
 
 # Install a header
 INSTALL_HEADER=\

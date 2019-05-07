@@ -17,6 +17,7 @@ direct=1
 bs=%(blocksize)d
 iodepth=%(iodepth)d
 norandommap=%(norandommap)d
+numjobs=%(numjobs)s
 %(verify)s
 verify_dump=1
 
@@ -44,40 +45,46 @@ def interrupt_handler(signum, frame):
 def main():
 
     global fio
-    if (len(sys.argv) < 5):
+    if (len(sys.argv) < 7):
         print("usage:")
-        print("  " + sys.argv[0] + " <io_size> <queue_depth> <test_type> <runtime>")
+        print("  " + sys.argv[0] + " <nvmf/iscsi> <io_size> <queue_depth> <test_type> <runtime> <num_jobs>")
         print("advanced usage:")
         print("If you want to run fio with verify, please add verify string after runtime.")
         print("Currently fio.py only support write rw randwrite randrw with verify enabled.")
         sys.exit(1)
 
-    io_size = int(sys.argv[1])
-    queue_depth = int(sys.argv[2])
-    test_type = sys.argv[3]
-    runtime = sys.argv[4]
-    if len(sys.argv) > 5:
-        verify = True
-    else:
-        verify = False
+    app = str(sys.argv[1])
+    io_size = int(sys.argv[2])
+    queue_depth = int(sys.argv[3])
+    test_type = sys.argv[4]
+    runtime = sys.argv[5]
+    num_jobs = sys.argv[6]
 
-    devices = get_target_devices()
-    print(("Found devices: ", devices))
+    verify = False
+    if len(sys.argv) > 7:
+        verify = True
+
+    if app == "nvmf":
+        devices = get_nvmf_target_devices()
+    elif app == "iscsi":
+        devices = get_iscsi_target_devices()
 
     configure_devices(devices)
     try:
-            fio_executable = check_output("which fio", shell=True).split()[0]
+        fio_executable = check_output("which fio", shell=True).split()[0]
     except CalledProcessError as e:
-            sys.stderr.write(str(e))
-            sys.stderr.write("\nCan't find the fio binary, please install it.\n")
-            sys.exit(1)
+        sys.stderr.write(str(e))
+        sys.stderr.write("\nCan't find the fio binary, please install it.\n")
+        sys.exit(1)
 
     device_paths = ['/dev/' + dev for dev in devices]
+    print("Device paths:")
+    print(device_paths)
     sys.stdout.flush()
     signal.signal(signal.SIGTERM, interrupt_handler)
     signal.signal(signal.SIGINT, interrupt_handler)
     fio = Popen([fio_executable, '-'], stdin=PIPE)
-    fio.communicate(create_fio_config(io_size, queue_depth, device_paths, test_type, runtime, verify).encode())
+    fio.communicate(create_fio_config(io_size, queue_depth, device_paths, test_type, runtime, num_jobs, verify).encode())
     fio.stdin.close()
     rc = fio.wait()
     print("FIO completed with code %d\n" % rc)
@@ -85,12 +92,17 @@ def main():
     sys.exit(rc)
 
 
-def get_target_devices():
+def get_iscsi_target_devices():
     output = check_output('iscsiadm -m session -P 3', shell=True)
     return re.findall("Attached scsi disk (sd[a-z]+)", output.decode("ascii"))
 
 
-def create_fio_config(size, q_depth, devices, test, run_time, verify):
+def get_nvmf_target_devices():
+    output = str(check_output('lsblk -l -o NAME', shell=True).decode())
+    return re.findall("(nvme[0-9]+n[0-9]+)\n", output)
+
+
+def create_fio_config(size, q_depth, devices, test, run_time, num_jobs, verify):
     norandommap = 0
     if not verify:
         verifyfio = ""
@@ -99,7 +111,8 @@ def create_fio_config(size, q_depth, devices, test, run_time, verify):
         verifyfio = verify_template
     fiofile = fio_template % {"blocksize": size, "iodepth": q_depth,
                               "testtype": test, "runtime": run_time,
-                              "norandommap": norandommap, "verify": verifyfio}
+                              "norandommap": norandommap, "verify": verifyfio,
+                              "numjobs": num_jobs}
     for (i, dev) in enumerate(devices):
         fiofile += fio_job_template % {"jobnumber": i, "device": dev}
     return fiofile
@@ -134,7 +147,7 @@ def configure_devices(devices):
             qd = qd - 1
     if qd == 0:
         print("Could not set block device queue depths.")
-    else:
+    elif qd < requested_qd:
         print("Requested queue_depth {} but only {} is supported.".format(str(requested_qd), str(qd)))
     if not set_device_parameter(devices, "/sys/block/%s/queue/scheduler", "noop"):
         set_device_parameter(devices, "/sys/block/%s/queue/scheduler", "none")

@@ -36,11 +36,20 @@
 
 #include "spdk_internal/event.h"
 #include "spdk_internal/log.h"
+#include "spdk_internal/thread.h"
 
 #include "spdk/log.h"
 #include "spdk/thread.h"
 #include "spdk/env.h"
 #include "spdk/util.h"
+
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
+
+#ifdef __FreeBSD__
+#include <pthread_np.h>
+#endif
 
 #define SPDK_EVENT_BATCH_SIZE		8
 
@@ -52,26 +61,26 @@ enum spdk_reactor_state {
 	SPDK_REACTOR_STATE_SHUTDOWN = 4,
 };
 
+struct spdk_lw_thread {
+	TAILQ_ENTRY(spdk_lw_thread)	link;
+};
+
 // zhou: used to present work thread for each core.
 struct spdk_reactor {
 	/* Logical core number for this reactor. */
 	uint32_t					lcore;
 
+	/* Lightweight threads running on this reactor */
+	TAILQ_HEAD(, spdk_lw_thread)			threads;
+
 	/* Poller for get the rusage for the reactor. */
 	struct spdk_poller				*rusage_poller;
-
-	/* Reactor tsc stats */
-	struct spdk_reactor_tsc_stats			tsc_stats;
-
-	uint64_t					tsc_last;
 
 	/* The last known rusage values */
 	struct rusage					rusage;
 
     // zhou: event list, used to inter-ractor(thread) event sending
 	struct spdk_ring				*events;
-
-	uint64_t					max_delay_us;
 } __attribute__((aligned(64)));
 
 // zhou: array, number is DPDK enabled cores.
@@ -81,8 +90,7 @@ static enum spdk_reactor_state	g_reactor_state = SPDK_REACTOR_STATE_INVALID;
 
 static bool g_context_switch_monitor_enabled = true;
 
-static void spdk_reactor_construct(struct spdk_reactor *w, uint32_t lcore,
-				   uint64_t max_delay_us);
+static void spdk_reactor_construct(struct spdk_reactor *w, uint32_t lcore);
 
 // zhou: "struct spdk_event" pool
 static struct spdk_mempool *g_spdk_event_mempool = NULL;
@@ -145,6 +153,8 @@ _spdk_event_queue_run_batch(struct spdk_reactor *reactor)
 {
 	unsigned count, i;
 	void *events[SPDK_EVENT_BATCH_SIZE];
+	struct spdk_thread *thread;
+	struct spdk_lw_thread *lw_thread;
 
 #ifdef DEBUG
 	/*
@@ -160,6 +170,18 @@ _spdk_event_queue_run_batch(struct spdk_reactor *reactor)
 		return 0;
 	}
 
+	/* Execute the events. There are still some remaining events
+	 * that must occur on an SPDK thread. To accomodate those, try to
+	 * run them on the first thread in the list, if it exists. */
+	lw_thread = TAILQ_FIRST(&reactor->threads);
+	if (lw_thread) {
+		thread = spdk_thread_get_from_ctx(lw_thread);
+	} else {
+		thread = NULL;
+	}
+
+	spdk_set_thread(thread);
+
 	for (i = 0; i < count; i++) {
 		struct spdk_event *event = events[i];
 
@@ -168,15 +190,18 @@ _spdk_event_queue_run_batch(struct spdk_reactor *reactor)
 		event->fn(event->arg1, event->arg2);
 	}
 
+	spdk_set_thread(NULL);
+
 	spdk_mempool_put_bulk(g_spdk_event_mempool, events, count);
 
 	return count;
 }
 
+#define CONTEXT_SWITCH_MONITOR_PERIOD 1000000
+
 static int
-get_rusage(void *arg)
+get_rusage(struct spdk_reactor *reactor)
 {
-	struct spdk_reactor	*reactor = arg;
 	struct rusage		rusage;
 
 	if (getrusage(RUSAGE_THREAD, &rusage) != 0) {
@@ -194,50 +219,16 @@ get_rusage(void *arg)
 	return -1;
 }
 
-// zhou: get calling thread resource usage, including such as CPU, context switch,
-static void
-_spdk_reactor_context_switch_monitor_start(void *arg1, void *arg2)
-{
-	struct spdk_reactor *reactor = arg1;
-
-	if (reactor->rusage_poller == NULL) {
-		getrusage(RUSAGE_THREAD, &reactor->rusage);
-
-        // zhou: register a periodically running event, every 1s.
-		reactor->rusage_poller = spdk_poller_register(get_rusage, reactor, 1000000);
-	}
-}
-
-static void
-_spdk_reactor_context_switch_monitor_stop(void *arg1, void *arg2)
-{
-	struct spdk_reactor *reactor = arg1;
-
-	if (reactor->rusage_poller != NULL) {
-		spdk_poller_unregister(&reactor->rusage_poller);
-	}
-}
 
 // zhou: RPC "context_switch_monitor" handler to enable resource usage.
 void
 spdk_reactor_enable_context_switch_monitor(bool enable)
 {
-	struct spdk_reactor *reactor;
-	spdk_event_fn fn;
-	uint32_t core;
-
-	if (enable != g_context_switch_monitor_enabled) {
-		g_context_switch_monitor_enabled = enable;
-		if (enable) {
-			fn = _spdk_reactor_context_switch_monitor_start;
-		} else {
-			fn = _spdk_reactor_context_switch_monitor_stop;
-		}
-		SPDK_ENV_FOREACH_CORE(core) {
-			reactor = spdk_reactor_get(core);
-			spdk_event_call(spdk_event_allocate(core, fn, reactor, NULL));
-		}
-	}
+	/* This global is being read by multiple threads, so this isn't
+	 * strictly thread safe. However, we're toggling between true and
+	 * false here, and if a thread sees the value update later than it
+	 * should, it's no big deal. */
+	g_context_switch_monitor_enabled = enable;
 }
 
 bool
@@ -247,42 +238,15 @@ spdk_reactor_context_switch_monitor_enabled(void)
 }
 
 static void
-spdk_reactor_add_tsc_stats(void *arg, int rc, uint64_t now)
+_set_thread_name(const char *thread_name)
 {
-	struct spdk_reactor *reactor = arg;
-	struct spdk_reactor_tsc_stats *tsc_stats = &reactor->tsc_stats;
-
-	if (rc == 0) {
-		/* Poller status idle */
-		tsc_stats->idle_tsc += now - reactor->tsc_last;
-	} else if (rc > 0) {
-		/* Poller status busy */
-		tsc_stats->busy_tsc += now - reactor->tsc_last;
-	} else {
-		/* Poller status unknown */
-		tsc_stats->unknown_tsc += now - reactor->tsc_last;
-	}
-
-	reactor->tsc_last = now;
-}
-
-int
-spdk_reactor_get_tsc_stats(struct spdk_reactor_tsc_stats *tsc_stats, uint32_t core)
-{
-	struct spdk_reactor *reactor;
-
-	if (!spdk_cpuset_get_cpu(g_spdk_app_core_mask, core)) {
-		return -1;
-	}
-
-	reactor = spdk_reactor_get(core);
-	if (!reactor) {
-		SPDK_ERRLOG("Unable to get reactor for core %u\n", core);
-		return -1;
-	}
-	*tsc_stats = reactor->tsc_stats;
-
-	return 0;
+#if defined(__linux__)
+	prctl(PR_SET_NAME, thread_name, 0, 0, 0);
+#elif defined(__FreeBSD__)
+	pthread_set_name_np(pthread_self(), thread_name);
+#else
+#error missing platform support for thread name
+#endif
 }
 
 // zhou: main loop.
@@ -291,30 +255,17 @@ _spdk_reactor_run(void *arg)
 {
 	struct spdk_reactor	*reactor = arg;
 	struct spdk_thread	*thread;
-	uint32_t		event_count;
-	uint64_t		now;
-	uint64_t		sleep_cycles;
-	uint32_t		sleep_us;
-	int			rc = -1;
+	uint64_t		last_rusage = 0;
+	struct spdk_lw_thread	*lw_thread, *tmp;
 	char			thread_name[32];
 
-	snprintf(thread_name, sizeof(thread_name), "reactor_%u", reactor->lcore);
-
-    // zhou: SPDK private data.
-	thread = spdk_allocate_thread(NULL, NULL, NULL, NULL, thread_name);
-	if (!thread) {
-		return -1;
-	}
 	SPDK_NOTICELOG("Reactor started on core %u\n", reactor->lcore);
 
-	sleep_cycles = reactor->max_delay_us * spdk_get_ticks_hz() / SPDK_SEC_TO_USEC;
-
-	if (g_context_switch_monitor_enabled) {
-		_spdk_reactor_context_switch_monitor_start(reactor, NULL);
-	}
-
-	now = spdk_get_ticks();
-	reactor->tsc_last = now;
+	/* Rename the POSIX thread because the reactor is tied to the POSIX
+	 * thread in the SPDK event library.
+	 */
+	snprintf(thread_name, sizeof(thread_name), "reactor_%u", reactor->lcore);
+	_set_thread_name(thread_name);
 
 
     // zhou: poller is thread managed processing mechanism, can only be used in
@@ -322,66 +273,48 @@ _spdk_reactor_run(void *arg)
     //       event is reactor managed processing mechanism, can be specify which
     //       core running. Should be used for state/event management.
 	while (1) {
-		bool took_action = false;
+		uint64_t now;
 
-        // zhou: handle events firstly.
-		event_count = _spdk_event_queue_run_batch(reactor);
-		if (event_count > 0) {
-			rc = 1;
-			now = spdk_get_ticks();
-			spdk_reactor_add_tsc_stats(reactor, rc, now);
-			took_action = true;
-		}
+		/* For each loop through the reactor, capture the time. This time
+		 * is used for all threads. */
+		now = spdk_get_ticks();
 
-        // zhou: handle message and run pollers.
-		rc = spdk_thread_poll(thread, 0);
+		_spdk_event_queue_run_batch(reactor);
 
-		if (rc != 0) {
-			now = spdk_get_ticks();
-			spdk_reactor_add_tsc_stats(reactor, rc, now);
-			took_action = true;
-		}
+		TAILQ_FOREACH_SAFE(lw_thread, &reactor->threads, link, tmp) {
+			thread = spdk_thread_get_from_ctx(lw_thread);
 
-		/* Determine if the thread can sleep */
-		if (sleep_cycles && !took_action) {
-			uint64_t next_run_tick;
-
-			now = spdk_get_ticks();
-			sleep_us = reactor->max_delay_us;
-			next_run_tick = spdk_thread_next_poller_expiration(thread);
-
-			/* There are timers registered, so don't sleep beyond
-			 * when the next timer should fire */
-			if (next_run_tick > 0 && next_run_tick < (now + sleep_cycles)) {
-				if (next_run_tick <= now) {
-					sleep_us = 0;
-				} else {
-					sleep_us = ((next_run_tick - now) *
-						    SPDK_SEC_TO_USEC) / spdk_get_ticks_hz();
-				}
-			}
-
-			if (sleep_us > 0) {
-				usleep(sleep_us);
-			}
+			spdk_thread_poll(thread, 0, now);
 		}
 
 		if (g_reactor_state != SPDK_REACTOR_STATE_RUNNING) {
 			break;
 		}
+
+		if (g_context_switch_monitor_enabled) {
+			if ((last_rusage + CONTEXT_SWITCH_MONITOR_PERIOD) < now) {
+				get_rusage(reactor);
+				last_rusage = now;
+			}
+		}
 	}
 
-	_spdk_reactor_context_switch_monitor_stop(reactor, NULL);
-	spdk_free_thread();
+	TAILQ_FOREACH_SAFE(lw_thread, &reactor->threads, link, tmp) {
+		thread = spdk_thread_get_from_ctx(lw_thread);
+		TAILQ_REMOVE(&reactor->threads, lw_thread, link);
+		spdk_thread_exit(thread);
+	}
+
 	return 0;
 }
 
 // zhou: create "rte_ring" for buffer events in each thread.
 static void
-spdk_reactor_construct(struct spdk_reactor *reactor, uint32_t lcore, uint64_t max_delay_us)
+spdk_reactor_construct(struct spdk_reactor *reactor, uint32_t lcore)
 {
 	reactor->lcore = lcore;
-	reactor->max_delay_us = max_delay_us;
+
+	TAILQ_INIT(&reactor->threads);
 
 	reactor->events = spdk_ring_create(SPDK_RING_TYPE_MP_SC, 65536, SPDK_ENV_SOCKET_ID_ANY);
 	assert(reactor->events != NULL);
@@ -415,8 +348,17 @@ void
 spdk_reactors_start(void)
 {
 	struct spdk_reactor *reactor;
+	struct spdk_cpuset *tmp_cpumask;
 	uint32_t i, current_core;
 	int rc;
+	char thread_name[32];
+
+	tmp_cpumask = spdk_cpuset_alloc();
+	if (tmp_cpumask == NULL) {
+		SPDK_ERRLOG("spdk_cpuset_alloc() failed\n");
+		assert(false);
+		return;
+	}
 
 	g_reactor_state = SPDK_REACTOR_STATE_RUNNING;
 	g_spdk_app_core_mask = spdk_cpuset_alloc();
@@ -433,10 +375,20 @@ spdk_reactors_start(void)
 				assert(false);
 				return;
 			}
+
+			/* For now, for each reactor spawn one thread. */
+			snprintf(thread_name, sizeof(thread_name), "reactor_%u", reactor->lcore);
+
+			spdk_cpuset_zero(tmp_cpumask);
+			spdk_cpuset_set_cpu(tmp_cpumask, i, true);
+
+			spdk_thread_create(thread_name, tmp_cpumask);
 		}
 
 		spdk_cpuset_set_cpu(g_spdk_app_core_mask, i, true);
 	}
+
+	spdk_cpuset_free(tmp_cpumask);
 
 	/* Start the master reactor */
 	reactor = spdk_reactor_get(current_core);
@@ -453,14 +405,50 @@ spdk_reactors_start(void)
 }
 
 void
-spdk_reactors_stop(void *arg1, void *arg2)
+spdk_reactors_stop(void *arg1)
 {
 	g_reactor_state = SPDK_REACTOR_STATE_EXITING;
 }
 
-// zhou: init thread object "struct spdk_reactor"
+static pthread_mutex_t g_scheduler_mtx = PTHREAD_MUTEX_INITIALIZER;
+static uint32_t g_next_core = UINT32_MAX;
+
+static void
+_schedule_thread(void *arg1, void *arg2)
+{
+	struct spdk_lw_thread *lw_thread = arg1;
+	struct spdk_reactor *reactor;
+
+	reactor = spdk_reactor_get(spdk_env_get_current_core());
+
+	TAILQ_INSERT_TAIL(&reactor->threads, lw_thread, link);
+}
+
+static void
+spdk_reactor_schedule_thread(struct spdk_thread *thread)
+{
+	uint32_t core;
+	struct spdk_lw_thread *lw_thread;
+	struct spdk_event *evt;
+
+	lw_thread = spdk_thread_get_ctx(thread);
+	assert(lw_thread != NULL);
+	memset(lw_thread, 0, sizeof(*lw_thread));
+
+	pthread_mutex_lock(&g_scheduler_mtx);
+	if (g_next_core > spdk_env_get_last_core()) {
+		g_next_core = spdk_env_get_first_core();
+	}
+	core = g_next_core;
+	g_next_core = spdk_env_get_next_core(g_next_core);
+	pthread_mutex_unlock(&g_scheduler_mtx);
+
+	evt = spdk_event_allocate(core, _schedule_thread, lw_thread, NULL);
+	spdk_event_call(evt);
+}
+
 int
-spdk_reactors_init(unsigned int max_delay_us)
+spdk_reactors_init(void)
 {
 	int rc;
 	uint32_t i, last_core;
@@ -492,11 +480,11 @@ spdk_reactors_init(unsigned int max_delay_us)
 
 	memset(g_reactors, 0, (last_core + 1) * sizeof(struct spdk_reactor));
 
+	spdk_thread_lib_init(spdk_reactor_schedule_thread, sizeof(struct spdk_lw_thread));
+
 	SPDK_ENV_FOREACH_CORE(i) {
 		reactor = spdk_reactor_get(i);
-        // zhou: init each working thread object "struct spdk_reactor".
-        //       "max_delay_us" let working thread sleep for each loop.
-		spdk_reactor_construct(reactor, i, max_delay_us);
+		spdk_reactor_construct(reactor, i);
 	}
 
 	g_reactor_state = SPDK_REACTOR_STATE_INITIALIZED;
@@ -509,6 +497,8 @@ spdk_reactors_fini(void)
 {
 	uint32_t i;
 	struct spdk_reactor *reactor;
+
+	spdk_thread_lib_fini();
 
 	SPDK_ENV_FOREACH_CORE(i) {
 		reactor = spdk_reactor_get(i);

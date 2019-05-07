@@ -55,7 +55,7 @@ static struct spdk_bdev_module g_lvol_if = {
 
 };
 
-SPDK_BDEV_MODULE_REGISTER(&g_lvol_if)
+SPDK_BDEV_MODULE_REGISTER(lvol, &g_lvol_if)
 
 struct lvol_store_bdev *
 vbdev_get_lvs_bdev_by_lvs(struct spdk_lvol_store *lvs_orig)
@@ -206,7 +206,7 @@ end:
 // zhou: Construct a logical volume store.
 int
 vbdev_lvs_create(struct spdk_bdev *base_bdev, const char *name, uint32_t cluster_sz,
-		 spdk_lvs_op_with_handle_complete cb_fn, void *cb_arg)
+		 enum lvs_clear_method clear_method, spdk_lvs_op_with_handle_complete cb_fn, void *cb_arg)
 {
 	struct spdk_bs_dev *bs_dev;
 	struct spdk_lvs_with_handle_req *lvs_req;
@@ -222,6 +222,10 @@ vbdev_lvs_create(struct spdk_bdev *base_bdev, const char *name, uint32_t cluster
 	spdk_lvs_opts_init(&opts);
 	if (cluster_sz != 0) {
 		opts.cluster_sz = cluster_sz;
+	}
+
+	if (clear_method != 0) {
+		opts.clear_method = clear_method;
 	}
 
 	if (name == NULL) {
@@ -321,11 +325,11 @@ _vbdev_lvs_remove_cb(void *cb_arg, int lvserrno)
 	struct spdk_lvs_req *req = lvs_bdev->req;
 
 	if (lvserrno != 0) {
-		SPDK_INFOLOG(SPDK_LOG_VBDEV_LVOL, "Could not remove lvol store bdev\n");
-	} else {
-		TAILQ_REMOVE(&g_spdk_lvol_pairs, lvs_bdev, lvol_stores);
-		free(lvs_bdev);
+		SPDK_INFOLOG(SPDK_LOG_VBDEV_LVOL, "Lvol store removed with error: %d.\n", lvserrno);
 	}
+
+	TAILQ_REMOVE(&g_spdk_lvol_pairs, lvs_bdev, lvol_stores);
+	free(lvs_bdev);
 
 	if (req->cb_fn != NULL) {
 		req->cb_fn(req->cb_arg, lvserrno);
@@ -637,8 +641,7 @@ vbdev_lvol_dump_info_json(void *ctx, struct spdk_json_write_ctx *w)
 	char *name;
 	int rc = 0;
 
-	spdk_json_write_name(w, "lvol");
-	spdk_json_write_object_begin(w);
+	spdk_json_write_named_object_begin(w, "lvol");
 
 	lvs_bdev = vbdev_get_lvs_bdev_by_lvs(lvol->lvol_store);
 	if (!lvs_bdev) {
@@ -650,30 +653,24 @@ vbdev_lvol_dump_info_json(void *ctx, struct spdk_json_write_ctx *w)
 	bdev = lvs_bdev->bdev;
 
 	spdk_uuid_fmt_lower(lvol_store_uuid, sizeof(lvol_store_uuid), &lvol->lvol_store->uuid);
-	spdk_json_write_name(w, "lvol_store_uuid");
-	spdk_json_write_string(w, lvol_store_uuid);
+	spdk_json_write_named_string(w, "lvol_store_uuid", lvol_store_uuid);
 
-	spdk_json_write_name(w, "base_bdev");
-	spdk_json_write_string(w, spdk_bdev_get_name(bdev));
+	spdk_json_write_named_string(w, "base_bdev", spdk_bdev_get_name(bdev));
 
 	blob = lvol->blob;
 
-	spdk_json_write_name(w, "thin_provision");
-	spdk_json_write_bool(w, spdk_blob_is_thin_provisioned(blob));
+	spdk_json_write_named_bool(w, "thin_provision", spdk_blob_is_thin_provisioned(blob));
 
-	spdk_json_write_name(w, "snapshot");
-	spdk_json_write_bool(w, spdk_blob_is_snapshot(blob));
+	spdk_json_write_named_bool(w, "snapshot", spdk_blob_is_snapshot(blob));
 
-	spdk_json_write_name(w, "clone");
-	spdk_json_write_bool(w, spdk_blob_is_clone(blob));
+	spdk_json_write_named_bool(w, "clone", spdk_blob_is_clone(blob));
 
 	if (spdk_blob_is_clone(blob)) {
 		spdk_blob_id snapshotid = spdk_blob_get_parent_snapshot(lvol->lvol_store->blobstore, lvol->blob_id);
 		if (snapshotid != SPDK_BLOBID_INVALID) {
 			name = vbdev_lvol_find_name(lvol, snapshotid);
 			if (name != NULL) {
-				spdk_json_write_name(w, "base_snapshot");
-				spdk_json_write_string(w, name);
+				spdk_json_write_named_string(w, "base_snapshot", name);
 			} else {
 				SPDK_ERRLOG("Cannot obtain snapshots name\n");
 			}
@@ -693,8 +690,7 @@ vbdev_lvol_dump_info_json(void *ctx, struct spdk_json_write_ctx *w)
 
 			rc = spdk_blob_get_clones(lvol->lvol_store->blobstore, lvol->blob_id, ids, &count);
 			if (rc == 0) {
-				spdk_json_write_name(w, "clones");
-				spdk_json_write_array_begin(w);
+				spdk_json_write_named_array_begin(w, "clones");
 				for (i = 0; i < count; i++) {
 					name = vbdev_lvol_find_name(lvol, ids[i]);
 					if (name != NULL) {
@@ -852,6 +848,17 @@ lvol_reset(struct spdk_bdev_io *bdev_io)
 }
 
 static void
+lvol_get_buf_cb(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io, bool success)
+{
+	if (!success) {
+		spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_FAILED);
+		return;
+	}
+
+	lvol_read(ch, bdev_io);
+}
+
+static void
 vbdev_lvol_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io)
 {
 	struct spdk_lvol *lvol = bdev_io->bdev->ctxt;
@@ -860,7 +867,7 @@ vbdev_lvol_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_
 
 	switch (bdev_io->type) {
 	case SPDK_BDEV_IO_TYPE_READ:
-		spdk_bdev_io_get_buf(bdev_io, lvol_read,
+		spdk_bdev_io_get_buf(bdev_io, lvol_get_buf_cb,
 				     bdev_io->u.bdev.num_blocks * bdev_io->bdev->blocklen);
 		break;
 	case SPDK_BDEV_IO_TYPE_WRITE:
@@ -923,7 +930,6 @@ _create_lvol_disk_unload_cb(void *cb_arg, int bdeverrno)
 	}
 
 	TAILQ_REMOVE(&lvol->lvol_store->lvols, lvol, link);
-	free(lvol->unique_id);
 	free(lvol);
 }
 
@@ -935,10 +941,6 @@ _create_lvol_disk(struct spdk_lvol *lvol, bool destroy)
 	uint64_t total_size;
 	unsigned char *alias;
 	int rc;
-
-	if (!lvol->unique_id) {
-		return -EINVAL;
-	}
 
 	lvs_bdev = vbdev_get_lvs_bdev_by_lvs(lvol->lvol_store);
 	if (lvs_bdev == NULL) {
@@ -968,7 +970,7 @@ _create_lvol_disk(struct spdk_lvol *lvol, bool destroy)
 	bdev->fn_table = &vbdev_lvol_fn_table;
 	bdev->module = &g_lvol_if;
 
-	rc = spdk_vbdev_register(bdev, &lvs_bdev->bdev, 1);
+	rc = spdk_bdev_register(bdev);
 	if (rc) {
 		free(bdev);
 		return rc;
@@ -1013,7 +1015,8 @@ end:
 // zhou: create a logical volume on a logical volume store
 int
 vbdev_lvol_create(struct spdk_lvol_store *lvs, const char *name, uint64_t sz,
-		  bool thin_provision, spdk_lvol_op_with_handle_complete cb_fn, void *cb_arg)
+		  bool thin_provision, enum lvol_clear_method clear_method, spdk_lvol_op_with_handle_complete cb_fn,
+		  void *cb_arg)
 {
 	struct spdk_lvol_with_handle_req *req;
 	int rc;
@@ -1025,7 +1028,8 @@ vbdev_lvol_create(struct spdk_lvol_store *lvs, const char *name, uint64_t sz,
 	req->cb_fn = cb_fn;
 	req->cb_arg = cb_arg;
 
-	rc = spdk_lvol_create(lvs, name, sz, thin_provision, _vbdev_lvol_create_cb, req);
+	rc = spdk_lvol_create(lvs, name, sz, thin_provision, clear_method,
+			      _vbdev_lvol_create_cb, req);
 	if (rc != 0) {
 		free(req);
 	}
@@ -1162,6 +1166,46 @@ vbdev_lvol_resize(struct spdk_lvol *lvol, uint64_t sz, spdk_lvol_op_complete cb_
 	spdk_lvol_resize(req->lvol, req->sz, _vbdev_lvol_resize_cb, req);
 }
 
+static void
+_vbdev_lvol_set_read_only_cb(void *cb_arg, int lvolerrno)
+{
+	struct spdk_lvol_req *req = cb_arg;
+	struct spdk_lvol *lvol = req->lvol;
+
+	if (lvolerrno != 0) {
+		SPDK_ERRLOG("Could not set bdev lvol %s as read only due to error: %d.\n", lvol->name, lvolerrno);
+	}
+
+	req->cb_fn(req->cb_arg, lvolerrno);
+	free(req);
+}
+
+void
+vbdev_lvol_set_read_only(struct spdk_lvol *lvol, spdk_lvol_op_complete cb_fn, void *cb_arg)
+{
+	struct spdk_lvol_req *req;
+
+	if (lvol == NULL) {
+		SPDK_ERRLOG("lvol does not exist\n");
+		cb_fn(cb_arg, -EINVAL);
+		return;
+	}
+
+	assert(lvol->bdev != NULL);
+
+	req = calloc(1, sizeof(*req));
+	if (req == NULL) {
+		cb_fn(cb_arg, -ENOMEM);
+		return;
+	}
+
+	req->cb_fn = cb_fn;
+	req->cb_arg = cb_arg;
+	req->lvol = lvol;
+
+	spdk_lvol_set_read_only(lvol, _vbdev_lvol_set_read_only_cb, req);
+}
+
 static int
 vbdev_lvs_init(void)
 {
@@ -1198,7 +1242,6 @@ _vbdev_lvs_examine_finish(void *cb_arg, struct spdk_lvol *lvol, int lvolerrno)
 		SPDK_ERRLOG("Error opening lvol %s\n", lvol->unique_id);
 		TAILQ_REMOVE(&lvs->lvols, lvol, link);
 		lvs->lvol_count--;
-		free(lvol->unique_id);
 		free(lvol);
 		goto end;
 	}

@@ -1,8 +1,8 @@
 /*-
  *   BSD LICENSE
  *
- *   Copyright (c) Intel Corporation.
- *   All rights reserved.
+ *   Copyright (c) Intel Corporation. All rights reserved.
+ *   Copyright (c) 2018 Mellanox Technologies LTD. All rights reserved.
  *
  *   Redistribution and use in source and binary forms, with or without
  *   modification, are permitted provided that the following conditions
@@ -213,6 +213,7 @@ spdk_nvmf_parse_subsystem(struct spdk_conf_section *sp)
 	int lcore;
 	bool allow_any_host;
 	const char *sn;
+	const char *mn;
 	struct spdk_nvmf_subsystem *subsystem;
 	int num_ns;
 
@@ -272,6 +273,22 @@ spdk_nvmf_parse_subsystem(struct spdk_conf_section *sp)
 		spdk_nvmf_subsystem_destroy(subsystem);
 		subsystem = NULL;
 		goto done;
+	}
+
+	mn = spdk_conf_section_get_val(sp, "MN");
+	if (mn == NULL) {
+		SPDK_NOTICELOG(
+			"Subsystem %s: missing model number, will use default\n",
+			nqn);
+	}
+
+	if (mn != NULL) {
+		if (spdk_nvmf_subsystem_set_mn(subsystem, mn)) {
+			SPDK_ERRLOG("Subsystem %s: invalid model number '%s'\n", nqn, mn);
+			spdk_nvmf_subsystem_destroy(subsystem);
+			subsystem = NULL;
+			goto done;
+		}
 	}
 
 	for (i = 0; ; i++) {
@@ -520,6 +537,26 @@ spdk_nvmf_parse_transport(struct spdk_nvmf_parse_transport_ctx *ctx)
 	if (val >= 0) {
 		opts.max_aq_depth = val;
 	}
+	val = spdk_conf_section_get_intval(ctx->sp, "NumSharedBuffers");
+	if (val >= 0) {
+		opts.num_shared_buffers = val;
+	}
+	val = spdk_conf_section_get_intval(ctx->sp, "BufCacheSize");
+	if (val >= 0) {
+		opts.buf_cache_size = val;
+	}
+
+	val = spdk_conf_section_get_intval(ctx->sp, "MaxSRQDepth");
+	if (val >= 0) {
+		if (trtype == SPDK_NVME_TRANSPORT_RDMA) {
+			opts.max_srq_depth = val;
+		} else {
+			SPDK_ERRLOG("MaxSRQDepth is relevant only for RDMA transport '%s'\n", type);
+			ctx->cb_fn(-1);
+			free(ctx);
+			return;
+		}
+	}
 
 	transport = spdk_nvmf_transport_create(trtype, &opts);
 	if (transport) {
@@ -561,11 +598,7 @@ spdk_nvmf_parse_transports(spdk_nvmf_parse_conf_done_fn cb_fn)
 
 	/* if we get here, there are no transports defined in conf file */
 	free(ctx);
-	SPDK_ERRLOG("\nNo valid transport is defined yet.\n"
-		    "When using configuration file, at least one valid transport must be defined.\n"
-		    "You can refer the [Transport] section in spdk/etc/spdk/nvmf.conf.in as an example.\n");
-	cb_fn(-1);
-
+	cb_fn(0);
 	return 0;
 }
 

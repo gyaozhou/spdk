@@ -34,6 +34,31 @@
 #include "nvme_internal.h"
 
 int
+spdk_nvme_ctrlr_io_cmd_raw_no_payload_build(struct spdk_nvme_ctrlr *ctrlr,
+		struct spdk_nvme_qpair *qpair,
+		struct spdk_nvme_cmd *cmd,
+		spdk_nvme_cmd_cb cb_fn, void *cb_arg)
+{
+	struct nvme_request *req;
+	struct nvme_payload payload;
+
+	if (ctrlr->trid.trtype != SPDK_NVME_TRANSPORT_PCIE) {
+		return -EINVAL;
+	}
+
+	memset(&payload, 0, sizeof(payload));
+	req = nvme_allocate_request(qpair, &payload, 0, cb_fn, cb_arg);
+
+	if (req == NULL) {
+		return -ENOMEM;
+	}
+
+	memcpy(&req->cmd, cmd, sizeof(req->cmd));
+
+	return nvme_qpair_submit_request(qpair, req);
+}
+
+int
 spdk_nvme_ctrlr_cmd_io_raw(struct spdk_nvme_ctrlr *ctrlr,
 			   struct spdk_nvme_qpair *qpair,
 			   struct spdk_nvme_cmd *cmd,
@@ -529,7 +554,7 @@ spdk_nvme_ctrlr_cmd_abort_cpl(void *ctx, const struct spdk_nvme_cpl *cpl)
 			next->cpl.status.sct = SPDK_NVME_SCT_GENERIC;
 			next->cpl.status.sc = SPDK_NVME_SC_INTERNAL_DEVICE_ERROR;
 			next->cpl.status.dnr = 1;
-			nvme_complete_request(next, &req->cpl);
+			nvme_complete_request(next->cb_fn, next->cb_arg, next, &req->cpl);
 			nvme_free_request(next);
 		} else {
 			/* If the first abort succeeds, stop iterating. */
@@ -638,9 +663,9 @@ nvme_ctrlr_cmd_fw_image_download(struct spdk_nvme_ctrlr *ctrlr,
 }
 
 int
-spdk_nvme_ctrlr_cmd_security_receive(struct spdk_nvme_ctrlr *ctrlr, uint8_t secp,
-				     uint16_t spsp, uint8_t nssf, void *payload,
-				     uint32_t payload_size, spdk_nvme_cmd_cb cb_fn, void *cb_arg)
+nvme_ctrlr_cmd_security_receive(struct spdk_nvme_ctrlr *ctrlr, uint8_t secp,
+				uint16_t spsp, uint8_t nssf, void *payload,
+				uint32_t payload_size, spdk_nvme_cmd_cb cb_fn, void *cb_arg)
 {
 	struct nvme_request *req;
 	struct spdk_nvme_cmd *cmd;
@@ -666,9 +691,9 @@ spdk_nvme_ctrlr_cmd_security_receive(struct spdk_nvme_ctrlr *ctrlr, uint8_t secp
 }
 
 int
-spdk_nvme_ctrlr_cmd_security_send(struct spdk_nvme_ctrlr *ctrlr, uint8_t secp,
-				  uint16_t spsp, uint8_t nssf, void *payload,
-				  uint32_t payload_size, spdk_nvme_cmd_cb cb_fn, void *cb_arg)
+nvme_ctrlr_cmd_security_send(struct spdk_nvme_ctrlr *ctrlr, uint8_t secp,
+			     uint16_t spsp, uint8_t nssf, void *payload,
+			     uint32_t payload_size, spdk_nvme_cmd_cb cb_fn, void *cb_arg)
 {
 	struct nvme_request *req;
 	struct spdk_nvme_cmd *cmd;

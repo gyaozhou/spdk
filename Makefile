@@ -40,6 +40,8 @@ DIRS-y += lib
 DIRS-$(CONFIG_SHARED) += shared_lib
 DIRS-y += examples app include
 DIRS-$(CONFIG_TESTS) += test
+DIRS-$(CONFIG_IPSEC_MB) += ipsecbuild
+DIRS-$(CONFIG_ISAL) += isalbuild
 
 .PHONY: all clean $(DIRS-y) include/spdk/config.h mk/config.mk mk/cc.mk \
 	cc_version cxx_version .libs_only_other .ldflags ldflags
@@ -59,6 +61,14 @@ else
 LIB = lib
 endif
 
+ifeq ($(CONFIG_IPSEC_MB),y)
+LIB += ipsecbuild
+endif
+
+ifeq ($(CONFIG_ISAL),y)
+LIB += isalbuild
+endif
+
 all: $(DIRS-y)
 clean: $(DIRS-y)
 	$(Q)rm -f mk/cc.mk
@@ -66,6 +76,12 @@ clean: $(DIRS-y)
 
 install: all
 	$(Q)echo "Installed to $(DESTDIR)$(CONFIG_PREFIX)"
+
+ifneq ($(SKIP_DPDK_BUILD),1)
+ifeq ($(CONFIG_ISAL),y)
+dpdkbuild: isalbuild
+endif
+endif
 
 shared_lib: lib
 lib: $(DPDKBUILD)
@@ -78,7 +94,7 @@ pkgdep:
 $(DIRS-y): mk/cc.mk include/spdk/config.h
 
 mk/cc.mk:
-	$(Q)scripts/detect_cc.sh --cc=$(CC) --cxx=$(CXX) --lto=$(CONFIG_LTO) > $@.tmp; \
+	$(Q)scripts/detect_cc.sh --cc=$(CC) --cxx=$(CXX) --lto=$(CONFIG_LTO) --ld=$(LD) > $@.tmp; \
 	cmp -s $@.tmp $@ || mv $@.tmp $@ ; \
 	rm -f $@.tmp
 

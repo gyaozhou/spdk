@@ -89,6 +89,10 @@ typedef void (*spdk_jsonrpc_handle_request_fn)(
 	const struct spdk_json_val *method,
 	const struct spdk_json_val *params);
 
+struct spdk_jsonrpc_server_conn;
+
+typedef void (*spdk_jsonrpc_conn_closed_fn)(struct spdk_jsonrpc_server_conn *conn, void *arg);
+
 /**
  * Function for specific RPC method response parsing handlers.
  *
@@ -133,6 +137,46 @@ int spdk_jsonrpc_server_poll(struct spdk_jsonrpc_server *server);
  * \param server JSON-RPC server.
  */
 void spdk_jsonrpc_server_shutdown(struct spdk_jsonrpc_server *server);
+
+/**
+ * Return connection associated to \c request
+ *
+ * \param request JSON-RPC request
+ * \return JSON RPC server connection
+ */
+struct spdk_jsonrpc_server_conn *spdk_jsonrpc_get_conn(struct spdk_jsonrpc_request *request);
+
+/**
+ * Add callback called when connection is closed. Pair of  \c cb and \c ctx must be unique or error is returned.
+ * Registered callback is called only once and there is no need to call  \c spdk_jsonrpc_conn_del_close_cb
+ * inside from \c cb.
+ *
+ * \note Current implementation allow only one close callback per connection.
+ *
+ * \param conn JSON RPC server connection
+ * \param cb calback function
+ * \param ctx argument for \c cb
+ *
+ * \return 0 on success, or negated errno code:
+ *  -EEXIST \c cb and \c ctx is already registered
+ *  -ENOTCONN Callback can't be added because connection is closed.
+ *  -ENOSPC no more space to register callback.
+ */
+int spdk_jsonrpc_conn_add_close_cb(struct spdk_jsonrpc_server_conn *conn,
+				   spdk_jsonrpc_conn_closed_fn cb, void *ctx);
+
+/**
+ * Remove registered close callback.
+ *
+ * \param conn JSON RPC server connection
+ * \param cb calback function
+ * \param ctx argument for \c cb
+ *
+ * \return 0 on success, or negated errno code:
+ *  -ENOENT \c cb and \c ctx pair is not registered
+ */
+int spdk_jsonrpc_conn_del_close_cb(struct spdk_jsonrpc_server_conn *conn,
+				   spdk_jsonrpc_conn_closed_fn cb, void *ctx);
 
 /**
  * Begin building a response to a JSON-RPC request.
@@ -261,16 +305,25 @@ int spdk_jsonrpc_client_send_request(struct spdk_jsonrpc_client *client,
 				     struct spdk_jsonrpc_client_request *req);
 
 /**
- * Receive the JSON-RPC response in JSON-RPC client.
+ * Poll the JSON-RPC client. When any response is available use
+ * \c spdk_jsonrpc_client_get_response to retrieve it.
  *
  * This function is not thread safe and should only be called from one thread at
  * a time while no other threads are actively \c client object.
  *
  * \param client JSON-RPC client.
+ * \param timeout Time in miliseconds this function will block. -1 block forever, 0 don't block.
  *
- * \return 0 on success.
+ * \return If no error occurred, this function returns a non-negative number indicating how
+ * many ready responses can be retrieved. If an error occurred, this function returns one of
+ * the following negated errno values:
+ *  -ENOTCONN - not connected yet. Try again later.
+ *  -EINVAL - response is detected to be invalid. Client connection should be terminated.
+ *  -ENOSPC - no space to receive another response. User need to retrieve waiting responses.
+ *  -EIO - connection terminated (or other critical error). Client connection should be terminated.
+ *  -ENOMEM - out of memory
  */
-int spdk_jsonrpc_client_recv_response(struct spdk_jsonrpc_client *client);
+int spdk_jsonrpc_client_poll(struct spdk_jsonrpc_client *client, int timeout);
 
 /**
  * Return JSON RPC response object representing next available response from client connection.

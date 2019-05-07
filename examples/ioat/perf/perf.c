@@ -63,6 +63,8 @@ struct ioat_chan_entry {
 	uint64_t xfer_completed;
 	uint64_t xfer_failed;
 	uint64_t current_queue_depth;
+	uint64_t waiting_for_flush;
+	uint64_t flush_threshold;
 	bool is_draining;
 	struct spdk_mempool *data_pool;
 	struct spdk_mempool *task_pool;
@@ -264,16 +266,16 @@ parse_args(int argc, char **argv)
 	while ((op = getopt(argc, argv, "c:hn:o:q:t:v")) != -1) {
 		switch (op) {
 		case 'o':
-			g_user_config.xfer_size_bytes = atoi(optarg);
+			g_user_config.xfer_size_bytes = spdk_strtol(optarg, 10);
 			break;
 		case 'n':
-			g_user_config.ioat_chan_num = atoi(optarg);
+			g_user_config.ioat_chan_num = spdk_strtol(optarg, 10);
 			break;
 		case 'q':
-			g_user_config.queue_depth = atoi(optarg);
+			g_user_config.queue_depth = spdk_strtol(optarg, 10);
 			break;
 		case 't':
-			g_user_config.time_in_sec = atoi(optarg);
+			g_user_config.time_in_sec = spdk_strtol(optarg, 10);
 			break;
 		case 'c':
 			g_user_config.core_mask = optarg;
@@ -289,9 +291,9 @@ parse_args(int argc, char **argv)
 			return 1;
 		}
 	}
-	if (!g_user_config.xfer_size_bytes || !g_user_config.queue_depth ||
-	    !g_user_config.time_in_sec || !g_user_config.core_mask ||
-	    !g_user_config.ioat_chan_num) {
+	if (g_user_config.xfer_size_bytes <= 0 || g_user_config.queue_depth <= 0 ||
+	    g_user_config.time_in_sec <= 0 || !g_user_config.core_mask ||
+	    g_user_config.ioat_chan_num <= 0) {
 		usage(argv[0]);
 		return 1;
 	}
@@ -302,6 +304,7 @@ parse_args(int argc, char **argv)
 static void
 drain_io(struct ioat_chan_entry *ioat_chan_entry)
 {
+	spdk_ioat_flush(ioat_chan_entry->chan);
 	while (ioat_chan_entry->current_queue_depth > 0) {
 		spdk_ioat_process_events(ioat_chan_entry->chan);
 	}
@@ -315,8 +318,13 @@ submit_single_xfer(struct ioat_chan_entry *ioat_chan_entry, struct ioat_task *io
 	ioat_task->src = src;
 	ioat_task->dst = dst;
 
-	spdk_ioat_submit_copy(ioat_chan_entry->chan, ioat_task, ioat_done, dst, src,
-			      g_user_config.xfer_size_bytes);
+	spdk_ioat_build_copy(ioat_chan_entry->chan, ioat_task, ioat_done, dst, src,
+			     g_user_config.xfer_size_bytes);
+	ioat_chan_entry->waiting_for_flush++;
+	if (ioat_chan_entry->waiting_for_flush >= ioat_chan_entry->flush_threshold) {
+		spdk_ioat_flush(ioat_chan_entry->chan);
+		ioat_chan_entry->waiting_for_flush = 0;
+	}
 
 	ioat_chan_entry->current_queue_depth++;
 }
@@ -355,6 +363,8 @@ work_fn(void *arg)
 	t = worker->ctx;
 	while (t != NULL) {
 		/* begin to submit transfers */
+		t->waiting_for_flush = 0;
+		t->flush_threshold = g_user_config.queue_depth / 2;
 		if (submit_xfers(t, g_user_config.queue_depth) < 0) {
 			return -1;
 		}
@@ -474,10 +484,14 @@ associate_workers_with_chan(void)
 		t->ioat_chan_id = i;
 		snprintf(buf_pool_name, sizeof(buf_pool_name), "buf_pool_%d", i);
 		snprintf(task_pool_name, sizeof(task_pool_name), "task_pool_%d", i);
-		t->data_pool = spdk_mempool_create(buf_pool_name, 512, g_user_config.xfer_size_bytes,
+		t->data_pool = spdk_mempool_create(buf_pool_name,
+						   g_user_config.queue_depth * 2, /* src + dst */
+						   g_user_config.xfer_size_bytes,
 						   SPDK_MEMPOOL_DEFAULT_CACHE_SIZE,
 						   SPDK_ENV_SOCKET_ID_ANY);
-		t->task_pool = spdk_mempool_create(task_pool_name, 512, sizeof(struct ioat_task),
+		t->task_pool = spdk_mempool_create(task_pool_name,
+						   g_user_config.queue_depth,
+						   sizeof(struct ioat_task),
 						   SPDK_MEMPOOL_DEFAULT_CACHE_SIZE,
 						   SPDK_ENV_SOCKET_ID_ANY);
 		if (!t->data_pool || !t->task_pool) {

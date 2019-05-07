@@ -28,7 +28,6 @@ NETMASK=$INITIATOR_IP/32
 function run_nvme_remote() {
 	echo "now use $1 method to run iscsi tgt."
 
-	# Start the iSCSI target without using stub
 	iscsi_rpc_addr="/var/tmp/spdk-iscsi.sock"
 	ISCSI_APP="$rootdir/app/iscsi_tgt/iscsi_tgt"
 	$ISCSI_APP -r "$iscsi_rpc_addr" -m 0x1 -p 0 -s 512 --wait-for-rpc &
@@ -89,7 +88,7 @@ trap "iscsicleanup; killprocess $iscsipid; killprocess $nvmfpid; \
 sleep 1
 
 echo "Running FIO"
-$fio_py 4096 1 randrw 1 verify
+$fio_py iscsi 4096 1 randrw 1 1 verify
 
 rm -f ./local-job0-0-verify.state
 iscsicleanup
@@ -98,7 +97,7 @@ killprocess $iscsipid
 run_nvme_remote "remote"
 
 echo "Running FIO"
-$fio_py 4096 1 randrw 1 verify
+$fio_py iscsi 4096 1 randrw 1 1 verify
 
 rm -f ./local-job0-0-verify.state
 trap - SIGINT SIGTERM EXIT

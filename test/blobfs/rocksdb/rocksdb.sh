@@ -13,7 +13,16 @@ run_step() {
 	echo "--spdk_cache_size=$CACHE_SIZE" >> "$1"_flags.txt
 
 	echo -n Start $1 test phase...
+	# ASAN has some bugs around thread_local variables.  We have a destructor in place
+	# to free the thread contexts, but ASAN complains about the leak before those
+	# destructors have a chance to run.  So suppress this one specific leak using
+	# LSAN_OPTIONS.
+	export LSAN_OPTIONS="suppressions=$testdir/lsan_suppressions.txt"
 	/usr/bin/time taskset 0xFF $DB_BENCH --flagfile="$1"_flags.txt &> "$1"_db_bench.txt
+	DB_BENCH_FILE=$(grep /dev/shm "$1"_db_bench.txt | cut -f 6 -d ' ')
+	gzip $DB_BENCH_FILE
+	mv $DB_BENCH_FILE.gz "$1"_trace.gz
+	chmod 644 "$1"_trace.gz
 	echo done.
 }
 
@@ -25,7 +34,8 @@ testdir=$(readlink -f $(dirname $0))
 rootdir=$(readlink -f $testdir/../../..)
 source $rootdir/test/common/autotest_common.sh
 
-DB_BENCH_DIR=/usr/src/rocksdb
+# In the autotest job, we copy the rocksdb source to just outside the spdk directory.
+DB_BENCH_DIR="$rootdir/../rocksdb"
 DB_BENCH=$DB_BENCH_DIR/db_bench
 ROCKSDB_CONF=$testdir/rocksdb.conf
 
@@ -39,27 +49,35 @@ timing_enter rocksdb
 timing_enter db_bench_build
 
 pushd $DB_BENCH_DIR
-git clean -x -f -d
+if [ -z "$SKIP_GIT_CLEAN" ]; then
+	git clean -x -f -d
+fi
 $MAKE db_bench $MAKEFLAGS $MAKECONFIG DEBUG_LEVEL=0 SPDK_DIR=$rootdir
 popd
 
 timing_exit db_bench_build
 
 $rootdir/scripts/gen_nvme.sh > $ROCKSDB_CONF
+# 0x80 is the bit mask for BlobFS tracepoints
+echo "[Global]" >> $ROCKSDB_CONF
+echo "TpointGroupMask 0x80" >> $ROCKSDB_CONF
 
 trap 'run_bsdump; rm -f $ROCKSDB_CONF; exit 1' SIGINT SIGTERM EXIT
 
-timing_enter mkfs
-$rootdir/test/blobfs/mkfs/mkfs $ROCKSDB_CONF Nvme0n1
-timing_exit mkfs
+if [ -z "$SKIP_MKFS" ]; then
+	timing_enter mkfs
+	$rootdir/test/blobfs/mkfs/mkfs $ROCKSDB_CONF Nvme0n1
+	timing_exit mkfs
+fi
 
-mkdir $output_dir/rocksdb
+mkdir -p $output_dir/rocksdb
 RESULTS_DIR=$output_dir/rocksdb
-CACHE_SIZE=4096
-if [ $RUN_NIGHTLY_FAILING -eq 1 ]; then
+if [ $RUN_NIGHTLY -eq 1 ]; then
+	CACHE_SIZE=4096
 	DURATION=60
 	NUM_KEYS=100000000
 else
+	CACHE_SIZE=2048
 	DURATION=20
 	NUM_KEYS=20000000
 fi

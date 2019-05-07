@@ -11,7 +11,6 @@ set -e
 export ASAN_OPTIONS=new_delete_type_mismatch=0
 
 PS4=' \t	\$ '
-ulimit -c unlimited
 
 : ${RUN_NIGHTLY:=0}
 export RUN_NIGHTLY
@@ -35,32 +34,38 @@ if ! hash pmempool; then
 fi
 
 # Set defaults for missing test config options
-: ${SPDK_BUILD_DOC=1}; export SPDK_BUILD_DOC
-: ${SPDK_BUILD_SHARED_OBJECT=1}; export SPDK_BUILD_SHARED_OBJECT
-: ${SPDK_RUN_CHECK_FORMAT=1}; export SPDK_RUN_CHECK_FORMAT
-: ${SPDK_RUN_SCANBUILD=1}; export SPDK_RUN_SCANBUILD
-: ${SPDK_RUN_VALGRIND=1}; export SPDK_RUN_VALGRIND
-: ${SPDK_TEST_UNITTEST=1}; export SPDK_TEST_UNITTEST
-: ${SPDK_TEST_ISCSI=1}; export SPDK_TEST_ISCSI
-: ${SPDK_TEST_ISCSI_INITIATOR=1}; export SPDK_TEST_ISCSI_INITIATOR
-: ${SPDK_TEST_NVME=1}; export SPDK_TEST_NVME
-: ${SPDK_TEST_NVME_CLI=1}; export SPDK_TEST_NVME_CLI
-: ${SPDK_TEST_NVMF=1}; export SPDK_TEST_NVMF
-: ${SPDK_TEST_RBD=1}; export SPDK_TEST_RBD
-: ${SPDK_TEST_VHOST=1}; export SPDK_TEST_VHOST
-: ${SPDK_TEST_BLOCKDEV=1}; export SPDK_TEST_BLOCKDEV
-: ${SPDK_TEST_IOAT=1}; export SPDK_TEST_IOAT
-: ${SPDK_TEST_EVENT=1}; export SPDK_TEST_EVENT
-: ${SPDK_TEST_BLOBFS=1}; export SPDK_TEST_BLOBFS
-: ${SPDK_TEST_VHOST_INIT=1}; export SPDK_TEST_VHOST_INIT
-: ${SPDK_TEST_PMDK=1}; export SPDK_TEST_PMDK
-: ${SPDK_TEST_LVOL=1}; export SPDK_TEST_LVOL
-: ${SPDK_TEST_JSON=1}; export SPDK_TEST_JSON
-: ${SPDK_TEST_REDUCE=1}; export SPDK_TEST_REDUCE
-: ${SPDK_RUN_ASAN=1}; export SPDK_RUN_ASAN
-: ${SPDK_RUN_UBSAN=1}; export SPDK_RUN_UBSAN
-: ${SPDK_RUN_INSTALLED_DPDK=1}; export SPDK_RUN_INSTALLED_DPDK
-: ${SPDK_TEST_CRYPTO=1}; export SPDK_TEST_CRYPTO
+: ${SPDK_BUILD_DOC=0}; export SPDK_BUILD_DOC
+: ${SPDK_BUILD_SHARED_OBJECT=0}; export SPDK_BUILD_SHARED_OBJECT
+: ${SPDK_RUN_CHECK_FORMAT=0}; export SPDK_RUN_CHECK_FORMAT
+: ${SPDK_RUN_SCANBUILD=0}; export SPDK_RUN_SCANBUILD
+: ${SPDK_RUN_VALGRIND=0}; export SPDK_RUN_VALGRIND
+: ${SPDK_RUN_FUNCTIONAL_TEST=0}; export SPDK_RUN_FUNCTIONAL_TEST
+: ${SPDK_TEST_UNITTEST=0}; export SPDK_TEST_UNITTEST
+: ${SPDK_TEST_ISAL=0}; export SPDK_TEST_ISAL
+: ${SPDK_TEST_ISCSI=0}; export SPDK_TEST_ISCSI
+: ${SPDK_TEST_ISCSI_INITIATOR=0}; export SPDK_TEST_ISCSI_INITIATOR
+: ${SPDK_TEST_NVME=0}; export SPDK_TEST_NVME
+: ${SPDK_TEST_NVME_CLI=0}; export SPDK_TEST_NVME_CLI
+: ${SPDK_TEST_NVMF=0}; export SPDK_TEST_NVMF
+: ${SPDK_TEST_RBD=0}; export SPDK_TEST_RBD
+: ${SPDK_TEST_VHOST=0}; export SPDK_TEST_VHOST
+: ${SPDK_TEST_BLOCKDEV=0}; export SPDK_TEST_BLOCKDEV
+: ${SPDK_TEST_IOAT=0}; export SPDK_TEST_IOAT
+: ${SPDK_TEST_EVENT=0}; export SPDK_TEST_EVENT
+: ${SPDK_TEST_BLOBFS=0}; export SPDK_TEST_BLOBFS
+: ${SPDK_TEST_VHOST_INIT=0}; export SPDK_TEST_VHOST_INIT
+: ${SPDK_TEST_PMDK=0}; export SPDK_TEST_PMDK
+: ${SPDK_TEST_LVOL=0}; export SPDK_TEST_LVOL
+: ${SPDK_TEST_JSON=0}; export SPDK_TEST_JSON
+: ${SPDK_TEST_REDUCE=0}; export SPDK_TEST_REDUCE
+: ${SPDK_RUN_ASAN=0}; export SPDK_RUN_ASAN
+: ${SPDK_RUN_UBSAN=0}; export SPDK_RUN_UBSAN
+: ${SPDK_RUN_INSTALLED_DPDK=0}; export SPDK_RUN_INSTALLED_DPDK
+: ${SPDK_TEST_CRYPTO=0}; export SPDK_TEST_CRYPTO
+: ${SPDK_TEST_FTL=0}; export SPDK_TEST_FTL
+: ${SPDK_TEST_BDEV_FTL=0}; export SPDK_TEST_BDEV_FTL
+: ${SPDK_TEST_OCF=0}; export SPDK_TEST_OCF
+: ${SPDK_TEST_FTL_EXTENDED=0}; export SPDK_TEST_FTL_EXTENDED
 
 if [ -z "$DEPENDENCY_DIR" ]; then
 	export DEPENDENCY_DIR=/home/sys_sgsw
@@ -86,6 +91,10 @@ fi
 
 if [ $SPDK_TEST_CRYPTO -eq 1 ]; then
 	config_params+=' --with-crypto'
+fi
+
+if [ $SPDK_TEST_OCF -eq 1 ]; then
+	config_params+=" --with-ocf"
 fi
 
 export UBSAN_OPTIONS='halt_on_error=1:print_stacktrace=1:abort_on_error=1'
@@ -188,6 +197,14 @@ if [ ! -d "${DEPENDENCY_DIR}/nvme-cli" ]; then
 	export SPDK_TEST_NVME_CLI=0
 fi
 
+if [ $SPDK_TEST_ISAL -eq 0 ]; then
+	config_params+=' --without-isal'
+fi
+
+if [ $SPDK_TEST_REDUCE -eq 0 ]; then
+        config_params+=' --without-reduce'
+fi
+
 export config_params
 
 if [ -z "$output_dir" ]; then
@@ -222,15 +239,17 @@ function timing() {
 }
 
 function timing_enter() {
+	local shell_restore_x="$( [[ "$-" =~ x ]] && echo 'set -x' )"
 	set +x
 	timing "enter" "$1"
-	set -x
+	$shell_restore_x
 }
 
 function timing_exit() {
+	local shell_restore_x="$( [[ "$-" =~ x ]] && echo 'set -x' )"
 	set +x
 	timing "exit" "$1"
-	set -x
+	$shell_restore_x
 }
 
 function timing_finish() {
@@ -246,7 +265,7 @@ function timing_finish() {
 }
 
 function create_test_list() {
-	grep -rsh --exclude="autotest_common.sh" --exclude="$rootdir/test/common/autotest_common.sh" -e "report_test_completion" $rootdir | sed 's/report_test_completion//g; s/[[:blank:]]//g; s/"//g;' > $output_dir/all_tests.txt || true
+	grep -rshI --exclude="autotest_common.sh" --exclude="$rootdir/test/common/autotest_common.sh" -e "report_test_completion" $rootdir | sed 's/report_test_completion//g; s/[[:blank:]]//g; s/"//g;' > $output_dir/all_tests.txt || true
 }
 
 function report_test_completion() {
@@ -255,7 +274,7 @@ function report_test_completion() {
 
 function process_core() {
 	ret=0
-	for core in $(find . -type f \( -name 'core*' -o -name '*.core' \)); do
+	for core in $(find . -type f \( -name 'core\.?[0-9]*' -o -name '*.core' \)); do
 		exe=$(eu-readelf -n "$core" | grep psargs | sed "s/.*psargs: \([^ \'\" ]*\).*/\1/")
 		if [[ ! -f "$exe" ]]; then
 			exe=$(eu-readelf -n "$core" | grep -oP -m1 "$exe.+")
@@ -304,36 +323,69 @@ function waitforlisten() {
 		exit 1
 	fi
 
-	rpc_addr="${2:-$DEFAULT_RPC_ADDR}"
+	local rpc_addr="${2:-$DEFAULT_RPC_ADDR}"
+
+	if hash ip; then
+		local have_ip_cmd=true
+	else
+		local have_ip_cmd=false
+	fi
+
+	if hash ss; then
+		local have_ss_cmd=true
+	else
+		local have_ss_cmd=false
+	fi
 
 	echo "Waiting for process to start up and listen on UNIX domain socket $rpc_addr..."
 	# turn off trace for this loop
+	local shell_restore_x="$( [[ "$-" =~ x ]] && echo 'set -x' )"
 	set +x
-	ret=1
-	while [ $ret -ne 0 ]; do
+	local ret=0
+	local i
+	for (( i = 40; i != 0; i-- )); do
 		# if the process is no longer running, then exit the script
 		#  since it means the application crashed
 		if ! kill -s 0 $1; then
-			exit 1
+			echo "ERROR: process (pid: $1) is no longer running"
+			ret=1
+			break
 		fi
 
-		namespace=$(ip netns identify $1)
-		if [ -n "$namespace" ]; then
-			ns_cmd="ip netns exec $namespace"
+		# FIXME: don't know how to fix this for FreeBSD
+		if $have_ip_cmd; then
+			namespace=$(ip netns identify $1)
+			if [ -n "$namespace" ]; then
+				ns_cmd="ip netns exec $namespace"
+			fi
 		fi
 
-		if hash ss; then
+		if $have_ss_cmd; then
 			if $ns_cmd ss -ln | egrep -q "\s+$rpc_addr\s+"; then
-				ret=0
+				break
+			fi
+		elif [[ "$(uname -s)" == "Linux" ]]; then
+			# For Linux, if system doesn't have ss, just assume it has netstat
+			if $ns_cmd netstat -an | grep -iw LISTENING | egrep -q "\s+$rpc_addr\$"; then
+				break
 			fi
 		else
-			# if system doesn't have ss, just assume it has netstat
-			if $ns_cmd netstat -an | grep -iw LISTENING | egrep -q "\s+$rpc_addr\$"; then
-				ret=0
+			# On FreeBSD netstat output 'State' column is missing for Unix sockets.
+			# To workaround this issue just try to use provided address.
+			# XXX: This solution could be used for other distros.
+			if $rootdir/scripts/rpc.py -t 1 -s "$rpc_addr" get_rpc_methods &>/dev/null; then
+				break
 			fi
 		fi
+		sleep 0.5
 	done
-	set -x
+
+	$shell_restore_x
+	if (( i == 0 )); then
+		echo "ERROR: timeout while waiting for process (pid: $1) to start listening on '$rpc_addr'"
+		ret=1
+	fi
+	return $ret
 }
 
 function waitfornbd() {
@@ -422,6 +474,7 @@ function rbd_setup() {
 		export PG_NUM=128
 		export RBD_POOL=rbd
 		export RBD_NAME=foo
+		$NS_CMD $rootdir/scripts/ceph/stop.sh || true
 		$NS_CMD $rootdir/scripts/ceph/start.sh $1
 
 		$NS_CMD ceph osd pool create $RBD_POOL $PG_NUM || true
@@ -432,6 +485,7 @@ function rbd_setup() {
 function rbd_cleanup() {
 	if hash ceph; then
 		$rootdir/scripts/ceph/stop.sh || true
+		rm -f /var/tmp/ceph_raw.img
 	fi
 }
 
@@ -462,19 +516,20 @@ function kill_stub() {
 }
 
 function run_test() {
+	local shell_restore_x="$( [[ "$-" =~ x ]] && echo 'set -x' )"
 	set +x
 	local test_type="$(echo $1 | tr 'a-z' 'A-Z')"
 	shift
 	echo "************************************"
 	echo "START TEST $test_type $@"
 	echo "************************************"
-	set -x
+	$shell_restore_x
 	time "$@"
 	set +x
 	echo "************************************"
 	echo "END TEST $test_type $@"
 	echo "************************************"
-	set -x
+	$shell_restore_x
 }
 
 function print_backtrace() {
@@ -598,6 +653,38 @@ function waitforblk()
 	done
 
 	if ! lsblk -l -o NAME | grep -q -w $1; then
+		return 1
+	fi
+
+	return 0
+}
+
+function waitforblk_disconnect()
+{
+	local i=0
+	while lsblk -l -o NAME | grep -q -w $1; do
+		[ $i -lt 15 ] || break
+		i=$[$i+1]
+		sleep 1
+	done
+
+	if lsblk -l -o NAME | grep -q -w $1; then
+		return 1
+	fi
+
+	return 0
+}
+
+function waitforfile()
+{
+	local i=0
+	while [ ! -f $1 ]; do
+		[ $i -lt 200 ] || break
+		i=$[$i+1]
+		sleep 0.1
+	done
+
+	if [ ! -f $1 ]; then
 		return 1
 	fi
 

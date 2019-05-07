@@ -12,6 +12,10 @@ rpc_py="$rootdir/scripts/rpc.py"
 
 set -e
 
+# pass the parameter 'iso' to this script when running it in isolation to trigger rdma device initialization.
+# e.g. sudo ./perf.sh iso
+nvmftestinit $1
+
 RDMA_IP_LIST=$(get_available_rdma_ips)
 NVMF_FIRST_TARGET_IP=$(echo "$RDMA_IP_LIST" | head -n 1)
 TYPES="TCP"
@@ -24,10 +28,10 @@ fi
 timing_enter perf
 timing_enter start_nvmf_tgt
 
-$NVMF_APP -m 0xF -i 0 &
+$NVMF_APP -m 0xF &
 nvmfpid=$!
 
-trap "process_shm --id $NVMF_APP_SHM_ID; killprocess $nvmfpid; exit 1" SIGINT SIGTERM EXIT
+trap "process_shm --id $NVMF_APP_SHM_ID; killprocess $nvmfpid;  nvmftestfini $1; exit 1" SIGINT SIGTERM EXIT
 
 waitforlisten $nvmfpid
 $rootdir/scripts/gen_nvme.sh --json | $rpc_py load_subsystem_config
@@ -53,7 +57,7 @@ function test_perf()
 
 	# Test multi-process access to local NVMe device
 	if [ -n "$local_nvme_trid" ]; then
-		$rootdir/examples/nvme/perf/perf -i 0 -q 32 -o 4096 -w randrw -M 50 -t 1 -r "$local_nvme_trid"
+		$rootdir/examples/nvme/perf/perf -i $NVMF_APP_SHM_ID -q 32 -o 4096 -w randrw -M 50 -t 1 -r "$local_nvme_trid"
 	fi
 
 	$rootdir/examples/nvme/perf/perf -q 32 -o 4096 -w randrw -M 50 -t 1 -r "trtype:$TYPE adrfam:IPv4 traddr:$NVMF_TARGET_IP trsvcid:4420"
@@ -91,7 +95,6 @@ function test_perf()
 			$rpc_py destroy_lvol_store -l lvs_n_0
 			$rpc_py destroy_lvol_bdev "$lb_guid"
 			$rpc_py destroy_lvol_store -l lvs_0
-			$rpc_py delete_nvme_controller Nvme0
 		fi
 	fi
 }
@@ -109,4 +112,5 @@ done
 trap - SIGINT SIGTERM EXIT
 
 killprocess $nvmfpid
+nvmftestfini $1
 timing_exit perf

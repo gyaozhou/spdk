@@ -76,14 +76,17 @@ struct spdk_trace_object {
 #define SPDK_TRACE_MAX_TPOINT_ID (SPDK_TRACE_MAX_GROUP_ID * 64)
 #define SPDK_TPOINT_ID(group, tpoint)	((group * 64) + tpoint)
 
+#define SPDK_TRACE_ARG_TYPE_INT 0
+#define SPDK_TRACE_ARG_TYPE_PTR 1
+#define SPDK_TRACE_ARG_TYPE_STR 2
+
 struct spdk_trace_tpoint {
-	char		name[44];
-	char		short_name[4];
+	char		name[24];
 	uint16_t	tpoint_id;
 	uint8_t		owner_type;
 	uint8_t		object_type;
 	uint8_t		new_object;
-	uint8_t		arg1_is_ptr;
+	uint8_t		arg1_type;
 	uint8_t		reserved;
 	char		arg1_name[8];
 };
@@ -102,8 +105,8 @@ struct spdk_trace_history {
 	 */
 	uint64_t			tpoint_count[SPDK_TRACE_MAX_TPOINT_ID];
 
-	/** Index to next spdk_trace_entry to fill in the circular buffer. */
-	uint32_t			next_entry;
+	/** Index to next spdk_trace_entry to fill. */
+	uint64_t			next_entry;
 
 	/**
 	 * Circular buffer of spdk_trace_entry structures for tracing
@@ -276,6 +279,13 @@ uint64_t spdk_trace_get_tpoint_group_mask(void);
 void spdk_trace_set_tpoint_group_mask(uint64_t tpoint_group_mask);
 
 /**
+ * For each tpoint group specified in the group mask, disable all of its tpoints.
+ *
+ * \param tpoint_group_mask Tpoint group mask that indicates which tpoints to disable.
+ */
+void spdk_trace_clear_tpoint_group_mask(uint64_t tpoint_group_mask);
+
+/**
  * Initialize the trace environment. Debug tool can read the information from
  * the given shared memory to post-process the tpoint entries and display in a
  * human-readable format.
@@ -319,20 +329,49 @@ void spdk_trace_register_object(uint8_t type, char id_prefix);
  * Register the description for the tpoint.
  *
  * \param name Name for the tpoint.
- * \param short_name Short name for the tpoint.
  * \param tpoint_id Id for the tpoint.
  * \param owner_type Owner type for the tpoint.
  * \param object_type Object type for the tpoint.
  * \param new_object New object for the tpoint.
- * \param arg1_is_ptr This argument indicates whether argument1 is a pointer.
+ * \param arg1_type Type of arg1.
  * \param arg1_name Name of argument.
  */
-void spdk_trace_register_description(const char *name, const char *short_name,
-				     uint16_t tpoint_id, uint8_t owner_type,
+void spdk_trace_register_description(const char *name, uint16_t tpoint_id, uint8_t owner_type,
 				     uint8_t object_type, uint8_t new_object,
-				     uint8_t arg1_is_ptr, const char *arg1_name);
+				     uint8_t arg1_type, const char *arg1_name);
+
+struct spdk_trace_register_fn *spdk_trace_get_first_register_fn(void);
+
+struct spdk_trace_register_fn *spdk_trace_get_next_register_fn(struct spdk_trace_register_fn
+		*register_fn);
+
+/**
+ * Enable trace on specific tpoint group
+ *
+ * \param group_name Name of group to enable, "all" for enabling all groups.
+ * \return 0 on success, else non-zero indicates a failure.
+ */
+int spdk_trace_enable_tpoint_group(const char *group_name);
+
+/**
+ * Disable trace on specific tpoint group
+ *
+ * \param group_name Name of group to disable, "all" for disabling all groups.
+ * \return 0 on success, else non-zero indicates a failure.
+ */
+int spdk_trace_disable_tpoint_group(const char *group_name);
+
+/**
+ * Show trace mask and its usage.
+ *
+ * \param f File to hold the mask's information.
+ * \param tmask_arg Command line option to set the trace group mask.
+ */
+void spdk_trace_mask_usage(FILE *f, const char *tmask_arg);
 
 struct spdk_trace_register_fn {
+	const char *name;
+	uint8_t tgroup_id;
 	void (*reg_fn)(void);
 	struct spdk_trace_register_fn *next;
 };
@@ -344,9 +383,11 @@ struct spdk_trace_register_fn {
  */
 void spdk_trace_add_register_fn(struct spdk_trace_register_fn *reg_fn);
 
-#define SPDK_TRACE_REGISTER_FN(fn)				\
+#define SPDK_TRACE_REGISTER_FN(fn, name_str, _tgroup_id)	\
 	static void fn(void);					\
 	struct spdk_trace_register_fn reg_ ## fn = {		\
+		.name = name_str,				\
+		.tgroup_id = _tgroup_id,			\
 		.reg_fn = fn,					\
 		.next = NULL,					\
 	};							\

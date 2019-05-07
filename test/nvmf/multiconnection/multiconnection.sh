@@ -48,11 +48,9 @@ modprobe -v nvme-rdma
 
 for i in `seq 1 $NVMF_SUBSYS`
 do
-	bdevs="$($rpc_py construct_malloc_bdev $MALLOC_BDEV_SIZE $MALLOC_BLOCK_SIZE)"
+	$rpc_py construct_malloc_bdev $MALLOC_BDEV_SIZE $MALLOC_BLOCK_SIZE -b Malloc$i
 	$rpc_py nvmf_subsystem_create nqn.2016-06.io.spdk:cnode$i -a -s SPDK$i
-	for bdev in $bdevs; do
-		$rpc_py nvmf_subsystem_add_ns nqn.2016-06.io.spdk:cnode$i $bdev
-	done
+	$rpc_py nvmf_subsystem_add_ns nqn.2016-06.io.spdk:cnode$i Malloc$i
 	$rpc_py nvmf_subsystem_add_listener nqn.2016-06.io.spdk:cnode$i -t rdma -a $NVMF_FIRST_TARGET_IP -s $NVMF_PORT
 done
 
@@ -63,8 +61,8 @@ for i in `seq 1 $NVMF_SUBSYS`; do
 	waitforblk "nvme${k}n1"
 done
 
-$testdir/../fio/nvmf_fio.py 262144 64 read 10
-$testdir/../fio/nvmf_fio.py 262144 64 randwrite 10
+$rootdir/scripts/fio.py nvmf 262144 64 read 10 1
+$rootdir/scripts/fio.py nvmf 262144 64 randwrite 10 1
 
 sync
 for i in `seq 1 $NVMF_SUBSYS`; do

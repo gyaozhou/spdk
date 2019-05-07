@@ -39,9 +39,7 @@
 
 #include "common/lib/test_env.c"
 
-DEFINE_STUB(spdk_nvme_qpair_process_completions, int32_t,
-	    (struct spdk_nvme_qpair *qpair,
-	     uint32_t max_completions), 0);
+#define OCSSD_SECTOR_SIZE 0x1000
 
 static struct nvme_driver _g_nvme_driver = {
 	.lock = PTHREAD_MUTEX_INITIALIZER,
@@ -67,9 +65,6 @@ nvme_ctrlr_proc_get_ref(struct spdk_nvme_ctrlr *ctrlr)
 {
 	return;
 }
-
-DEFINE_STUB(spdk_nvme_ctrlr_get_current_process, struct spdk_nvme_ctrlr_process *,
-	    (struct spdk_nvme_ctrlr *ctrlr), NULL)
 
 int
 nvme_ctrlr_process_init(struct spdk_nvme_ctrlr *ctrlr)
@@ -109,10 +104,7 @@ nvme_ctrlr_get_ref_count(struct spdk_nvme_ctrlr *ctrlr)
 }
 
 int
-nvme_transport_ctrlr_scan(const struct spdk_nvme_transport_id *trid,
-			  void *cb_ctx,
-			  spdk_nvme_probe_cb probe_cb,
-			  spdk_nvme_remove_cb remove_cb,
+nvme_transport_ctrlr_scan(struct spdk_nvme_probe_ctx *probe_ctx,
 			  bool direct_connect)
 {
 	return 0;
@@ -178,7 +170,7 @@ static void
 test_nvme_ocssd_ns_cmd_vector_reset_single_entry(void)
 {
 	const uint32_t	max_xfer_size = 0x10000;
-	const uint32_t	sector_size = 0x1000;
+	const uint32_t	sector_size = OCSSD_SECTOR_SIZE;
 
 	struct spdk_nvme_ns	ns;
 	struct spdk_nvme_ctrlr	ctrlr;
@@ -208,7 +200,7 @@ static void
 test_nvme_ocssd_ns_cmd_vector_reset(void)
 {
 	const uint32_t	max_xfer_size = 0x10000;
-	const uint32_t	sector_size = 0x1000;
+	const uint32_t	sector_size = OCSSD_SECTOR_SIZE;
 	const uint32_t	vector_size = 0x10;
 
 	struct spdk_nvme_ns	ns;
@@ -238,7 +230,7 @@ static void
 test_nvme_ocssd_ns_cmd_vector_read_with_md_single_entry(void)
 {
 	const uint32_t	max_xfer_size = 0x10000;
-	const uint32_t	sector_size = 0x1000;
+	const uint32_t	sector_size = OCSSD_SECTOR_SIZE;
 	const uint32_t	md_size = 0x80;
 
 	struct spdk_nvme_ns	ns;
@@ -263,7 +255,7 @@ test_nvme_ocssd_ns_cmd_vector_read_with_md_single_entry(void)
 	SPDK_CU_ASSERT_FATAL(g_request->num_children == 0);
 
 	CU_ASSERT(g_request->payload.md == metadata);
-	CU_ASSERT(g_request->payload_size == PAGE_SIZE);
+	CU_ASSERT(g_request->payload_size == OCSSD_SECTOR_SIZE);
 	CU_ASSERT(g_request->payload.contig_or_cb_arg == buffer);
 	CU_ASSERT(g_request->cmd.opc == SPDK_OCSSD_OPC_VECTOR_READ);
 	CU_ASSERT(g_request->cmd.nsid == ns.id);
@@ -281,7 +273,7 @@ static void
 test_nvme_ocssd_ns_cmd_vector_read_with_md(void)
 {
 	const uint32_t	max_xfer_size = 0x10000;
-	const uint32_t	sector_size = 0x1000;
+	const uint32_t	sector_size = OCSSD_SECTOR_SIZE;
 	const uint32_t	md_size = 0x80;
 	const uint32_t	vector_size = 0x10;
 
@@ -325,7 +317,7 @@ static void
 test_nvme_ocssd_ns_cmd_vector_read_single_entry(void)
 {
 	const uint32_t	max_xfer_size = 0x10000;
-	const uint32_t	sector_size = 0x1000;
+	const uint32_t	sector_size = OCSSD_SECTOR_SIZE;
 
 	struct spdk_nvme_ns	ns;
 	struct spdk_nvme_ctrlr	ctrlr;
@@ -346,7 +338,7 @@ test_nvme_ocssd_ns_cmd_vector_read_single_entry(void)
 	SPDK_CU_ASSERT_FATAL(g_request != NULL);
 	SPDK_CU_ASSERT_FATAL(g_request->num_children == 0);
 
-	CU_ASSERT(g_request->payload_size == PAGE_SIZE);
+	CU_ASSERT(g_request->payload_size == OCSSD_SECTOR_SIZE);
 	CU_ASSERT(g_request->payload.contig_or_cb_arg == buffer);
 	CU_ASSERT(g_request->cmd.opc == SPDK_OCSSD_OPC_VECTOR_READ);
 	CU_ASSERT(g_request->cmd.nsid == ns.id);
@@ -362,7 +354,7 @@ static void
 test_nvme_ocssd_ns_cmd_vector_read(void)
 {
 	const uint32_t	max_xfer_size = 0x10000;
-	const uint32_t	sector_size = 0x1000;
+	const uint32_t	sector_size = OCSSD_SECTOR_SIZE;
 	const uint32_t	vector_size = 0x10;
 
 	struct spdk_nvme_ns	ns;
@@ -399,7 +391,7 @@ static void
 test_nvme_ocssd_ns_cmd_vector_write_with_md_single_entry(void)
 {
 	const uint32_t	max_xfer_size = 0x10000;
-	const uint32_t	sector_size = 0x1000;
+	const uint32_t	sector_size = OCSSD_SECTOR_SIZE;
 	const uint32_t	md_size = 0x80;
 
 	struct spdk_nvme_ns	ns;
@@ -424,7 +416,7 @@ test_nvme_ocssd_ns_cmd_vector_write_with_md_single_entry(void)
 	SPDK_CU_ASSERT_FATAL(g_request->num_children == 0);
 
 	CU_ASSERT(g_request->payload.md == metadata);
-	CU_ASSERT(g_request->payload_size == PAGE_SIZE);
+	CU_ASSERT(g_request->payload_size == OCSSD_SECTOR_SIZE);
 	CU_ASSERT(g_request->payload.contig_or_cb_arg == buffer);
 	CU_ASSERT(g_request->cmd.opc == SPDK_OCSSD_OPC_VECTOR_WRITE);
 	CU_ASSERT(g_request->cmd.nsid == ns.id);
@@ -443,7 +435,7 @@ static void
 test_nvme_ocssd_ns_cmd_vector_write_with_md(void)
 {
 	const uint32_t	max_xfer_size = 0x10000;
-	const uint32_t	sector_size = 0x1000;
+	const uint32_t	sector_size = OCSSD_SECTOR_SIZE;
 	const uint32_t	md_size = 0x80;
 	const uint32_t	vector_size = 0x10;
 
@@ -487,7 +479,7 @@ static void
 test_nvme_ocssd_ns_cmd_vector_write_single_entry(void)
 {
 	const uint32_t	max_xfer_size = 0x10000;
-	const uint32_t	sector_size = 0x1000;
+	const uint32_t	sector_size = OCSSD_SECTOR_SIZE;
 
 	struct spdk_nvme_ns	ns;
 	struct spdk_nvme_ctrlr	ctrlr;
@@ -508,7 +500,7 @@ test_nvme_ocssd_ns_cmd_vector_write_single_entry(void)
 	SPDK_CU_ASSERT_FATAL(g_request != NULL);
 	SPDK_CU_ASSERT_FATAL(g_request->num_children == 0);
 
-	CU_ASSERT(g_request->payload_size == PAGE_SIZE);
+	CU_ASSERT(g_request->payload_size == OCSSD_SECTOR_SIZE);
 	CU_ASSERT(g_request->payload.contig_or_cb_arg == buffer);
 	CU_ASSERT(g_request->cmd.opc == SPDK_OCSSD_OPC_VECTOR_WRITE);
 	CU_ASSERT(g_request->cmd.nsid == ns.id);
@@ -525,7 +517,7 @@ static void
 test_nvme_ocssd_ns_cmd_vector_write(void)
 {
 	const uint32_t	max_xfer_size = 0x10000;
-	const uint32_t	sector_size = 0x1000;
+	const uint32_t	sector_size = OCSSD_SECTOR_SIZE;
 	const uint32_t	vector_size = 0x10;
 
 	struct spdk_nvme_ns	ns;
@@ -564,7 +556,7 @@ static void
 test_nvme_ocssd_ns_cmd_vector_copy_single_entry(void)
 {
 	const uint32_t	max_xfer_size = 0x10000;
-	const uint32_t	sector_size = 0x1000;
+	const uint32_t	sector_size = OCSSD_SECTOR_SIZE;
 
 	struct spdk_nvme_ns	ns;
 	struct spdk_nvme_ctrlr	ctrlr;
@@ -596,7 +588,7 @@ static void
 test_nvme_ocssd_ns_cmd_vector_copy(void)
 {
 	const uint32_t	max_xfer_size = 0x10000;
-	const uint32_t	sector_size = 0x1000;
+	const uint32_t	sector_size = OCSSD_SECTOR_SIZE;
 	const uint32_t	vector_size = 0x10;
 
 	struct spdk_nvme_ns	ns;

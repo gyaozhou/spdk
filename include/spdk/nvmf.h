@@ -1,8 +1,8 @@
 /*-
  *   BSD LICENSE
  *
- *   Copyright (c) Intel Corporation.
- *   All rights reserved.
+ *   Copyright (c) Intel Corporation. All rights reserved.
+ *   Copyright (c) 2018 Mellanox Technologies LTD. All rights reserved.
  *
  *   Redistribution and use in source and binary forms, with or without
  *   modification, are permitted provided that the following conditions
@@ -64,12 +64,16 @@ struct spdk_json_write_ctx;
 struct spdk_nvmf_transport;
 
 struct spdk_nvmf_transport_opts {
-	uint16_t max_queue_depth;
-	uint16_t max_qpairs_per_ctrlr;
-	uint32_t in_capsule_data_size;
-	uint32_t max_io_size;
-	uint32_t io_unit_size;
-	uint32_t max_aq_depth;
+	uint16_t	max_queue_depth;
+	uint16_t	max_qpairs_per_ctrlr;
+	uint32_t	in_capsule_data_size;
+	uint32_t	max_io_size;
+	uint32_t	io_unit_size;
+	uint32_t	max_aq_depth;
+	uint32_t	num_shared_buffers;
+	uint32_t	buf_cache_size;
+	uint32_t	max_srq_depth;
+	bool		no_srq;
 };
 
 /**
@@ -670,6 +674,26 @@ const char *spdk_nvmf_subsystem_get_sn(const struct spdk_nvmf_subsystem *subsyst
 int spdk_nvmf_subsystem_set_sn(struct spdk_nvmf_subsystem *subsystem, const char *sn);
 
 /**
+ * Get the model number of the specified subsystem.
+ *
+ * \param subsystem Subsystem to query.
+ *
+ * \return model number of the specified subsystem.
+ */
+const char *spdk_nvmf_subsystem_get_mn(const struct spdk_nvmf_subsystem *subsystem);
+
+
+/**
+ * Set the model number for the specified subsystem.
+ *
+ * \param subsystem Subsystem to set for.
+ * \param mn model number to set.
+ *
+ * \return 0 on success, -1 on failure.
+ */
+int spdk_nvmf_subsystem_set_mn(struct spdk_nvmf_subsystem *subsystem, const char *mn);
+
+/**
  * Get the NQN of the specified subsystem.
  *
  * \param subsystem Subsystem to query.
@@ -812,6 +836,23 @@ int spdk_nvmf_transport_listen(struct spdk_nvmf_transport *transport,
  */
 void
 spdk_nvmf_tgt_transport_write_config_json(struct spdk_json_write_ctx *w, struct spdk_nvmf_tgt *tgt);
+
+#ifdef SPDK_CONFIG_RDMA
+/**
+ * \brief Set the global hooks for the RDMA transport, if necessary.
+ *
+ * This call is optional and must be performed prior to probing for
+ * any devices. By default, the RDMA transport will use the ibverbs
+ * library to create protection domains and register memory. This
+ * is a mechanism to subvert that and use an existing registration.
+ *
+ * This function may only be called one time per process.
+ *
+ * \param hooks for initializing global hooks
+ */
+void
+spdk_nvmf_rdma_init_hooks(struct spdk_nvme_rdma_hooks *hooks);
+#endif
 
 #ifdef __cplusplus
 }

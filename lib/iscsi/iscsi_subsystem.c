@@ -94,7 +94,7 @@ static void *g_fini_cb_arg;
 "\n"
 
 static void
-spdk_iscsi_globals_config_text(FILE *fp)
+iscsi_globals_config_text(FILE *fp)
 {
 	const char *authmethod = "None";
 	char authgroup[32] = "None";
@@ -129,39 +129,34 @@ spdk_iscsi_globals_config_text(FILE *fp)
 		g_spdk_iscsi.ErrorRecoveryLevel);
 }
 
+#define ISCSI_DATA_BUFFER_ALIGNMENT	(0x1000)
+#define ISCSI_DATA_BUFFER_MASK		(ISCSI_DATA_BUFFER_ALIGNMENT - 1)
+
 static void
-spdk_mobj_ctor(struct spdk_mempool *mp, __attribute__((unused)) void *arg,
-	       void *_m, __attribute__((unused)) unsigned i)
+mobj_ctor(struct spdk_mempool *mp, __attribute__((unused)) void *arg,
+	  void *_m, __attribute__((unused)) unsigned i)
 {
 	struct spdk_mobj *m = _m;
-	uint64_t *phys_addr;
-	ptrdiff_t off;
 
 	m->mp = mp;
 	m->buf = (uint8_t *)m + sizeof(struct spdk_mobj);
-	m->buf = (void *)((unsigned long)((uint8_t *)m->buf + 512) & ~511UL);
-	off = (uint64_t)(uint8_t *)m->buf - (uint64_t)(uint8_t *)m;
-
-	/*
-	 * we store the physical address in a 64bit unsigned integer
-	 * right before the 512B aligned buffer area.
-	 */
-	phys_addr = (uint64_t *)m->buf - 1;
-	*phys_addr = spdk_vtophys(m) + off;
+	m->buf = (void *)((unsigned long)((uint8_t *)m->buf + ISCSI_DATA_BUFFER_ALIGNMENT) &
+			  ~ISCSI_DATA_BUFFER_MASK);
 }
 
 #define NUM_PDU_PER_CONNECTION(iscsi)	(2 * (iscsi->MaxQueueDepth + MAX_LARGE_DATAIN_PER_CONNECTION + 8))
-#define PDU_POOL_SIZE(iscsi)	(iscsi->MaxConnections * NUM_PDU_PER_CONNECTION(iscsi))
+#define PDU_POOL_SIZE(iscsi)		(iscsi->MaxConnections * NUM_PDU_PER_CONNECTION(iscsi))
 #define IMMEDIATE_DATA_POOL_SIZE(iscsi)	(iscsi->MaxConnections * 128)
 #define DATA_OUT_POOL_SIZE(iscsi)	(iscsi->MaxConnections * MAX_DATA_OUT_PER_CONNECTION)
 
-static int spdk_iscsi_initialize_pdu_pool(void)
+static int
+iscsi_initialize_pdu_pool(void)
 {
 	struct spdk_iscsi_globals *iscsi = &g_spdk_iscsi;
-	int imm_mobj_size = spdk_get_immediate_data_buffer_size() +
-			    sizeof(struct spdk_mobj) + 512;
-	int dout_mobj_size = spdk_get_data_out_buffer_size() +
-			     sizeof(struct spdk_mobj) + 512;
+	int imm_mobj_size = SPDK_BDEV_BUF_SIZE_WITH_MD(spdk_get_max_immediate_data_size()) +
+			    sizeof(struct spdk_mobj) + ISCSI_DATA_BUFFER_ALIGNMENT;
+	int dout_mobj_size = SPDK_BDEV_BUF_SIZE_WITH_MD(SPDK_ISCSI_MAX_RECV_DATA_SEGMENT_LENGTH) +
+			     sizeof(struct spdk_mobj) + ISCSI_DATA_BUFFER_ALIGNMENT;
 
 	/* create PDU pool */
 	iscsi->pdu_pool = spdk_mempool_create("PDU_Pool",
@@ -175,9 +170,9 @@ static int spdk_iscsi_initialize_pdu_pool(void)
 
 	iscsi->pdu_immediate_data_pool = spdk_mempool_create_ctor("PDU_immediate_data_Pool",
 					 IMMEDIATE_DATA_POOL_SIZE(iscsi),
-					 imm_mobj_size, 0,
-					 spdk_env_get_socket_id(spdk_env_get_current_core()),
-					 spdk_mobj_ctor, NULL);
+					 imm_mobj_size, 256,
+					 SPDK_ENV_SOCKET_ID_ANY,
+					 mobj_ctor, NULL);
 	if (!iscsi->pdu_immediate_data_pool) {
 		SPDK_ERRLOG("create PDU immediate data pool failed\n");
 		return -1;
@@ -186,8 +181,8 @@ static int spdk_iscsi_initialize_pdu_pool(void)
 	iscsi->pdu_data_out_pool = spdk_mempool_create_ctor("PDU_data_out_Pool",
 				   DATA_OUT_POOL_SIZE(iscsi),
 				   dout_mobj_size, 256,
-				   spdk_env_get_socket_id(spdk_env_get_current_core()),
-				   spdk_mobj_ctor, NULL);
+				   SPDK_ENV_SOCKET_ID_ANY,
+				   mobj_ctor, NULL);
 	if (!iscsi->pdu_data_out_pool) {
 		SPDK_ERRLOG("create PDU data out pool failed\n");
 		return -1;
@@ -196,8 +191,9 @@ static int spdk_iscsi_initialize_pdu_pool(void)
 	return 0;
 }
 
-static void spdk_iscsi_sess_ctor(struct spdk_mempool *pool, void *arg,
-				 void *session_buf, unsigned index)
+static void
+iscsi_sess_ctor(struct spdk_mempool *pool, void *arg, void *session_buf,
+		unsigned index)
 {
 	struct spdk_iscsi_globals		*iscsi = arg;
 	struct spdk_iscsi_sess	*sess = session_buf;
@@ -211,7 +207,7 @@ static void spdk_iscsi_sess_ctor(struct spdk_mempool *pool, void *arg,
 #define DEFAULT_TASK_POOL_SIZE 32768
 
 static int
-spdk_iscsi_initialize_task_pool(void)
+iscsi_initialize_task_pool(void)
 {
 	struct spdk_iscsi_globals *iscsi = &g_spdk_iscsi;
 
@@ -229,7 +225,8 @@ spdk_iscsi_initialize_task_pool(void)
 }
 
 #define SESSION_POOL_SIZE(iscsi)	(iscsi->MaxSessions)
-static int spdk_iscsi_initialize_session_pool(void)
+static int
+iscsi_initialize_session_pool(void)
 {
 	struct spdk_iscsi_globals *iscsi = &g_spdk_iscsi;
 
@@ -237,7 +234,7 @@ static int spdk_iscsi_initialize_session_pool(void)
 			      SESSION_POOL_SIZE(iscsi),
 			      sizeof(struct spdk_iscsi_sess), 0,
 			      SPDK_ENV_SOCKET_ID_ANY,
-			      spdk_iscsi_sess_ctor, iscsi);
+			      iscsi_sess_ctor, iscsi);
 	if (!iscsi->session_pool) {
 		SPDK_ERRLOG("create session pool failed\n");
 		return -1;
@@ -247,17 +244,17 @@ static int spdk_iscsi_initialize_session_pool(void)
 }
 
 static int
-spdk_iscsi_initialize_all_pools(void)
+iscsi_initialize_all_pools(void)
 {
-	if (spdk_iscsi_initialize_pdu_pool() != 0) {
+	if (iscsi_initialize_pdu_pool() != 0) {
 		return -1;
 	}
 
-	if (spdk_iscsi_initialize_session_pool() != 0) {
+	if (iscsi_initialize_session_pool() != 0) {
 		return -1;
 	}
 
-	if (spdk_iscsi_initialize_task_pool() != 0) {
+	if (iscsi_initialize_task_pool() != 0) {
 		return -1;
 	}
 
@@ -265,28 +262,28 @@ spdk_iscsi_initialize_all_pools(void)
 }
 
 static void
-spdk_iscsi_check_pool(struct spdk_mempool *pool, size_t count)
+iscsi_check_pool(struct spdk_mempool *pool, size_t count)
 {
-	if (spdk_mempool_count(pool) != count) {
+	if (pool && spdk_mempool_count(pool) != count) {
 		SPDK_ERRLOG("spdk_mempool_count(%s) == %zu, should be %zu\n",
 			    spdk_mempool_get_name(pool), spdk_mempool_count(pool), count);
 	}
 }
 
 static void
-spdk_iscsi_check_pools(void)
+iscsi_check_pools(void)
 {
 	struct spdk_iscsi_globals *iscsi = &g_spdk_iscsi;
 
-	spdk_iscsi_check_pool(iscsi->pdu_pool, PDU_POOL_SIZE(iscsi));
-	spdk_iscsi_check_pool(iscsi->session_pool, SESSION_POOL_SIZE(iscsi));
-	spdk_iscsi_check_pool(iscsi->pdu_immediate_data_pool, IMMEDIATE_DATA_POOL_SIZE(iscsi));
-	spdk_iscsi_check_pool(iscsi->pdu_data_out_pool, DATA_OUT_POOL_SIZE(iscsi));
-	spdk_iscsi_check_pool(iscsi->task_pool, DEFAULT_TASK_POOL_SIZE);
+	iscsi_check_pool(iscsi->pdu_pool, PDU_POOL_SIZE(iscsi));
+	iscsi_check_pool(iscsi->session_pool, SESSION_POOL_SIZE(iscsi));
+	iscsi_check_pool(iscsi->pdu_immediate_data_pool, IMMEDIATE_DATA_POOL_SIZE(iscsi));
+	iscsi_check_pool(iscsi->pdu_data_out_pool, DATA_OUT_POOL_SIZE(iscsi));
+	iscsi_check_pool(iscsi->task_pool, DEFAULT_TASK_POOL_SIZE);
 }
 
 static void
-spdk_iscsi_free_pools(void)
+iscsi_free_pools(void)
 {
 	struct spdk_iscsi_globals *iscsi = &g_spdk_iscsi;
 
@@ -341,7 +338,7 @@ struct spdk_iscsi_pdu *spdk_get_pdu(void)
 }
 
 static void
-spdk_iscsi_log_globals(void)
+iscsi_log_globals(void)
 {
 	SPDK_DEBUGLOG(SPDK_LOG_ISCSI, "AuthFile %s\n",
 		      g_spdk_iscsi.authfile ? g_spdk_iscsi.authfile : "(none)");
@@ -386,20 +383,17 @@ spdk_iscsi_log_globals(void)
 			      "DiscoveryAuthGroup AuthGroup%d\n",
 			      g_spdk_iscsi.chap_group);
 	}
-
-	SPDK_DEBUGLOG(SPDK_LOG_ISCSI, "MinConnectionsPerCore%d\n",
-		      spdk_iscsi_conn_get_min_per_core());
 }
 
 static void
-spdk_iscsi_opts_init(struct spdk_iscsi_opts *opts)
+iscsi_opts_init(struct spdk_iscsi_opts *opts)
 {
 	opts->MaxSessions = DEFAULT_MAX_SESSIONS;
 	opts->MaxConnectionsPerSession = DEFAULT_MAX_CONNECTIONS_PER_SESSION;
 	opts->MaxQueueDepth = DEFAULT_MAX_QUEUE_DEPTH;
 	opts->DefaultTime2Wait = DEFAULT_DEFAULTTIME2WAIT;
 	opts->DefaultTime2Retain = DEFAULT_DEFAULTTIME2RETAIN;
-	opts->FirstBurstLength = DEFAULT_FIRSTBURSTLENGTH;
+	opts->FirstBurstLength = SPDK_ISCSI_FIRST_BURST_LENGTH;
 	opts->ImmediateData = DEFAULT_IMMEDIATEDATA;
 	opts->AllowDuplicateIsid = false;
 	opts->ErrorRecoveryLevel = DEFAULT_ERRORRECOVERYLEVEL;
@@ -413,7 +407,7 @@ spdk_iscsi_opts_init(struct spdk_iscsi_opts *opts)
 
 	opts->authfile = NULL;
 	opts->nodebase = NULL;
-	opts->min_connections_per_core = DEFAULT_CONNECTIONS_PER_LCORE;
+	opts->min_connections_per_core = 0;
 }
 
 struct spdk_iscsi_opts *
@@ -427,7 +421,7 @@ spdk_iscsi_opts_alloc(void)
 		return NULL;
 	}
 
-	spdk_iscsi_opts_init(opts);
+	iscsi_opts_init(opts);
 
 	return opts;
 }
@@ -487,16 +481,15 @@ spdk_iscsi_opts_copy(struct spdk_iscsi_opts *src)
 	dst->require_chap = src->require_chap;
 	dst->mutual_chap = src->mutual_chap;
 	dst->chap_group = src->chap_group;
-
-	dst->min_connections_per_core = src->min_connections_per_core;
+	dst->min_connections_per_core = 0;
 
 	return dst;
 }
 
 // zhou: fill "struct spdk_iscsi_opts", by section [iSCSI].
 static int
-spdk_iscsi_read_config_file_params(struct spdk_conf_section *sp,
-				   struct spdk_iscsi_opts *opts)
+iscsi_read_config_file_params(struct spdk_conf_section *sp,
+			      struct spdk_iscsi_opts *opts)
 {
 	const char *val;
 	int MaxSessions;
@@ -615,6 +608,8 @@ spdk_iscsi_read_config_file_params(struct spdk_conf_section *sp,
 			}
 		}
 		if (opts->mutual_chap && !opts->require_chap) {
+			free(opts->authfile);
+			free(opts->nodebase);
 			SPDK_ERRLOG("CHAP must set to be required when using mutual CHAP.\n");
 			return -EINVAL;
 		}
@@ -638,14 +633,14 @@ spdk_iscsi_read_config_file_params(struct spdk_conf_section *sp,
 	}
 	min_conn_per_core = spdk_conf_section_get_intval(sp, "MinConnectionsPerCore");
 	if (min_conn_per_core >= 0) {
-		opts->min_connections_per_core = min_conn_per_core;
+		SPDK_WARNLOG("MinConnectionsPerCore is deprecated and will be ignored.\n");
 	}
 
 	return 0;
 }
 
 static int
-spdk_iscsi_opts_verify(struct spdk_iscsi_opts *opts)
+iscsi_opts_verify(struct spdk_iscsi_opts *opts)
 {
 	if (!opts->nodebase) {
 		opts->nodebase = strdup(SPDK_ISCSI_DEFAULT_NODEBASE);
@@ -724,7 +719,7 @@ spdk_iscsi_opts_verify(struct spdk_iscsi_opts *opts)
 
 // zhou: iSCSI configuration from config file section [iSCSI].
 static int
-spdk_iscsi_parse_options(struct spdk_iscsi_opts **popts)
+iscsi_parse_options(struct spdk_iscsi_opts **popts)
 {
 	struct spdk_iscsi_opts *opts;
 	struct spdk_conf_section *sp;
@@ -737,15 +732,13 @@ spdk_iscsi_parse_options(struct spdk_iscsi_opts **popts)
 	}
 
 	/* Process parameters */
-	SPDK_DEBUGLOG(SPDK_LOG_ISCSI, "spdk_iscsi_read_config_file_parmas\n");
-
-    // zhou: find section [iSCSI]
+	SPDK_DEBUGLOG(SPDK_LOG_ISCSI, "iscsi_read_config_file_parmas\n");
 	sp = spdk_conf_find_section(NULL, "iSCSI");
 	if (sp != NULL) {
-		rc = spdk_iscsi_read_config_file_params(sp, opts);
+		rc = iscsi_read_config_file_params(sp, opts);
 		if (rc != 0) {
 			free(opts);
-			SPDK_ERRLOG("spdk_iscsi_read_config_file_params() failed\n");
+			SPDK_ERRLOG("iscsi_read_config_file_params() failed\n");
 			return rc;
 		}
 	}
@@ -757,11 +750,11 @@ spdk_iscsi_parse_options(struct spdk_iscsi_opts **popts)
 
 // zhou: copy to "g_spdk_iscsi"
 static int
-spdk_iscsi_set_global_params(struct spdk_iscsi_opts *opts)
+iscsi_set_global_params(struct spdk_iscsi_opts *opts)
 {
 	int rc;
 
-	rc = spdk_iscsi_opts_verify(opts);
+	rc = iscsi_opts_verify(opts);
 	if (rc != 0) {
 		SPDK_ERRLOG("spdk_iscsi_opts_verify() failed\n");
 		return rc;
@@ -798,10 +791,11 @@ spdk_iscsi_set_global_params(struct spdk_iscsi_opts *opts)
 	g_spdk_iscsi.mutual_chap = opts->mutual_chap;
 	g_spdk_iscsi.chap_group = opts->chap_group;
 
-    // zhou: default 4
-	spdk_iscsi_conn_set_min_per_core(opts->min_connections_per_core);
+	if (opts->min_connections_per_core) {
+		SPDK_WARNLOG("iSCSI option 'min_connections_per_core' has been deprecated and will be ignored.\n");
+	}
 
-	spdk_iscsi_log_globals();
+	iscsi_log_globals();
 
 	return 0;
 }
@@ -985,7 +979,7 @@ spdk_iscsi_find_auth_group_by_tag(int32_t tag)
 }
 
 static void
-spdk_iscsi_auth_groups_destroy(void)
+iscsi_auth_groups_destroy(void)
 {
 	struct spdk_iscsi_auth_group *group, *tmp;
 
@@ -995,7 +989,7 @@ spdk_iscsi_auth_groups_destroy(void)
 }
 
 static int
-spdk_iscsi_parse_auth_group(struct spdk_conf_section *sp)
+iscsi_parse_auth_group(struct spdk_conf_section *sp)
 {
 	int rc;
 	int i;
@@ -1039,7 +1033,7 @@ spdk_iscsi_parse_auth_group(struct spdk_conf_section *sp)
 }
 
 static int
-spdk_iscsi_parse_auth_info(void)
+iscsi_parse_auth_info(void)
 {
 	struct spdk_conf *config;
 	struct spdk_conf_section *sp;
@@ -1063,15 +1057,15 @@ spdk_iscsi_parse_auth_info(void)
 		if (spdk_conf_section_match_prefix(sp, "AuthGroup")) {
 			if (spdk_conf_section_get_num(sp) == 0) {
 				SPDK_ERRLOG("Group 0 is invalid\n");
-				spdk_iscsi_auth_groups_destroy();
+				iscsi_auth_groups_destroy();
 				spdk_conf_free(config);
 				return -EINVAL;
 			}
 
-			rc = spdk_iscsi_parse_auth_group(sp);
+			rc = iscsi_parse_auth_group(sp);
 			if (rc != 0) {
 				SPDK_ERRLOG("parse_auth_group() failed\n");
-				spdk_iscsi_auth_groups_destroy();
+				iscsi_auth_groups_destroy();
 				spdk_conf_free(config);
 				return rc;
 			}
@@ -1084,7 +1078,7 @@ spdk_iscsi_parse_auth_info(void)
 }
 
 static struct spdk_iscsi_auth_secret *
-spdk_iscsi_find_auth_secret(const char *authuser, int ag_tag)
+iscsi_find_auth_secret(const char *authuser, int ag_tag)
 {
 	struct spdk_iscsi_auth_group *group;
 	struct spdk_iscsi_auth_secret *_secret;
@@ -1121,7 +1115,7 @@ spdk_iscsi_chap_get_authinfo(struct iscsi_chap_auth *auth, const char *authuser,
 
 	pthread_mutex_lock(&g_spdk_iscsi.mutex);
 
-	_secret = spdk_iscsi_find_auth_secret(authuser, ag_tag);
+	_secret = iscsi_find_auth_secret(authuser, ag_tag);
 	if (_secret == NULL) {
 		pthread_mutex_unlock(&g_spdk_iscsi.mutex);
 
@@ -1144,25 +1138,21 @@ spdk_iscsi_chap_get_authinfo(struct iscsi_chap_auth *auth, const char *authuser,
 
 // zhou: init "g_spdk_iscsi" by config file section [iSCSI] if have.
 static int
-spdk_iscsi_initialize_global_params(void)
+iscsi_initialize_global_params(void)
 {
 	int rc;
 
     // zhou: not set, means RPC "set_iscsi_options" not invoked. Use config file.
     //       Otherwise, means the "g_spdk_iscsi_opts" was set by RPC.
 	if (!g_spdk_iscsi_opts) {
-		rc = spdk_iscsi_parse_options(&g_spdk_iscsi_opts);
+		rc = iscsi_parse_options(&g_spdk_iscsi_opts);
 		if (rc != 0) {
 			SPDK_ERRLOG("spdk_iscsi_parse_options() failed\n");
 			return rc;
 		}
 	}
 
-    // zhou: at this time, "g_spdk_iscsi_opts" comes from RPC or config file.
-    //       RPC takes higher priority.
-
-    // zhou: copy from "g_spdk_iscsi_opts" to "g_spdk_iscsi".
-	rc = spdk_iscsi_set_global_params(g_spdk_iscsi_opts);
+	rc = iscsi_set_global_params(g_spdk_iscsi_opts);
 	if (rc != 0) {
 		SPDK_ERRLOG("spdk_iscsi_set_global_params() failed\n");
 	}
@@ -1174,7 +1164,7 @@ spdk_iscsi_initialize_global_params(void)
 }
 
 static void
-spdk_iscsi_init_complete(int rc)
+iscsi_init_complete(int rc)
 {
 	spdk_iscsi_init_cb cb_fn = g_init_cb_fn;
 	void *cb_arg = g_init_cb_arg;
@@ -1187,7 +1177,7 @@ spdk_iscsi_init_complete(int rc)
 
 // zhou:
 static int
-spdk_iscsi_poll_group_poll(void *ctx)
+iscsi_poll_group_poll(void *ctx)
 {
 	struct spdk_iscsi_poll_group *group = ctx;
 	struct spdk_iscsi_conn *conn, *tmp;
@@ -1214,7 +1204,7 @@ spdk_iscsi_poll_group_poll(void *ctx)
 }
 
 static int
-spdk_iscsi_poll_group_handle_nop(void *ctx)
+iscsi_poll_group_handle_nop(void *ctx)
 {
 	struct spdk_iscsi_poll_group *group = ctx;
 	struct spdk_iscsi_conn *conn, *tmp;
@@ -1228,7 +1218,7 @@ spdk_iscsi_poll_group_handle_nop(void *ctx)
 
 // zhou: register callback function to poll received messages.
 static void
-iscsi_create_poll_group(void *ctx)
+iscsi_poll_group_create(void *ctx)
 {
 	struct spdk_iscsi_poll_group *pg;
 
@@ -1240,13 +1230,13 @@ iscsi_create_poll_group(void *ctx)
 	pg->sock_group = spdk_sock_group_create();
 	assert(pg->sock_group != NULL);
 
-	pg->poller = spdk_poller_register(spdk_iscsi_poll_group_poll, pg, 0);
+	pg->poller = spdk_poller_register(iscsi_poll_group_poll, pg, 0);
 	/* set the period to 1 sec */
-	pg->nop_poller = spdk_poller_register(spdk_iscsi_poll_group_handle_nop, pg, 1000000);
+	pg->nop_poller = spdk_poller_register(iscsi_poll_group_handle_nop, pg, 1000000);
 }
 
 static void
-iscsi_unregister_poll_group(void *ctx)
+iscsi_poll_group_destroy(void *ctx)
 {
 	struct spdk_iscsi_poll_group *pg;
 
@@ -1262,7 +1252,7 @@ iscsi_unregister_poll_group(void *ctx)
 
 // zhou: register socket handler to event framework.
 static void
-spdk_initialize_iscsi_poll_group(spdk_thread_fn cpl)
+initialize_iscsi_poll_group(spdk_msg_fn cpl)
 {
 	size_t g_num_poll_groups = spdk_env_get_last_core() + 1;
 
@@ -1270,18 +1260,18 @@ spdk_initialize_iscsi_poll_group(spdk_thread_fn cpl)
 
 	if (!g_spdk_iscsi.poll_group) {
 		SPDK_ERRLOG("Failed to allocated iscsi poll group\n");
-		spdk_iscsi_init_complete(-1);
+		iscsi_init_complete(-1);
 		return;
 	}
 
     // zhou: send fibre to each threads. Fibre will execute "iscsi_create_poll_group()"
 	/* Send a message to each thread and create a poll group */
-	spdk_for_each_thread(iscsi_create_poll_group, NULL, cpl);
+	spdk_for_each_thread(iscsi_poll_group_create, NULL, cpl);
 }
 
 // zhou: run in each threads, to parse Portal Group, Initiator Group, Target Nodes.
 static void
-spdk_iscsi_parse_configuration(void *ctx)
+iscsi_parse_configuration(void *ctx)
 {
 	int rc;
 
@@ -1308,7 +1298,7 @@ spdk_iscsi_parse_configuration(void *ctx)
 
 	if (g_spdk_iscsi.authfile != NULL) {
 		if (access(g_spdk_iscsi.authfile, R_OK) == 0) {
-			rc = spdk_iscsi_parse_auth_info();
+			rc = iscsi_parse_auth_info();
 			if (rc < 0) {
 				SPDK_ERRLOG("spdk_iscsi_parse_auth_info() failed\n");
 			}
@@ -1319,27 +1309,24 @@ spdk_iscsi_parse_configuration(void *ctx)
 	}
 
 end:
-	spdk_iscsi_init_complete(rc);
+	iscsi_init_complete(rc);
 }
 
 // zhou: solid work of init iSCSI and start to work.
 static int
-spdk_iscsi_parse_globals(void)
+iscsi_parse_globals(void)
 {
 	int rc;
 
-    // zhou: set "g_spdk_iscsi" by RPC or config file, excluding Portal,
-    //       Portal Group, Initiator Group, Target, Auth Group.
-	rc = spdk_iscsi_initialize_global_params();
+	rc = iscsi_initialize_global_params();
 	if (rc != 0) {
 		SPDK_ERRLOG("spdk_iscsi_initialize_iscsi_global_params() failed\n");
 		return rc;
 	}
 
-    // zhou: Max iSCSI session supported.
-	g_spdk_iscsi.session = spdk_dma_zmalloc(sizeof(void *) * g_spdk_iscsi.MaxSessions, 0, NULL);
+	g_spdk_iscsi.session = calloc(1, sizeof(void *) * g_spdk_iscsi.MaxSessions);
 	if (!g_spdk_iscsi.session) {
-		SPDK_ERRLOG("spdk_dma_zmalloc() failed for session array\n");
+		SPDK_ERRLOG("calloc() failed for session array\n");
 		return -1;
 	}
 
@@ -1351,10 +1338,10 @@ spdk_iscsi_parse_globals(void)
 	 */
 	g_spdk_iscsi.MaxConnections = g_spdk_iscsi.MaxSessions;
 
-    // zhou: init "pdu", "session", "task" object pools.
-	rc = spdk_iscsi_initialize_all_pools();
+	rc = iscsi_initialize_all_pools();
 	if (rc != 0) {
 		SPDK_ERRLOG("spdk_initialize_all_pools() failed\n");
+		free(g_spdk_iscsi.session);
 		return -1;
 	}
 
@@ -1362,13 +1349,11 @@ spdk_iscsi_parse_globals(void)
 	rc = spdk_initialize_iscsi_conns();
 	if (rc < 0) {
 		SPDK_ERRLOG("spdk_initialize_iscsi_conns() failed\n");
+		free(g_spdk_iscsi.session);
 		return rc;
 	}
 
-    // zhou: ask each thread to register socket handler to event framework.
-    //       The network entity including Portal, Port Group, Initator Group,
-    //       will be parsed here and could be updated when running.
-	spdk_initialize_iscsi_poll_group(spdk_iscsi_parse_configuration);
+	initialize_iscsi_poll_group(iscsi_parse_configuration);
 	return 0;
 }
 
@@ -1385,11 +1370,10 @@ spdk_iscsi_init(spdk_iscsi_init_cb cb_fn, void *cb_arg)
 	g_init_cb_fn = cb_fn;
 	g_init_cb_arg = cb_arg;
 
-    // zhou: set "struct spdk_iscsi_globals g_spdk_iscsi" and start to work.
-	rc = spdk_iscsi_parse_globals();
+	rc = iscsi_parse_globals();
 	if (rc < 0) {
 		SPDK_ERRLOG("spdk_iscsi_parse_globals() failed\n");
-		spdk_iscsi_init_complete(-1);
+		iscsi_init_complete(-1);
 	}
 
     // zhou: pay attention to this comment.
@@ -1409,18 +1393,19 @@ spdk_iscsi_fini(spdk_iscsi_fini_cb cb_fn, void *cb_arg)
 
 	spdk_iscsi_portal_grp_close_all();
 	spdk_shutdown_iscsi_conns();
+	free(g_spdk_iscsi.session);
 }
 
 static void
-spdk_iscsi_fini_done(void *arg)
+iscsi_fini_done(void *arg)
 {
-	spdk_iscsi_check_pools();
-	spdk_iscsi_free_pools();
+	iscsi_check_pools();
+	iscsi_free_pools();
 
 	spdk_iscsi_shutdown_tgt_nodes();
 	spdk_iscsi_init_grps_destroy();
 	spdk_iscsi_portal_grps_destroy();
-	spdk_iscsi_auth_groups_destroy();
+	iscsi_auth_groups_destroy();
 	free(g_spdk_iscsi.authfile);
 	free(g_spdk_iscsi.nodebase);
 	free(g_spdk_iscsi.poll_group);
@@ -1433,9 +1418,9 @@ void
 spdk_shutdown_iscsi_conns_done(void)
 {
 	if (g_spdk_iscsi.poll_group) {
-		spdk_for_each_thread(iscsi_unregister_poll_group, NULL, spdk_iscsi_fini_done);
+		spdk_for_each_thread(iscsi_poll_group_destroy, NULL, iscsi_fini_done);
 	} else {
-		spdk_iscsi_fini_done(NULL);
+		iscsi_fini_done(NULL);
 	}
 }
 
@@ -1443,7 +1428,7 @@ spdk_shutdown_iscsi_conns_done(void)
 void
 spdk_iscsi_config_text(FILE *fp)
 {
-	spdk_iscsi_globals_config_text(fp);
+	iscsi_globals_config_text(fp);
 
 	spdk_iscsi_portal_grps_config_text(fp);
 
@@ -1487,15 +1472,12 @@ spdk_iscsi_opts_info_json(struct spdk_json_write_ctx *w)
 	spdk_json_write_named_bool(w, "mutual_chap", g_spdk_iscsi.mutual_chap);
 	spdk_json_write_named_int32(w, "chap_group", g_spdk_iscsi.chap_group);
 
-	spdk_json_write_named_uint32(w, "min_connections_per_core",
-				     spdk_iscsi_conn_get_min_per_core());
-
 	spdk_json_write_object_end(w);
 }
 
 static void
-spdk_iscsi_auth_group_info_json(struct spdk_iscsi_auth_group *group,
-				struct spdk_json_write_ctx *w)
+iscsi_auth_group_info_json(struct spdk_iscsi_auth_group *group,
+			   struct spdk_json_write_ctx *w)
 {
 	struct spdk_iscsi_auth_secret *_secret;
 
@@ -1523,15 +1505,15 @@ spdk_iscsi_auth_group_info_json(struct spdk_iscsi_auth_group *group,
 }
 
 static void
-spdk_iscsi_auth_group_config_json(struct spdk_iscsi_auth_group *group,
-				  struct spdk_json_write_ctx *w)
+iscsi_auth_group_config_json(struct spdk_iscsi_auth_group *group,
+			     struct spdk_json_write_ctx *w)
 {
 	spdk_json_write_object_begin(w);
 
 	spdk_json_write_named_string(w, "method", "add_iscsi_auth_group");
 
 	spdk_json_write_name(w, "params");
-	spdk_iscsi_auth_group_info_json(group, w);
+	iscsi_auth_group_info_json(group, w);
 
 	spdk_json_write_object_end(w);
 }
@@ -1542,22 +1524,22 @@ spdk_iscsi_auth_groups_info_json(struct spdk_json_write_ctx *w)
 	struct spdk_iscsi_auth_group *group;
 
 	TAILQ_FOREACH(group, &g_spdk_iscsi.auth_group_head, tailq) {
-		spdk_iscsi_auth_group_info_json(group, w);
+		iscsi_auth_group_info_json(group, w);
 	}
 }
 
 static void
-spdk_iscsi_auth_groups_config_json(struct spdk_json_write_ctx *w)
+iscsi_auth_groups_config_json(struct spdk_json_write_ctx *w)
 {
 	struct spdk_iscsi_auth_group *group;
 
 	TAILQ_FOREACH(group, &g_spdk_iscsi.auth_group_head, tailq) {
-		spdk_iscsi_auth_group_config_json(group, w);
+		iscsi_auth_group_config_json(group, w);
 	}
 }
 
 static void
-spdk_iscsi_opts_config_json(struct spdk_json_write_ctx *w)
+iscsi_opts_config_json(struct spdk_json_write_ctx *w)
 {
 	spdk_json_write_object_begin(w);
 
@@ -1573,11 +1555,11 @@ void
 spdk_iscsi_config_json(struct spdk_json_write_ctx *w)
 {
 	spdk_json_write_array_begin(w);
-	spdk_iscsi_opts_config_json(w);
+	iscsi_opts_config_json(w);
 	spdk_iscsi_portal_grps_config_json(w);
 	spdk_iscsi_init_grps_config_json(w);
 	spdk_iscsi_tgt_nodes_config_json(w);
-	spdk_iscsi_auth_groups_config_json(w);
+	iscsi_auth_groups_config_json(w);
 	spdk_json_write_array_end(w);
 }
 

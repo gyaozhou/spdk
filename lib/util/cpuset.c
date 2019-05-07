@@ -35,7 +35,7 @@
 #include "spdk/log.h"
 
 struct spdk_cpuset {
-	char str[SPDK_CPUSET_SIZE / 4];
+	char str[SPDK_CPUSET_SIZE / 4 + 1];
 	uint8_t cpus[SPDK_CPUSET_SIZE / 8];
 };
 
@@ -68,6 +68,16 @@ spdk_cpuset_copy(struct spdk_cpuset *set1, const struct spdk_cpuset *set2)
 }
 
 void
+spdk_cpuset_negate(struct spdk_cpuset *set)
+{
+	unsigned int i;
+	assert(set != NULL);
+	for (i = 0; i < sizeof(set->cpus); i++) {
+		set->cpus[i] = ~set->cpus[i];
+	}
+}
+
+void
 spdk_cpuset_and(struct spdk_cpuset *set1, const struct spdk_cpuset *set2)
 {
 	unsigned int i;
@@ -86,6 +96,17 @@ spdk_cpuset_or(struct spdk_cpuset *set1, const struct spdk_cpuset *set2)
 	assert(set2 != NULL);
 	for (i = 0; i < sizeof(set2->cpus); i++) {
 		set1->cpus[i] |= set2->cpus[i];
+	}
+}
+
+void
+spdk_cpuset_xor(struct spdk_cpuset *set1, const struct spdk_cpuset *set2)
+{
+	unsigned int i;
+	assert(set1 != NULL);
+	assert(set2 != NULL);
+	for (i = 0; i < sizeof(set2->cpus); i++) {
+		set1->cpus[i] ^= set2->cpus[i];
 	}
 }
 

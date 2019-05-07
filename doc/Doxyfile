@@ -808,9 +808,12 @@ INPUT                  += \
                          blob.md \
                          blobfs.md \
                          changelog.md \
+                         compression.md \
                          concurrency.md \
                          directory_structure.md \
                          event.md \
+                         ftl.md \
+                         gdb_macros.md \
                          getting_started.md \
                          ioat.md \
                          iscsi.md \
@@ -832,7 +835,8 @@ INPUT                  += \
                          vagrant.md \
                          vhost.md \
                          vhost_processing.md \
-                         virtio.md
+                         virtio.md \
+                         vpp_integration.md
 
 # This tag can be used to specify the character encoding of the source files
 # that doxygen parses. Internally doxygen uses the UTF-8 encoding. Doxygen uses

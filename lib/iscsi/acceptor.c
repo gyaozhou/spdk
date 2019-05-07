@@ -47,7 +47,7 @@
 
 // zhou:
 static int
-spdk_iscsi_portal_accept(void *arg)
+iscsi_portal_accept(void *arg)
 {
 	struct spdk_iscsi_portal	*portal = arg;
 	struct spdk_sock		*sock;
@@ -84,7 +84,7 @@ spdk_iscsi_portal_accept(void *arg)
 void
 spdk_iscsi_acceptor_start(struct spdk_iscsi_portal *p)
 {
-	p->acceptor_poller = spdk_poller_register(spdk_iscsi_portal_accept, p, ACCEPT_TIMEOUT_US);
+	p->acceptor_poller = spdk_poller_register(iscsi_portal_accept, p, ACCEPT_TIMEOUT_US);
 }
 
 void

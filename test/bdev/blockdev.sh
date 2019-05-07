@@ -41,6 +41,7 @@ function nbd_function_test() {
 		echo "Process nbd pid: $nbd_pid"
 		waitforlisten $nbd_pid $rpc_server
 
+		nbd_rpc_start_stop_verify $rpc_server "${bdev_list[*]}"
 		nbd_rpc_data_verify $rpc_server "${bdev_list[*]}" "${nbd_list[*]}"
 
 		$rpc_py -s $rpc_server delete_passthru_bdev TestPT
@@ -68,7 +69,7 @@ if [ $SPDK_TEST_RBD -eq 1 ]; then
 fi
 
 if [ $SPDK_TEST_CRYPTO -eq 1 ]; then
-	$rootdir/scripts/gen_crypto.sh Malloc6 >> $testdir/bdev.conf
+	$testdir/gen_crypto.sh Malloc6 Malloc7 >> $testdir/bdev.conf
 fi
 
 if hash pmempool; then
@@ -78,11 +79,13 @@ if hash pmempool; then
 	echo "  Blk /tmp/spdk-pmem-pool Pmem0" >> $testdir/bdev.conf
 fi
 
-timing_enter hello_bdev
-if grep -q Nvme0 $testdir/bdev.conf; then
-	$rootdir/examples/bdev/hello_world/hello_bdev -c $testdir/bdev.conf -b Nvme0n1
+if [ $RUN_NIGHTLY -eq 1 ]; then
+	timing_enter hello_bdev
+	if grep -q Nvme0 $testdir/bdev.conf; then
+		$rootdir/examples/bdev/hello_world/hello_bdev -c $testdir/bdev.conf -b Nvme0n1
+	fi
+	timing_exit hello_bdev
 fi
-timing_exit hello_bdev
 
 timing_enter bounds
 if [ $(uname -s) = Linux ]; then

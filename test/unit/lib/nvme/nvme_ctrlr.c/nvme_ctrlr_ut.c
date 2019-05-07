@@ -39,7 +39,7 @@
 
 #include "common/lib/test_env.c"
 
-struct spdk_trace_flag SPDK_LOG_NVME = {
+struct spdk_log_flag SPDK_LOG_NVME = {
 	.name = "nvme",
 	.enabled = false,
 };
@@ -66,8 +66,6 @@ int set_status_cpl = -1;
 DEFINE_STUB(nvme_ctrlr_cmd_set_host_id, int,
 	    (struct spdk_nvme_ctrlr *ctrlr, void *host_id, uint32_t host_id_size,
 	     spdk_nvme_cmd_cb cb_fn, void *cb_arg), 0);
-DEFINE_STUB(nvme_ctrlr_identify_ns, int, (struct spdk_nvme_ns *ns), 0);
-DEFINE_STUB(nvme_ctrlr_identify_id_desc, int, (struct spdk_nvme_ns *ns), 0);
 DEFINE_STUB_V(nvme_ns_set_identify_data, (struct spdk_nvme_ns *ns));
 
 struct spdk_nvme_ctrlr *nvme_transport_ctrlr_construct(const struct spdk_nvme_transport_id *trid,
@@ -295,6 +293,13 @@ spdk_nvme_wait_for_completion(struct spdk_nvme_qpair *qpair,
 	return spdk_nvme_wait_for_completion_robust_lock(qpair, status, NULL);
 }
 
+int
+spdk_nvme_wait_for_completion_timeout(struct spdk_nvme_qpair *qpair,
+				      struct nvme_completion_poll_status *status,
+				      uint64_t timeout_in_secs)
+{
+	return spdk_nvme_wait_for_completion_robust_lock(qpair, status, NULL);
+}
 
 int
 nvme_ctrlr_cmd_set_async_event_config(struct spdk_nvme_ctrlr *ctrlr,
@@ -408,6 +413,23 @@ nvme_ctrlr_cmd_fw_image_download(struct spdk_nvme_ctrlr *ctrlr,
 	CU_ASSERT(offset == 0);
 	return 0;
 }
+
+int
+nvme_ctrlr_cmd_security_receive(struct spdk_nvme_ctrlr *ctrlr, uint8_t secp, uint16_t spsp,
+				uint8_t nssf, void *payload, uint32_t payload_size,
+				spdk_nvme_cmd_cb cb_fn, void *cb_arg)
+{
+	return 0;
+}
+
+int
+nvme_ctrlr_cmd_security_send(struct spdk_nvme_ctrlr *ctrlr, uint8_t secp,
+			     uint16_t spsp, uint8_t nssf, void *payload,
+			     uint32_t payload_size, spdk_nvme_cmd_cb cb_fn, void *cb_arg)
+{
+	return 0;
+}
+
 
 void
 nvme_ns_destruct(struct spdk_nvme_ns *ns)
@@ -1525,7 +1547,7 @@ test_ctrlr_get_default_ctrlr_opts(void)
 			 sizeof(opts.extended_host_id)) == 0);
 	CU_ASSERT(strlen(opts.src_addr) == 0);
 	CU_ASSERT(strlen(opts.src_svcid) == 0);
-	CU_ASSERT_EQUAL(opts.admin_timeout_ms, NVME_MAX_TIMEOUT_PERIOD * 1000);
+	CU_ASSERT_EQUAL(opts.admin_timeout_ms, NVME_MAX_ADMIN_TIMEOUT_IN_SECS * 1000);
 }
 
 static void
@@ -1669,10 +1691,10 @@ test_spdk_nvme_ctrlr_doorbell_buffer_config(void)
 	ctrlr.cdata.oacs.doorbell_buffer_config = 1;
 	ctrlr.trid.trtype = SPDK_NVME_TRANSPORT_PCIE;
 	ctrlr.page_size = 0x1000;
-	MOCK_CLEAR(spdk_malloc)
-	MOCK_CLEAR(spdk_zmalloc)
-	MOCK_CLEAR(spdk_dma_malloc)
-	MOCK_CLEAR(spdk_dma_zmalloc)
+	MOCK_CLEAR(spdk_malloc);
+	MOCK_CLEAR(spdk_zmalloc);
+	MOCK_CLEAR(spdk_dma_malloc);
+	MOCK_CLEAR(spdk_dma_zmalloc);
 	ret = nvme_ctrlr_set_doorbell_buffer_config(&ctrlr);
 	CU_ASSERT(ret == 0);
 	nvme_ctrlr_free_doorbell_buffer(&ctrlr);

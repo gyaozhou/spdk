@@ -9,10 +9,12 @@ from . import log
 from . import lvol
 from . import nbd
 from . import net
+from . import notify
 from . import nvme
 from . import nvmf
 from . import pmem
 from . import subsystem
+from . import trace
 from . import vhost
 from . import client as rpc_client
 
@@ -38,6 +40,11 @@ def get_rpc_methods(client, current=None):
         params['current'] = current
 
     return client.call('get_rpc_methods', params)
+
+
+def get_spdk_version(client):
+    """Get SPDK version"""
+    return client.call('get_spdk_version')
 
 
 def _json_dump(config, fd, indent):
@@ -85,6 +92,10 @@ def load_config(client, fd):
 
     # check if methods in the config file are known
     allowed_methods = client.call('get_rpc_methods')
+    if not subsystems and 'start_subsystem_init' in allowed_methods:
+        start_subsystem_init(client)
+        return
+
     for subsystem in list(subsystems):
         config = subsystem['config']
         for elem in list(config):
@@ -109,7 +120,7 @@ def load_config(client, fd):
                 subsystems.remove(subsystem)
 
         if 'start_subsystem_init' in allowed_methods:
-            client.call('start_subsystem_init')
+            start_subsystem_init(client)
             allowed_found = True
 
         if not allowed_found:
