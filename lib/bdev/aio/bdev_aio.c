@@ -52,6 +52,7 @@ static void aio_free_disk(struct file_disk *fdisk);
 static void bdev_aio_get_spdk_running_config(FILE *fp);
 static TAILQ_HEAD(, file_disk) g_aio_disk_head;
 
+// zhou: where 128 comes from?
 #define SPDK_AIO_QUEUE_DEPTH 128
 #define MAX_EVENTS_PER_POLL 32
 
@@ -213,6 +214,7 @@ bdev_aio_initialize_io_channel(struct bdev_aio_io_channel *ch)
 		return -1;
 	}
 
+    // zhou: queue depth 128
 	if (io_setup(SPDK_AIO_QUEUE_DEPTH, &ch->io_ctx) < 0) {
 		close(ch->efd);
 		SPDK_ERRLOG("async I/O context setup failure\n");
@@ -397,6 +399,8 @@ bdev_aio_io_type_supported(void *ctx, enum spdk_bdev_io_type io_type)
 	}
 }
 
+// zhou: when IO channel be find/create by spdk_get_io_channel() at first time,
+//       the "struct bdev_aio_io_channel" will be allocated by invoker.
 static int
 bdev_aio_create_cb(void *io_device, void *ctx_buf)
 {
@@ -408,11 +412,14 @@ bdev_aio_create_cb(void *io_device, void *ctx_buf)
 		return -1;
 	}
 
+    // zhou: get module level IO channel firstly to get epoll fd.
 	ch->group_ch = spdk_get_io_channel(&aio_if);
 	group_ch_ctx = spdk_io_channel_get_ctx(ch->group_ch);
 
 	epevent.events = EPOLLIN | EPOLLET;
 	epevent.data.ptr = ch;
+
+    // zhou: add disk IO event fd into epoll fd.
 	if (epoll_ctl(group_ch_ctx->epfd, EPOLL_CTL_ADD, ch->efd, &epevent)) {
 		close(ch->efd);
 		io_destroy(ch->io_ctx);
@@ -483,6 +490,7 @@ bdev_aio_write_json_config(struct spdk_bdev *bdev, struct spdk_json_write_ctx *w
 	spdk_json_write_object_end(w);
 }
 
+// zhou: each kind backend storage should provide these operations.
 static const struct spdk_bdev_fn_table aio_fn_table = {
 	.destruct		= bdev_aio_destruct,
 	.submit_request		= bdev_aio_submit_request,
@@ -512,7 +520,7 @@ bdev_aio_group_create_cb(void *io_device, void *ctx_buf)
 		SPDK_ERRLOG("cannot create epoll fd\n");
 		return -1;
 	}
-
+    // zhou: epoll fd polling will run repeatly.
 	ch->poller = spdk_poller_register(bdev_aio_group_poll, ch, 0);
 	return 0;
 }
@@ -526,6 +534,9 @@ bdev_aio_group_destroy_cb(void *io_device, void *ctx_buf)
 	spdk_poller_unregister(&ch->poller);
 }
 
+// zhou: AIO is special, which will invoke spdk_io_device_register() two times.
+//       AIO module level will create a epoll fd for each spdk_get_io_channel() thread.
+//       AIO disk level will create a disk/file fd for each spdk_get_io_channel() thread.
 struct spdk_bdev *
 create_aio_disk(const char *name, const char *filename, uint32_t block_size)
 {
@@ -545,6 +556,7 @@ create_aio_disk(const char *name, const char *filename, uint32_t block_size)
 		goto error_return;
 	}
 
+    // zhou: open file, the file should be create already with correct size.
 	if (bdev_aio_open(fdisk)) {
 		SPDK_ERRLOG("Unable to open file %s. fd: %d errno: %d\n", filename, fdisk->fd, errno);
 		goto error_return;
@@ -577,6 +589,8 @@ create_aio_disk(const char *name, const char *filename, uint32_t block_size)
 				    block_size, detected_block_size);
 			goto error_return;
 		} else if (detected_block_size != 0 && block_size != detected_block_size) {
+            // zhou: no need the user specified block size be mulitply of
+            //       detected block size.
 			SPDK_WARNLOG("Specified block size %" PRIu32 " does not match "
 				     "auto-detected block size %" PRIu32 "\n",
 				     block_size, detected_block_size);
@@ -603,6 +617,7 @@ create_aio_disk(const char *name, const char *filename, uint32_t block_size)
 		goto error_return;
 	}
 
+    // zhou:
 	fdisk->disk.blockcnt = disk_size / fdisk->disk.blocklen;
 	fdisk->disk.ctxt = fdisk;
 
@@ -611,6 +626,7 @@ create_aio_disk(const char *name, const char *filename, uint32_t block_size)
 	spdk_io_device_register(fdisk, bdev_aio_create_cb, bdev_aio_destroy_cb,
 				sizeof(struct bdev_aio_io_channel),
 				fdisk->disk.name);
+
 	rc = spdk_bdev_register(&fdisk->disk);
 	if (rc) {
 		spdk_io_device_unregister(fdisk, NULL);
@@ -666,6 +682,9 @@ delete_aio_disk(struct spdk_bdev *bdev, spdk_delete_aio_complete cb_fn, void *cb
 	spdk_bdev_unregister(bdev, aio_bdev_unregister_cb, fdisk);
 }
 
+// zhou: AIO is special, which will invoke spdk_io_device_register() two times.
+//       AIO module level will create a epoll fd for each spdk_get_io_channel() thread.
+//       AIO disk level will create a disk/file fd for each spdk_get_io_channel() thread.
 static int
 bdev_aio_initialize(void)
 {
@@ -678,6 +697,8 @@ bdev_aio_initialize(void)
 				sizeof(struct bdev_aio_group_channel),
 				"aio_module");
 
+
+    // zhou: all of below, handle configuration file,
 	sp = spdk_conf_find_section(NULL, "AIO");
 	if (!sp) {
 		return 0;

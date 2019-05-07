@@ -466,6 +466,7 @@ __wake_caller(void *arg, int fserrno)
 	sem_post(args->sem);
 }
 
+// zhou:
 void
 spdk_fs_init(struct spdk_bs_dev *dev, struct spdk_blobfs_opts *opt,
 	     fs_send_request_fn send_request_fn,
@@ -506,6 +507,7 @@ spdk_fs_init(struct spdk_bs_dev *dev, struct spdk_blobfs_opts *opt,
 	if (opt) {
 		opts.cluster_sz = opt->cluster_sz;
 	}
+
 	spdk_bs_init(dev, &opts, init_cb, req);
 }
 
@@ -2327,6 +2329,7 @@ __file_read(struct spdk_file *file, void *payload, uint64_t offset, uint64_t len
 	return 0;
 }
 
+// zhou:
 int64_t
 spdk_file_read(struct spdk_file *file, struct spdk_io_channel *_channel,
 	       void *payload, uint64_t offset, uint64_t length)

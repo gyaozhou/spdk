@@ -63,8 +63,10 @@ typedef struct spdk_bs_request_set spdk_bs_user_op_t;
 
 typedef void (*spdk_bs_nested_seq_complete)(void *cb_arg, spdk_bs_sequence_t *parent, int bserrno);
 
+// zhou: completion.
 struct spdk_bs_cpl {
 	enum spdk_bs_cpl_type type;
+
 	union {
 		struct {
 			spdk_bs_op_complete     cb_fn;
@@ -105,15 +107,16 @@ struct spdk_bs_cpl {
 typedef void (*spdk_bs_sequence_cpl)(spdk_bs_sequence_t *sequence,
 				     void *cb_arg, int bserrno);
 
+// zhou: request
 /* A generic request set. Can be a sequence, batch or a user_op. */
 struct spdk_bs_request_set {
+    // zhou: completion
 	struct spdk_bs_cpl      cpl;
-
 	int                     bserrno;
-
 	struct spdk_bs_channel		*channel;
-
+    // zhou:
 	struct spdk_bs_dev_cb_args	cb_args;
+
 
 	union {
 		struct {

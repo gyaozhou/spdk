@@ -147,6 +147,7 @@ typedef void (*spdk_channel_for_each_cpl)(struct spdk_io_channel_iter *i, int st
  * This structure is not part of the API - all accesses should be done through
  *  spdk_io_channel function calls.
  */
+// zhou:
 struct spdk_io_channel {
 	struct spdk_thread		*thread;
 	struct io_device		*dev;

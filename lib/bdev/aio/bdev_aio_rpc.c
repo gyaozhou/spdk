@@ -97,6 +97,8 @@ invalid:
 }
 SPDK_RPC_REGISTER("construct_aio_bdev", spdk_rpc_construct_aio_bdev, SPDK_RPC_RUNTIME)
 
+////////////////////////////////////////////////////////////////////////////////
+
 struct rpc_delete_aio {
 	char *name;
 };
@@ -158,3 +160,5 @@ invalid:
 	spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS, spdk_strerror(-rc));
 }
 SPDK_RPC_REGISTER("delete_aio_bdev", spdk_rpc_delete_aio_bdev, SPDK_RPC_RUNTIME)
+
+////////////////////////////////////////////////////////////////////////////////

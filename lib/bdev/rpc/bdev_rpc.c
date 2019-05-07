@@ -214,6 +214,8 @@ invalid:
 }
 SPDK_RPC_REGISTER("get_bdevs_iostat", spdk_rpc_get_bdevs_iostat, SPDK_RPC_RUNTIME)
 
+////////////////////////////////////////////////////////////////////////////////
+
 static void
 spdk_rpc_dump_bdev_info(struct spdk_json_write_ctx *w,
 			struct spdk_bdev *bdev)
@@ -358,6 +360,8 @@ invalid:
 }
 SPDK_RPC_REGISTER("get_bdevs", spdk_rpc_get_bdevs, SPDK_RPC_RUNTIME)
 
+////////////////////////////////////////////////////////////////////////////////
+
 struct rpc_delete_bdev {
 	char *name;
 };
@@ -424,6 +428,8 @@ invalid:
 }
 SPDK_RPC_REGISTER("delete_bdev", spdk_rpc_delete_bdev, SPDK_RPC_RUNTIME)
 
+////////////////////////////////////////////////////////////////////////////////
+
 struct rpc_set_bdev_qd_sampling_period {
 	char *name;
 	uint64_t period;
@@ -489,6 +495,8 @@ invalid:
 SPDK_RPC_REGISTER("set_bdev_qd_sampling_period",
 		  spdk_rpc_set_bdev_qd_sampling_period,
 		  SPDK_RPC_RUNTIME)
+
+////////////////////////////////////////////////////////////////////////////////
 
 struct rpc_set_bdev_qos_limit {
 	char		*name;
@@ -585,3 +593,5 @@ exit:
 }
 
 SPDK_RPC_REGISTER("set_bdev_qos_limit", spdk_rpc_set_bdev_qos_limit, SPDK_RPC_RUNTIME)
+
+////////////////////////////////////////////////////////////////////////////////

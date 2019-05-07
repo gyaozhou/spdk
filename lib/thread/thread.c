@@ -55,7 +55,10 @@ static pthread_mutex_t g_devlist_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // zhou:
 struct io_device {
+    // zhou: the address was used to identify type of backend storage.
+    //       e.g. "struct spdk_bdev_module aio_if",
 	void				*io_device;
+
 	char				*name;
 	spdk_io_channel_create_cb	create_cb;
 	spdk_io_channel_destroy_cb	destroy_cb;
@@ -110,6 +113,9 @@ struct spdk_thread {
 	pthread_t			thread_id;
     // zhou: callback function to handle received messages.
 	spdk_thread_pass_msg		msg_fn;
+
+    // zhou: client will has them callback function to handle poller registration.
+    //       Reactor will set them as NULL.
 	spdk_start_poller		start_poller_fn;
 	spdk_stop_poller		stop_poller_fn;
 
@@ -244,8 +250,10 @@ spdk_allocate_thread(spdk_thread_pass_msg msg_fn,
 
 	thread->thread_id = pthread_self();
 	thread->msg_fn = msg_fn;
+
 	thread->start_poller_fn = start_poller_fn;
 	thread->stop_poller_fn = stop_poller_fn;
+
 	thread->thread_ctx = thread_ctx;
 
 	TAILQ_INIT(&thread->io_channels);
@@ -551,6 +559,7 @@ spdk_poller_register(spdk_poller_fn fn,
 		return NULL;
 	}
 
+    // zhou: client's callback function to handle poller registration.
 	if (thread->start_poller_fn) {
 		return thread->start_poller_fn(thread->thread_ctx, fn, arg, period_microseconds);
 	}
@@ -695,7 +704,7 @@ spdk_for_each_thread(spdk_thread_fn fn, void *ctx, spdk_thread_fn cpl)
 	spdk_thread_send_msg(ct->cur_thread, spdk_on_thread, ct);
 }
 
-// zhou: IO device and IO channel are abstraction, you can think of EthDev, which
+// zhou: IO device and IO channel are abstraction, you can compare with EthDev, which
 //       owns several queues, and each queue could be assgined to a dedicated thread.
 //       Then, these threads could submit IO without lock.
 //       The Ethdev is a instance of IO device, and the queue is a instance of IO channel.
@@ -838,6 +847,7 @@ spdk_io_device_unregister(void *io_device, spdk_io_device_unregister_cb unregist
 }
 
 // zhou: README, different channel multiplex over this thread to avoid locking.
+//       Find or Create IO Channel.
 struct spdk_io_channel *
 spdk_get_io_channel(void *io_device)
 {
@@ -865,6 +875,7 @@ spdk_get_io_channel(void *io_device)
 		return NULL;
 	}
 
+    // zhou: once created already, could be found in this thread's IO channel list.
 	TAILQ_FOREACH(ch, &thread->io_channels, tailq) {
 		if (ch->dev == dev) {
 			ch->ref++;
@@ -881,6 +892,10 @@ spdk_get_io_channel(void *io_device)
 		}
 	}
 
+    // zhou: otherwise, create right now.
+
+    // zhou: struct spdk_io_channel + backend storage private data struct
+    //       (e.g. struct bdev_aio_group_channel, struct bdev_aio_io_channel).
 	ch = calloc(1, sizeof(*ch) + dev->ctx_size);
 	if (ch == NULL) {
 		SPDK_ERRLOG("could not calloc spdk_io_channel\n");
@@ -893,6 +908,7 @@ spdk_get_io_channel(void *io_device)
 	ch->thread = thread;
 	ch->ref = 1;
 	ch->destroy_ref = 0;
+    // zhou: insert inot this thread IO channel list.
 	TAILQ_INSERT_TAIL(&thread->io_channels, ch, tailq);
 
 	SPDK_DEBUGLOG(SPDK_LOG_THREAD, "Get io_channel %p for io_device %s (%p) on thread %s refcnt %u\n",
@@ -902,7 +918,9 @@ spdk_get_io_channel(void *io_device)
 
 	pthread_mutex_unlock(&g_devlist_mutex);
 
+    // zhou: create IO channel for this IO device in this thread.
 	rc = dev->create_cb(io_device, (uint8_t *)ch + sizeof(*ch));
+
 	if (rc != 0) {
 		pthread_mutex_lock(&g_devlist_mutex);
 		TAILQ_REMOVE(&ch->thread->io_channels, ch, tailq);

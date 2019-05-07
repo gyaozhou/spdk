@@ -40,10 +40,18 @@
 #include "spdk/endian.h"
 #include "spdk/bdev_module.h"
 
+// zhou: glue layer between BlockStore and bdev.
 struct blob_bdev {
+    // zhou: operations callback functions used by BlobStore.
 	struct spdk_bs_dev	bs_dev;
+
+    // zhou: refer to backend storage disk, "desc->bdev" refer to it also.
 	struct spdk_bdev	*bdev;
+    // zhou: bdev descriptor, represents a handler to a given block device.
+    //       Just like file descriptor(fd), one file could be opened more than
+    //       once, and each one represent using a fd.
 	struct spdk_bdev_desc	*desc;
+    // zhou: exclusive access this device.
 	bool			claimed;
 };
 
@@ -72,6 +80,7 @@ __get_bdev(struct spdk_bs_dev *dev)
 	return ((struct blob_bdev *)dev)->bdev;
 }
 
+// zhou:
 static void
 bdev_blob_io_complete(struct spdk_bdev_io *bdev_io, bool success, void *arg)
 {
@@ -134,10 +143,13 @@ bdev_blob_read(struct spdk_bs_dev *dev, struct spdk_io_channel *channel, void *p
 
 	rc = spdk_bdev_read_blocks(__get_desc(dev), channel, payload, lba,
 				   lba_count, bdev_blob_io_complete, cb_args);
+
 	if (rc == -ENOMEM) {
+        // zhou: could be queued and wait for a memont.
 		bdev_blob_queue_io(dev, channel, payload, 0, lba,
 				   lba_count, SPDK_BDEV_IO_TYPE_READ, cb_args);
 	} else if (rc != 0) {
+        // zhou: other error happened, give up right now.
 		cb_args->cb_fn(cb_args->channel, cb_args->cb_arg, rc);
 	}
 }
@@ -192,6 +204,7 @@ bdev_blob_writev(struct spdk_bs_dev *dev, struct spdk_io_channel *channel,
 	}
 }
 
+// zhou:
 static void
 bdev_blob_write_zeroes(struct spdk_bs_dev *dev, struct spdk_io_channel *channel, uint64_t lba,
 		       uint32_t lba_count, struct spdk_bs_dev_cb_args *cb_args)
@@ -200,6 +213,7 @@ bdev_blob_write_zeroes(struct spdk_bs_dev *dev, struct spdk_io_channel *channel,
 
 	rc = spdk_bdev_write_zeroes_blocks(__get_desc(dev), channel, lba,
 					   lba_count, bdev_blob_io_complete, cb_args);
+
 	if (rc == -ENOMEM) {
 		bdev_blob_queue_io(dev, channel, NULL, 0, lba,
 				   lba_count, SPDK_BDEV_IO_TYPE_WRITE_ZEROES, cb_args);
@@ -216,6 +230,7 @@ bdev_blob_unmap(struct spdk_bs_dev *dev, struct spdk_io_channel *channel, uint64
 	int rc;
 
 	if (spdk_bdev_io_type_supported(blob_bdev->bdev, SPDK_BDEV_IO_TYPE_UNMAP)) {
+
 		rc = spdk_bdev_unmap_blocks(__get_desc(dev), channel, lba, lba_count,
 					    bdev_blob_io_complete, cb_args);
 		if (rc == -ENOMEM) {
@@ -319,6 +334,8 @@ bdev_blob_destroy(struct spdk_bs_dev *bs_dev)
 	free(bs_dev);
 }
 
+// zhou: set blobstore backend block device, "struct spdk_bs_dev" represent a
+//       BlobStore backend storage
 struct spdk_bs_dev *
 spdk_bdev_create_bs_dev(struct spdk_bdev *bdev, spdk_bdev_remove_cb_t remove_cb, void *remove_ctx)
 {
@@ -333,6 +350,9 @@ spdk_bdev_create_bs_dev(struct spdk_bdev *bdev, spdk_bdev_remove_cb_t remove_cb,
 		return NULL;
 	}
 
+    // zhou: get the bdev handler by open it. Just like file, could be opened
+    //       more than one time. And there is a reference count to prevent shut
+    //       down device until all users close it.
 	rc = spdk_bdev_open(bdev, true, remove_cb, remove_ctx, &desc);
 	if (rc != 0) {
 		free(b);
@@ -341,11 +361,21 @@ spdk_bdev_create_bs_dev(struct spdk_bdev *bdev, spdk_bdev_remove_cb_t remove_cb,
 
 	b->bdev = bdev;
 	b->desc = desc;
+
+    // zhou: "struct spdk_bs_dev"
+
 	b->bs_dev.blockcnt = spdk_bdev_get_num_blocks(bdev);
 	b->bs_dev.blocklen = spdk_bdev_get_block_size(bdev);
+
+    // zhou: callback functions used by Blob/BlobStore.
+
+    // zhou: create/destroy IO channel.
 	b->bs_dev.create_channel = bdev_blob_create_channel;
 	b->bs_dev.destroy_channel = bdev_blob_destroy_channel;
+
+    // zhou:
 	b->bs_dev.destroy = bdev_blob_destroy;
+
 	b->bs_dev.read = bdev_blob_read;
 	b->bs_dev.write = bdev_blob_write;
 	b->bs_dev.readv = bdev_blob_readv;

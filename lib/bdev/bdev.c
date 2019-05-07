@@ -253,15 +253,19 @@ struct spdk_bdev_channel {
 
 };
 
-// zhou: represents a handle to a given block device.
+// zhou: represents a handler to a given block device. Not too much information.
 //       "Descriptors are used to establish and track permissions to use the underlying
 //       block device, much like a file descriptor on UNIX systems."
 struct spdk_bdev_desc {
+    // zhou: refer to backend storage disk.
 	struct spdk_bdev		*bdev;
 
 	struct spdk_thread		*thread;
+
+    // zhou: passed by client
 	spdk_bdev_remove_cb_t		remove_cb;
 	void				*remove_ctx;
+
 	bool				remove_scheduled;
 	bool				closed;
 	bool				write;
@@ -379,6 +383,7 @@ spdk_bdev_next_leaf(struct spdk_bdev *prev)
 	return bdev;
 }
 
+// zhou: search already created bdev by name.
 struct spdk_bdev *
 spdk_bdev_get_by_name(const char *bdev_name)
 {
@@ -1555,6 +1560,7 @@ _spdk_bdev_io_submit(void *ctx)
 	bdev_io->internal.in_submit_request = true;
 	if (spdk_likely(bdev_ch->flags == 0)) {
 		if (spdk_likely(TAILQ_EMPTY(&shared_resource->nomem_io))) {
+            // zhou:
 			bdev->fn_table->submit_request(ch, bdev_io);
 		} else {
 			bdev_ch->io_outstanding--;
@@ -1622,6 +1628,7 @@ spdk_bdev_io_submit_reset(struct spdk_bdev_io *bdev_io)
 	bdev_io->internal.in_submit_request = false;
 }
 
+// zhou:
 static void
 spdk_bdev_io_init(struct spdk_bdev_io *bdev_io,
 		  struct spdk_bdev *bdev, void *cb_arg,
@@ -2383,7 +2390,10 @@ spdk_bdev_read(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
 	return spdk_bdev_read_blocks(desc, ch, buf, offset_blocks, num_blocks, cb, cb_arg);
 }
 
-// zhou:
+// zhou: spdk_bdev_io_submit() -> _spdk_bdev_io_submit() -> fn_table->submit_request()
+//       -> invoke each kind of backend storage registered callback function.
+//       AIO: bdev_aio_submit_request()
+//       NVMe: bdev_nvme_submit_request()
 int
 spdk_bdev_read_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
 		      void *buf, uint64_t offset_blocks, uint64_t num_blocks,
@@ -2414,6 +2424,7 @@ spdk_bdev_read_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
 	spdk_bdev_io_init(bdev_io, bdev, cb_arg, cb);
 
 	spdk_bdev_io_submit(bdev_io);
+
 	return 0;
 }
 
@@ -3149,6 +3160,7 @@ _spdk_bdev_io_complete(void *ctx)
 	assert(bdev_io->internal.cb != NULL);
 	assert(spdk_get_thread() == spdk_io_channel_get_thread(bdev_io->internal.ch->channel));
 
+    // zhou:
 	bdev_io->internal.cb(bdev_io, bdev_io->internal.status == SPDK_BDEV_IO_STATUS_SUCCESS,
 			     bdev_io->internal.caller_ctx);
 }
@@ -3180,6 +3192,7 @@ _spdk_bdev_unfreeze_channel(struct spdk_io_channel_iter *i)
 	spdk_for_each_channel_continue(i, 0);
 }
 
+// zhou: when bdev IO completed
 void
 spdk_bdev_io_complete(struct spdk_bdev_io *bdev_io, enum spdk_bdev_io_status status)
 {
@@ -3214,6 +3227,7 @@ spdk_bdev_io_complete(struct spdk_bdev_io *bdev_io, enum spdk_bdev_io_status sta
 
 		assert(bdev_ch->io_outstanding > 0);
 		assert(shared_resource->io_outstanding > 0);
+
 		bdev_ch->io_outstanding--;
 		shared_resource->io_outstanding--;
 
@@ -3526,6 +3540,7 @@ spdk_bdev_fini(struct spdk_bdev *bdev)
 	spdk_io_device_unregister(__bdev_to_io_dev(bdev), spdk_bdev_destroy_cb);
 }
 
+// zhou: README,
 static void
 spdk_bdev_start(struct spdk_bdev *bdev)
 {
@@ -3560,6 +3575,7 @@ spdk_bdev_start(struct spdk_bdev *bdev)
 	}
 }
 
+// zhou:
 int
 spdk_bdev_register(struct spdk_bdev *bdev)
 {
@@ -3660,7 +3676,7 @@ spdk_bdev_unregister(struct spdk_bdev *bdev, spdk_bdev_unregister_cb cb_fn, void
 	spdk_bdev_fini(bdev);
 }
 
-// zhou: open block device.
+// zhou: open block device, just like open a file.
 //       "Multiple users may have a bdev open at the same time, and coordination
 //       of reads and writes between users must be handled by some higher level
 //       mechanism outside of the bdev layer. Opening a bdev with write permission
@@ -3681,6 +3697,7 @@ spdk_bdev_open(struct spdk_bdev *bdev, bool write, spdk_bdev_remove_cb_t remove_
 		return -ENOTSUP;
 	}
 
+    // zhou: each open operation will creater a new descriptor.
 	desc = calloc(1, sizeof(*desc));
 	if (desc == NULL) {
 		SPDK_ERRLOG("Failed to allocate memory for bdev descriptor\n");

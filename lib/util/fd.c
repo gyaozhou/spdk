@@ -59,6 +59,7 @@ dev_get_size(int fd)
 	return 0;
 }
 
+// zhou: get sector size of disk.
 uint32_t
 spdk_fd_get_blocklen(int fd)
 {

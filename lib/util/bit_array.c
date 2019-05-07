@@ -48,6 +48,7 @@ typedef uint64_t spdk_bit_array_word;
 #define SPDK_BIT_ARRAY_WORD_INDEX_SHIFT	spdk_u32log2(SPDK_BIT_ARRAY_WORD_BITS)
 #define SPDK_BIT_ARRAY_WORD_INDEX_MASK	((1u << SPDK_BIT_ARRAY_WORD_INDEX_SHIFT) - 1)
 
+// zhou: bitmap
 struct spdk_bit_array {
 	uint32_t bit_count;
 	spdk_bit_array_word words[];
@@ -90,6 +91,7 @@ spdk_bit_array_word_mask(uint32_t num_bits)
 	return (SPDK_BIT_ARRAY_WORD_C(1) << num_bits) - 1;
 }
 
+// zhou: allocate bitmap for to be managed "num_bits"
 int
 spdk_bit_array_resize(struct spdk_bit_array **bap, uint32_t num_bits)
 {

@@ -74,6 +74,7 @@ divide_round_up(size_t num, size_t divisor)
 	return (num + divisor - 1) / divisor;
 }
 
+// zhou: mark as used.
 static void
 _spdk_bs_claim_cluster(struct spdk_blob_store *bs, uint32_t cluster_num)
 {
@@ -1814,6 +1815,7 @@ _spdk_blob_request_submit_op_split(struct spdk_io_channel *ch, struct spdk_blob 
 	_spdk_blob_request_submit_op_split_next(ctx, 0);
 }
 
+// zhou: README,
 static void
 _spdk_blob_request_submit_op_single(struct spdk_io_channel *_ch, struct spdk_blob *blob,
 				    void *payload, uint64_t offset, uint64_t length,
@@ -1946,6 +1948,7 @@ _spdk_blob_request_submit_op(struct spdk_blob *blob, struct spdk_io_channel *_ch
 		cb_fn(cb_arg, -EINVAL);
 		return;
 	}
+
 	if (length <= _spdk_bs_num_io_units_to_cluster_boundary(blob, offset)) {
 		_spdk_blob_request_submit_op_single(_channel, blob, payload, offset, length,
 						    cb_fn, cb_arg, op_type);
@@ -2211,6 +2214,8 @@ _spdk_bs_channel_create(void *io_device, void *ctx_buf)
 
 	channel->bs = bs;
 	channel->dev = dev;
+
+    // zhou: bdev_blob_create_channel()
 	channel->dev_channel = dev->create_channel(dev);
 
 	if (!channel->dev_channel) {
@@ -2406,7 +2411,9 @@ spdk_bs_opts_init(struct spdk_bs_opts *opts)
 	opts->num_md_pages = SPDK_BLOB_OPTS_NUM_MD_PAGES;
 	opts->max_md_ops = SPDK_BLOB_OPTS_MAX_MD_OPS;
 	opts->max_channel_ops = SPDK_BLOB_OPTS_DEFAULT_CHANNEL_OPS;
+
 	memset(&opts->bstype, 0, sizeof(opts->bstype));
+
 	opts->iter_cb_fn = NULL;
 	opts->iter_cb_arg = NULL;
 }
@@ -2479,8 +2486,11 @@ _spdk_bs_alloc(struct spdk_bs_dev *dev, struct spdk_bs_opts *opts, struct spdk_b
 
 	pthread_mutex_init(&bs->used_clusters_mutex, NULL);
 
+    // zhou: "bs" is context.
 	spdk_io_device_register(bs, _spdk_bs_channel_create, _spdk_bs_channel_destroy,
 				sizeof(struct spdk_bs_channel), "blobstore");
+
+    // zhou: get metadata IO channel
 	rc = spdk_bs_register_md_thread(bs);
 	if (rc == -1) {
 		spdk_io_device_unregister(bs, NULL);
@@ -2567,6 +2577,7 @@ _spdk_bs_load_mask(struct spdk_bit_array **array_ptr, struct spdk_bs_md_mask *ma
 	return 0;
 }
 
+// zhou: write Super Block into Page 0 of disk.
 static void
 _spdk_bs_write_super(spdk_bs_sequence_t *seq, struct spdk_blob_store *bs,
 		     struct spdk_bs_super_block *super, spdk_bs_sequence_cpl cb_fn, void *cb_arg)
@@ -2580,6 +2591,7 @@ _spdk_bs_write_super(spdk_bs_sequence_t *seq, struct spdk_blob_store *bs,
 				   cb_fn, cb_arg);
 }
 
+// zhou: write Cluster Allocation Bitmap into disk.
 static void
 _spdk_bs_write_used_clusters(spdk_bs_sequence_t *seq, void *arg, spdk_bs_sequence_cpl cb_fn)
 {
@@ -2604,6 +2616,7 @@ _spdk_bs_write_used_clusters(spdk_bs_sequence_t *seq, void *arg, spdk_bs_sequenc
 	spdk_bs_sequence_write_dev(seq, ctx->mask, lba, lba_count, cb_fn, arg);
 }
 
+// zhou: write Metadata Page Allocation Bitmap into disk.
 static void
 _spdk_bs_write_used_md(spdk_bs_sequence_t *seq, void *arg, spdk_bs_sequence_cpl cb_fn)
 {
@@ -2627,6 +2640,7 @@ _spdk_bs_write_used_md(spdk_bs_sequence_t *seq, void *arg, spdk_bs_sequence_cpl 
 	spdk_bs_sequence_write_dev(seq, ctx->mask, lba, lba_count, cb_fn, arg);
 }
 
+// zhou: write Blob ID Allocation Bitmap into disk.
 static void
 _spdk_bs_write_used_blobids(spdk_bs_sequence_t *seq, void *arg, spdk_bs_sequence_cpl cb_fn)
 {
@@ -3109,6 +3123,8 @@ _spdk_bs_load_super_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
 	ctx->bs->total_clusters = ctx->super->size / ctx->super->cluster_size;
 	ctx->bs->pages_per_cluster = ctx->bs->cluster_sz / SPDK_BS_PAGE_SIZE;
 	ctx->bs->io_unit_size = ctx->super->io_unit_size;
+
+    // zhou: allocate bitmap for all cluster
 	rc = spdk_bit_array_resize(&ctx->bs->used_clusters, ctx->bs->total_clusters);
 	if (rc < 0) {
 		_spdk_bs_load_ctx_fail(seq, ctx, -ENOMEM);
@@ -3386,6 +3402,7 @@ _spdk_bs_dump_super_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
 	fprintf(ctx->fp, "Blobstore Type: %.*s\n", SPDK_BLOBSTORE_TYPE_LENGTH, ctx->super->bstype.bstype);
 	fprintf(ctx->fp, "Cluster Size: %" PRIu32 "\n", ctx->super->cluster_size);
 	fprintf(ctx->fp, "Super Blob ID: ");
+
 	if (ctx->super->super_blob == SPDK_BLOBID_INVALID) {
 		fprintf(ctx->fp, "(None)\n");
 	} else {
@@ -3475,6 +3492,8 @@ spdk_bs_dump(struct spdk_bs_dev *dev, FILE *fp, spdk_bs_dump_print_xattr print_x
 
 /* END spdk_bs_dump */
 
+////////////////////////////////////////////////////////////////////////////////
+
 /* START spdk_bs_init */
 
 struct spdk_bs_init_ctx {
@@ -3482,6 +3501,7 @@ struct spdk_bs_init_ctx {
 	struct spdk_bs_super_block	*super;
 };
 
+// zhou: e.g. "_spdk_lvs_init_cb()" ?
 static void
 _spdk_bs_init_persist_super_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
 {
@@ -3493,6 +3513,7 @@ _spdk_bs_init_persist_super_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserr
 	spdk_bs_sequence_finish(seq, bserrno);
 }
 
+// zhou: after clean up disk, write Super Block firstly.
 static void
 _spdk_bs_init_trim_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
 {
@@ -3504,11 +3525,17 @@ _spdk_bs_init_trim_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
 				   _spdk_bs_init_persist_super_cpl, ctx);
 }
 
+
+// zhou: blob store backend bdev should be ready, then init blobstore metadata.
+//       Just like disk partition/format, need write nessary parameters into disk.
+//       Then some app like lvol could write raw disk with their private format.
+//       Other app have to based on BlobFS, to read/write file.
 void
 spdk_bs_init(struct spdk_bs_dev *dev, struct spdk_bs_opts *o,
 	     spdk_bs_op_with_handle_complete cb_fn, void *cb_arg)
 {
 	struct spdk_bs_init_ctx *ctx;
+
 	struct spdk_blob_store	*bs;
 	struct spdk_bs_cpl	cpl;
 	spdk_bs_sequence_t	*seq;
@@ -3522,6 +3549,7 @@ spdk_bs_init(struct spdk_bs_dev *dev, struct spdk_bs_opts *o,
 
 	SPDK_DEBUGLOG(SPDK_LOG_BLOB, "Initializing blobstore on dev %p\n", dev);
 
+    // zhou: BlobStore page size should be multiply of bdev block size.
 	if ((SPDK_BS_PAGE_SIZE % dev->blocklen) != 0) {
 		SPDK_ERRLOG("unsupported dev block length of %d\n",
 			    dev->blocklen);
@@ -3530,18 +3558,21 @@ spdk_bs_init(struct spdk_bs_dev *dev, struct spdk_bs_opts *o,
 		return;
 	}
 
+    // zhou: use customer set or default Blobstore options.
 	if (o) {
 		opts = *o;
 	} else {
 		spdk_bs_opts_init(&opts);
 	}
 
+    // zhou: validate the options.
 	if (_spdk_bs_opts_verify(&opts) != 0) {
 		dev->destroy(dev);
 		cb_fn(cb_arg, NULL, -EINVAL);
 		return;
 	}
 
+    // zhou: alloc "struct spdk_blob_store"
 	rc = _spdk_bs_alloc(dev, &opts, &bs);
 	if (rc) {
 		dev->destroy(dev);
@@ -3549,6 +3580,7 @@ spdk_bs_init(struct spdk_bs_dev *dev, struct spdk_bs_opts *o,
 		return;
 	}
 
+    // zhou: how many pages will be reserved for metadata.
 	if (opts.num_md_pages == SPDK_BLOB_OPTS_NUM_MD_PAGES) {
 		/* By default, allocate 1 page per cluster.
 		 * Technically, this over-allocates metadata
@@ -3560,13 +3592,15 @@ spdk_bs_init(struct spdk_bs_dev *dev, struct spdk_bs_opts *o,
 	} else {
 		bs->md_len = opts.num_md_pages;
 	}
+
+    // zhou: allocate bitmap for all metadata pages.
 	rc = spdk_bit_array_resize(&bs->used_md_pages, bs->md_len);
 	if (rc < 0) {
 		_spdk_bs_free(bs);
 		cb_fn(cb_arg, NULL, -ENOMEM);
 		return;
 	}
-
+    // zhou: each metadata page for each Blob?
 	rc = spdk_bit_array_resize(&bs->used_blobids, bs->md_len);
 	if (rc < 0) {
 		_spdk_bs_free(bs);
@@ -3581,8 +3615,11 @@ spdk_bs_init(struct spdk_bs_dev *dev, struct spdk_bs_opts *o,
 		return;
 	}
 
+    // zhou: "struct spdk_blob_store"
 	ctx->bs = bs;
 
+    // zhou: "struct spdk_bs_super_block", anything that want be write to disk
+    //       should use spdk_dma_zmalloc() memory.
 	/* Allocate memory for the super block */
 	ctx->super = spdk_dma_zmalloc(sizeof(*ctx->super), 0x1000, NULL);
 	if (!ctx->super) {
@@ -3591,10 +3628,14 @@ spdk_bs_init(struct spdk_bs_dev *dev, struct spdk_bs_opts *o,
 		cb_fn(cb_arg, NULL, -ENOMEM);
 		return;
 	}
+
+    // zhou: magic string
 	memcpy(ctx->super->signature, SPDK_BS_SUPER_BLOCK_SIG,
 	       sizeof(ctx->super->signature));
+
 	ctx->super->version = SPDK_BS_VERSION;
 	ctx->super->length = sizeof(*ctx->super);
+    // zhou: SPDK_BLOBID_INVALID? set in _spdk_bs_alloc().
 	ctx->super->super_blob = bs->super_blob;
 	ctx->super->clean = 0;
 	ctx->super->cluster_size = bs->cluster_sz;
@@ -3605,6 +3646,7 @@ spdk_bs_init(struct spdk_bs_dev *dev, struct spdk_bs_opts *o,
 	 * of the disk.
 	 */
 
+    // zhou: super block will always use 1 page == 4096 Bytes
 	/* The super block uses 1 page */
 	num_md_pages = 1;
 
@@ -3635,18 +3677,24 @@ spdk_bs_init(struct spdk_bs_dev *dev, struct spdk_bs_opts *o,
 					   SPDK_BS_PAGE_SIZE);
 	num_md_pages += ctx->super->used_blobid_mask_len;
 
+
 	/* The metadata region size was chosen above */
 	ctx->super->md_start = bs->md_start = num_md_pages;
+    // zhou: by default, same as total cluster number. Could be overrided by user.
 	ctx->super->md_len = bs->md_len;
 	num_md_pages += bs->md_len;
 
+    // zhou: convert to sector/block
 	num_md_lba = _spdk_bs_page_to_lba(bs, num_md_pages);
 
 	ctx->super->size = dev->blockcnt * dev->blocklen;
 
 	ctx->super->crc = _spdk_blob_md_page_calc_crc(ctx->super);
 
+    // zhou: how many clusters used by all kinds of metadata.
 	num_md_clusters = divide_round_up(num_md_pages, bs->pages_per_cluster);
+
+    // zhou: client specify too many Metadata Page Ragion, "opts.num_md_pages"
 	if (num_md_clusters > bs->total_clusters) {
 		SPDK_ERRLOG("Blobstore metadata cannot use more clusters than is available, "
 			    "please decrease number of pages reserved for metadata "
@@ -3657,13 +3705,19 @@ spdk_bs_init(struct spdk_bs_dev *dev, struct spdk_bs_opts *o,
 		cb_fn(cb_arg, NULL, -ENOMEM);
 		return;
 	}
+
 	/* Claim all of the clusters used by the metadata */
 	for (i = 0; i < num_md_clusters; i++) {
+        // zhou: mark as used.
 		_spdk_bs_claim_cluster(bs, i);
 	}
 
 	bs->total_data_clusters = bs->num_free_clusters;
 
+
+    // zhou: batch way
+
+    // zhou: set request "struct spdk_bs_cpl"
 	cpl.type = SPDK_BS_CPL_TYPE_BS_HANDLE;
 	cpl.u.bs_handle.cb_fn = cb_fn;
 	cpl.u.bs_handle.cb_arg = cb_arg;
@@ -3678,17 +3732,24 @@ spdk_bs_init(struct spdk_bs_dev *dev, struct spdk_bs_opts *o,
 		return;
 	}
 
+    // zhou:
 	batch = spdk_bs_sequence_to_batch(seq, _spdk_bs_init_trim_cpl, ctx);
 
+    // zhou: write 0 into all reserved metadata pages/blocks.
 	/* Clear metadata space */
 	spdk_bs_batch_write_zeroes_dev(batch, 0, num_md_lba);
+
+    // zhou: unmap other sectors.
 	/* Trim data clusters */
 	spdk_bs_batch_unmap_dev(batch, num_md_lba, ctx->bs->dev->blockcnt - num_md_lba);
 
+    // zhou: when write 0 and unmap completed, execute _spdk_bs_init_trim_cpl().
 	spdk_bs_batch_close(batch);
 }
 
 /* END spdk_bs_init */
+
+////////////////////////////////////////////////////////////////////////////////
 
 /* START spdk_bs_destroy */
 
@@ -3756,6 +3817,8 @@ spdk_bs_destroy(struct spdk_blob_store *bs, spdk_bs_op_complete cb_fn,
 
 /* END spdk_bs_destroy */
 
+////////////////////////////////////////////////////////////////////////////////
+
 /* START spdk_bs_unload */
 
 static void
@@ -3818,6 +3881,7 @@ _spdk_bs_unload_read_super_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrn
 	_spdk_bs_write_used_md(seq, cb_arg, _spdk_bs_unload_write_used_pages_cpl);
 }
 
+// zhou:
 void
 spdk_bs_unload(struct spdk_blob_store *bs, spdk_bs_op_complete cb_fn, void *cb_arg)
 {
@@ -3869,6 +3933,8 @@ spdk_bs_unload(struct spdk_blob_store *bs, spdk_bs_op_complete cb_fn, void *cb_a
 
 /* END spdk_bs_unload */
 
+////////////////////////////////////////////////////////////////////////////////
+
 /* START spdk_bs_set_super */
 
 struct spdk_bs_set_super_ctx {
@@ -3880,7 +3946,7 @@ static void
 _spdk_bs_set_super_write_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
 {
 	struct spdk_bs_set_super_ctx	*ctx = cb_arg;
-
+pp
 	if (bserrno != 0) {
 		SPDK_ERRLOG("Unable to write to super block of blobstore\n");
 	}
@@ -3955,6 +4021,8 @@ spdk_bs_set_super(struct spdk_blob_store *bs, spdk_blob_id blobid,
 
 /* END spdk_bs_set_super */
 
+////////////////////////////////////////////////////////////////////////////////
+
 void
 spdk_bs_get_super(struct spdk_blob_store *bs,
 		  spdk_blob_op_with_id_complete cb_fn, void *cb_arg)
@@ -3996,6 +4064,7 @@ spdk_bs_total_data_cluster_count(struct spdk_blob_store *bs)
 	return bs->total_data_clusters;
 }
 
+// zhou: get metadata IO channel
 static int
 spdk_bs_register_md_thread(struct spdk_blob_store *bs)
 {
@@ -4171,6 +4240,7 @@ _spdk_bs_create_blob(struct spdk_blob_store *bs,
 	_spdk_blob_persist(seq, blob, _spdk_bs_create_blob_cpl, blob);
 }
 
+// zhou:
 void spdk_bs_create_blob(struct spdk_blob_store *bs,
 			 spdk_blob_op_with_id_complete cb_fn, void *cb_arg)
 {
@@ -4505,6 +4575,7 @@ _spdk_bs_snapshot_origblob_open_cpl(void *cb_arg, struct spdk_blob *_blob, int b
 			     _spdk_bs_snapshot_newblob_create_cpl, ctx);
 }
 
+// zhou:
 void spdk_bs_create_snapshot(struct spdk_blob_store *bs, spdk_blob_id blobid,
 			     const struct spdk_blob_xattr_opts *snapshot_xattrs,
 			     spdk_blob_op_with_id_complete cb_fn, void *cb_arg)
@@ -4875,6 +4946,7 @@ _spdk_bs_resize_freeze_cpl(void *cb_arg, int rc)
 	_spdk_blob_unfreeze_io(ctx->blob, _spdk_bs_resize_unfreeze_cpl, ctx);
 }
 
+// zhou:
 void
 spdk_blob_resize(struct spdk_blob *blob, uint64_t sz, spdk_blob_op_complete cb_fn, void *cb_arg)
 {
@@ -5059,6 +5131,7 @@ _spdk_bs_open_blob_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
 	spdk_bs_sequence_finish(seq, bserrno);
 }
 
+// zhou:
 void spdk_bs_open_blob(struct spdk_blob_store *bs, spdk_blob_id blobid,
 		       spdk_blob_op_with_handle_complete cb_fn, void *cb_arg)
 {
@@ -5152,6 +5225,7 @@ _spdk_blob_sync_md(struct spdk_blob *blob, spdk_blob_op_complete cb_fn, void *cb
 	_spdk_blob_persist(seq, blob, _spdk_blob_sync_md_cpl, blob);
 }
 
+// zhou: sync metadata to disk
 void
 spdk_blob_sync_md(struct spdk_blob *blob, spdk_blob_op_complete cb_fn, void *cb_arg)
 {
@@ -5291,6 +5365,8 @@ void spdk_blob_close(struct spdk_blob *blob, spdk_blob_op_complete cb_fn, void *
 
 /* END spdk_blob_close */
 
+////////////////////////////////////////////////////////////////////////////////
+
 struct spdk_io_channel *spdk_bs_alloc_io_channel(struct spdk_blob_store *bs)
 {
 	return spdk_get_io_channel(bs);
@@ -5315,6 +5391,7 @@ void spdk_blob_io_write_zeroes(struct spdk_blob *blob, struct spdk_io_channel *c
 				     SPDK_BLOB_WRITE_ZEROES);
 }
 
+// zhou:
 void spdk_blob_io_write(struct spdk_blob *blob, struct spdk_io_channel *channel,
 			void *payload, uint64_t offset, uint64_t length,
 			spdk_blob_op_complete cb_fn, void *cb_arg)
@@ -5323,6 +5400,7 @@ void spdk_blob_io_write(struct spdk_blob *blob, struct spdk_io_channel *channel,
 				     SPDK_BLOB_WRITE);
 }
 
+// zhou:
 void spdk_blob_io_read(struct spdk_blob *blob, struct spdk_io_channel *channel,
 		       void *payload, uint64_t offset, uint64_t length,
 		       spdk_blob_op_complete cb_fn, void *cb_arg)

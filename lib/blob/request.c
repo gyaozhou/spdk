@@ -79,6 +79,7 @@ spdk_bs_call_cpl(struct spdk_bs_cpl *cpl, int bserrno)
 	}
 }
 
+// zhou:
 static void
 spdk_bs_request_set_complete(struct spdk_bs_request_set *set)
 {
@@ -90,6 +91,8 @@ spdk_bs_request_set_complete(struct spdk_bs_request_set *set)
 	spdk_bs_call_cpl(&cpl, bserrno);
 }
 
+////////////////////////////////////////////////////////////////////////////////
+
 static void
 spdk_bs_sequence_completion(struct spdk_io_channel *channel, void *cb_arg, int bserrno)
 {
@@ -99,6 +102,7 @@ spdk_bs_sequence_completion(struct spdk_io_channel *channel, void *cb_arg, int b
 	set->u.sequence.cb_fn((spdk_bs_sequence_t *)set, set->u.sequence.cb_arg, bserrno);
 }
 
+// zhou:
 spdk_bs_sequence_t *
 spdk_bs_sequence_start(struct spdk_io_channel *_channel,
 		       struct spdk_bs_cpl *cpl)
@@ -173,6 +177,7 @@ spdk_bs_sequence_write_dev(spdk_bs_sequence_t *seq, void *payload,
 	set->u.sequence.cb_fn = cb_fn;
 	set->u.sequence.cb_arg = cb_arg;
 
+    // zhou: bdev_blob_write()
 	channel->dev->write(channel->dev, channel->dev_channel, payload, lba, lba_count,
 			    &set->cb_args);
 }
@@ -282,6 +287,8 @@ spdk_bs_user_op_sequence_finish(void *cb_arg, int bserrno)
 	spdk_bs_sequence_finish(seq, bserrno);
 }
 
+////////////////////////////////////////////////////////////////////////////////
+
 static void
 spdk_bs_batch_completion(struct spdk_io_channel *_channel,
 			 void *cb_arg, int bserrno)
@@ -295,7 +302,9 @@ spdk_bs_batch_completion(struct spdk_io_channel *_channel,
 
 	if (set->u.batch.outstanding_ops == 0 && set->u.batch.batch_closed) {
 		if (set->u.batch.cb_fn) {
+
 			set->cb_args.cb_fn = spdk_bs_sequence_completion;
+            // zhou: e.g. "_spdk_bs_init_trim_cpl()"
 			set->u.batch.cb_fn((spdk_bs_sequence_t *)set, set->u.batch.cb_arg, bserrno);
 		} else {
 			spdk_bs_request_set_complete(set);
@@ -334,6 +343,7 @@ spdk_bs_batch_open(struct spdk_io_channel *_channel,
 	return (spdk_bs_batch_t *)set;
 }
 
+// zhou: README,
 void
 spdk_bs_batch_read_bs_dev(spdk_bs_batch_t *batch, struct spdk_bs_dev *bs_dev,
 			  void *payload, uint64_t lba, uint32_t lba_count)
@@ -345,6 +355,7 @@ spdk_bs_batch_read_bs_dev(spdk_bs_batch_t *batch, struct spdk_bs_dev *bs_dev,
 		      lba);
 
 	set->u.batch.outstanding_ops++;
+    // zhou: bdev_blob_read()
 	bs_dev->read(bs_dev, spdk_io_channel_from_ctx(channel), payload, lba, lba_count, &set->cb_args);
 }
 
@@ -359,6 +370,7 @@ spdk_bs_batch_read_dev(spdk_bs_batch_t *batch, void *payload,
 		      lba);
 
 	set->u.batch.outstanding_ops++;
+    // zhou: bdev_blob_read()
 	channel->dev->read(channel->dev, channel->dev_channel, payload, lba, lba_count, &set->cb_args);
 }
 
@@ -372,10 +384,12 @@ spdk_bs_batch_write_dev(spdk_bs_batch_t *batch, void *payload,
 	SPDK_DEBUGLOG(SPDK_LOG_BLOB_RW, "Writing %" PRIu32 " blocks to LBA %" PRIu64 "\n", lba_count, lba);
 
 	set->u.batch.outstanding_ops++;
+    // zhou: bdev_blob_write()
 	channel->dev->write(channel->dev, channel->dev_channel, payload, lba, lba_count,
 			    &set->cb_args);
 }
 
+// zhou: unmap all other sectors
 void
 spdk_bs_batch_unmap_dev(spdk_bs_batch_t *batch,
 			uint64_t lba, uint32_t lba_count)
@@ -391,6 +405,7 @@ spdk_bs_batch_unmap_dev(spdk_bs_batch_t *batch,
 			    &set->cb_args);
 }
 
+// zhou:
 void
 spdk_bs_batch_write_zeroes_dev(spdk_bs_batch_t *batch,
 			       uint64_t lba, uint32_t lba_count)
@@ -401,10 +416,12 @@ spdk_bs_batch_write_zeroes_dev(spdk_bs_batch_t *batch,
 	SPDK_DEBUGLOG(SPDK_LOG_BLOB_RW, "Zeroing %" PRIu32 " blocks at LBA %" PRIu64 "\n", lba_count, lba);
 
 	set->u.batch.outstanding_ops++;
+    // zhou: bdev_blob_write_zeroes()
 	channel->dev->write_zeroes(channel->dev, channel->dev_channel, lba, lba_count,
 				   &set->cb_args);
 }
 
+// zhou:
 void
 spdk_bs_batch_close(spdk_bs_batch_t *batch)
 {
@@ -422,6 +439,9 @@ spdk_bs_batch_close(spdk_bs_batch_t *batch)
 	}
 }
 
+////////////////////////////////////////////////////////////////////////////////
+
+// zhou:
 spdk_bs_batch_t *
 spdk_bs_sequence_to_batch(spdk_bs_sequence_t *seq, spdk_bs_sequence_cpl cb_fn, void *cb_arg)
 {
@@ -554,5 +574,9 @@ spdk_bs_sequence_to_batch_completion(void *cb_arg, int bserrno)
 		}
 	}
 }
+
+
+////////////////////////////////////////////////////////////////////////////////
+
 
 SPDK_LOG_REGISTER_COMPONENT("blob_rw", SPDK_LOG_BLOB_RW)

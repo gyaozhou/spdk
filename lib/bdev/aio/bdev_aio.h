@@ -54,6 +54,7 @@ struct bdev_aio_task {
 struct bdev_aio_io_channel {
 	io_context_t				io_ctx;
 	uint64_t				io_inflight;
+    // zhou:
 	struct spdk_io_channel			*group_ch;
 	TAILQ_ENTRY(bdev_aio_io_channel)	link;
 	int					efd;
@@ -61,9 +62,11 @@ struct bdev_aio_io_channel {
 
 typedef void (*spdk_delete_aio_complete)(void *cb_arg, int bdeverrno);
 
+// zhou: AIO bdev private data
 struct file_disk {
 	struct bdev_aio_task	*reset_task;
 	struct spdk_poller	*reset_retry_timer;
+    // zhou: each kind of backend storage should include such object.
 	struct spdk_bdev	disk;
 	char			*filename;
 	int			fd;

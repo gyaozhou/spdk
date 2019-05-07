@@ -151,19 +151,28 @@ struct spdk_blob {
 	bool resize_in_progress;
 };
 
+// zhou: core data for BlobStore.
 struct spdk_blob_store {
 	uint64_t			md_start; /* Offset from beginning of disk, in pages */
 	uint32_t			md_len; /* Count, in pages */
 
+    // zhou: IO Channel which metadata maintenance thread.
 	struct spdk_io_channel		*md_channel;
 	uint32_t			max_channel_ops;
 
 	struct spdk_thread		*md_thread;
 
+    // zhou: operations related  "struct spdk_bdev",
+    //       "struct blob_bdev" includes "struct spdk_bdev"
 	struct spdk_bs_dev		*dev;
 
+    // zhou: all of bitmap below will be wrote into disk.
+
+    // zhou: bitmap for meta-data pages
 	struct spdk_bit_array		*used_md_pages;
+    // zhou: bitmap for cluster.
 	struct spdk_bit_array		*used_clusters;
+    // zhou: bitmap for blob ID
 	struct spdk_bit_array		*used_blobids;
 
 	pthread_mutex_t			used_clusters_mutex;
@@ -190,6 +199,7 @@ struct spdk_blob_store {
 // zhou:
 struct spdk_bs_channel {
 	struct spdk_bs_request_set	*req_mem;
+
 	TAILQ_HEAD(, spdk_bs_request_set) reqs;
 
 	struct spdk_blob_store		*bs;
@@ -234,6 +244,7 @@ struct spdk_blob_bs_dev {
 #define SPDK_MD_MASK_TYPE_USED_CLUSTERS 1
 #define SPDK_MD_MASK_TYPE_USED_BLOBIDS 2
 
+// zhou: will be stored with bitmap, as bitmap's meta-data.
 struct spdk_bs_md_mask {
 	uint8_t		type;
 	uint32_t	length; /* In bits */
@@ -317,31 +328,45 @@ struct spdk_blob_md_page {
 	uint32_t	next;
 	uint32_t	crc;
 };
+
+// zhou: 4 KByte
 #define SPDK_BS_PAGE_SIZE 0x1000
 SPDK_STATIC_ASSERT(SPDK_BS_PAGE_SIZE == sizeof(struct spdk_blob_md_page), "Invalid md page size");
 
 #define SPDK_BS_SUPER_BLOCK_SIG "SPDKBLOB"
 
+// zhou: Just 4096 bytes, Cluster 0, Page 0, Super Block on disk structure.
 struct spdk_bs_super_block {
 	uint8_t		signature[8];
 	uint32_t        version;
+    // zhou: lenth of "struct spdk_bs_super_block"
 	uint32_t        length;
-	uint32_t	clean; /* If there was a clean shutdown, this is 1. */
-	spdk_blob_id	super_blob;
 
+    // zhou: graceful shutdown.
+	uint32_t	clean; /* If there was a clean shutdown, this is 1. */
+
+    // zhou: ???
+	spdk_blob_id	super_blob;
+    // zhou: cluster size could be set when format. Page size is fixed, 4KByte.
 	uint32_t	cluster_size; /* In bytes */
 
+    // zhou: the Page 0 is used by Super Block.
+    //       The Page begins at used_page_mask_start, for Used Page Bitmap.
 	uint32_t	used_page_mask_start; /* Offset from beginning of disk, in pages */
 	uint32_t	used_page_mask_len; /* Count, in pages */
 
+    // zhou: The Page begins at used_cluster_mask_start, for Used Cluster Bitmap.
 	uint32_t	used_cluster_mask_start; /* Offset from beginning of disk, in pages */
 	uint32_t	used_cluster_mask_len; /* Count, in pages */
 
+    // zhou: The Page begins at md_start, for meta-date page.
 	uint32_t	md_start; /* Offset from beginning of disk, in pages */
 	uint32_t	md_len; /* Count, in pages */
 
+    // zhou: string 16 bytes, such as "LVOLSTORE", set by "struct spdk_bs_opts"
 	struct spdk_bs_type	bstype; /* blobstore type */
 
+    // zhou: The Page begins at used_blobid_mask_start, for Used Blob ID Bitmap.
 	uint32_t	used_blobid_mask_start; /* Offset from beginning of disk, in pages */
 	uint32_t	used_blobid_mask_len; /* Count, in pages */
 
@@ -351,7 +376,11 @@ struct spdk_bs_super_block {
 	uint8_t         reserved[4000];
 	uint32_t	crc;
 };
+
+// zhou: static_assert, introduced in C++0x. Make sure the struct size is 1 page.
 SPDK_STATIC_ASSERT(sizeof(struct spdk_bs_super_block) == 0x1000, "Invalid super block size");
+
+
 
 #pragma pack(pop)
 
@@ -391,6 +420,7 @@ _spdk_bs_dev_byte_to_lba(struct spdk_bs_dev *bs_dev, uint64_t length)
 	return length / bs_dev->blocklen;
 }
 
+// zhou: convert to sector/block
 static inline uint64_t
 _spdk_bs_page_to_lba(struct spdk_blob_store *bs, uint64_t page)
 {

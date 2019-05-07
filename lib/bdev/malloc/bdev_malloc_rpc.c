@@ -106,6 +106,8 @@ invalid:
 }
 SPDK_RPC_REGISTER("construct_malloc_bdev", spdk_rpc_construct_malloc_bdev, SPDK_RPC_RUNTIME)
 
+////////////////////////////////////////////////////////////////////////////////
+
 struct rpc_delete_malloc {
 	char *name;
 };

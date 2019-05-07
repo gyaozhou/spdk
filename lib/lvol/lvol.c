@@ -524,6 +524,7 @@ _spdk_super_blob_create_cb(void *cb_arg, spdk_blob_id blobid, int lvolerrno)
 	spdk_bs_open_blob(bs, blobid, _spdk_super_blob_create_open_cb, req);
 }
 
+// zhou: completion of spdk_lvs_init()
 static void
 _spdk_lvs_init_cb(void *cb_arg, struct spdk_blob_store *bs, int lvserrno)
 {
@@ -532,7 +533,10 @@ _spdk_lvs_init_cb(void *cb_arg, struct spdk_blob_store *bs, int lvserrno)
 
 	if (lvserrno != 0) {
 		assert(bs == NULL);
+
+        // zhou: upper layer callback function.
 		lvs_req->cb_fn(lvs_req->cb_arg, NULL, lvserrno);
+
 		SPDK_ERRLOG("Lvol store init failed: could not initialize blobstore\n");
 		_spdk_lvs_free(lvs);
 		free(lvs_req);
@@ -540,7 +544,9 @@ _spdk_lvs_init_cb(void *cb_arg, struct spdk_blob_store *bs, int lvserrno)
 	}
 
 	assert(bs != NULL);
+
 	lvs->blobstore = bs;
+
 	TAILQ_INIT(&lvs->lvols);
 	TAILQ_INIT(&lvs->pending_lvols);
 
@@ -630,6 +636,7 @@ spdk_lvs_init(struct spdk_bs_dev *bs_dev, struct spdk_lvs_opts *o,
 	snprintf(opts.bstype.bstype, sizeof(opts.bstype.bstype), "LVOLSTORE");
 
 	SPDK_INFOLOG(SPDK_LOG_LVOL, "Initializing lvol store\n");
+    // zhou:
 	spdk_bs_init(bs_dev, &opts, _spdk_lvs_init_cb, lvs_req);
 
 	return 0;
@@ -964,6 +971,7 @@ _spdk_lvol_create_open_cb(void *cb_arg, struct spdk_blob *blob, int lvolerrno)
 	free(req);
 }
 
+// zhou: completion of lvol created.
 static void
 _spdk_lvol_create_cb(void *cb_arg, spdk_blob_id blobid, int lvolerrno)
 {
@@ -1075,7 +1083,9 @@ spdk_lvol_create(struct spdk_lvol_store *lvs, const char *name, uint64_t sz,
 	num_clusters = divide_round_up(sz, spdk_bs_get_cluster_size(bs));
 	lvol->thin_provision = thin_provision;
 	snprintf(lvol->name, sizeof(lvol->name), "%s", name);
+
 	TAILQ_INSERT_TAIL(&lvol->lvol_store->pending_lvols, lvol, link);
+
 	spdk_uuid_generate(&lvol->uuid);
 	spdk_uuid_fmt_lower(lvol->uuid_str, sizeof(lvol->uuid_str), &lvol->uuid);
 	req->lvol = lvol;

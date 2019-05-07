@@ -135,6 +135,7 @@ struct spdk_bs_dev_cb_args {
 	void			*cb_arg;
 };
 
+// zhou: operations callback functions.
 struct spdk_bs_dev {
 	/* Create a new channel which is a software construct that is used
 	 * to submit I/O. */
@@ -149,6 +150,7 @@ struct spdk_bs_dev {
 	 */
 	void (*destroy)(struct spdk_bs_dev *dev);
 
+    // zhou:
 	void (*read)(struct spdk_bs_dev *dev, struct spdk_io_channel *channel, void *payload,
 		     uint64_t lba, uint32_t lba_count,
 		     struct spdk_bs_dev_cb_args *cb_args);
@@ -186,19 +188,25 @@ struct spdk_bs_type {
 	char bstype[SPDK_BLOBSTORE_TYPE_LENGTH];
 };
 
+// zhou:
 struct spdk_bs_opts {
+    // zhou: SPDK_BLOB_OPTS_CLUSTER_SZ, 1 MByte
 	/** Size of cluster in bytes. Must be multiple of 4KiB page size. */
 	uint32_t cluster_sz;
 
+    // zhou: SPDK_BLOB_OPTS_NUM_MD_PAGES, UINT32_MAX ???
 	/** Count of the number of pages reserved for metadata */
 	uint32_t num_md_pages;
 
+    // zhou: SPDK_BLOB_OPTS_MAX_MD_OPS, 32
 	/** Maximum simultaneous metadata operations */
 	uint32_t max_md_ops;
 
+    // zhou: SPDK_BLOB_OPTS_DEFAULT_CHANNEL_OPS, 512, where it comes from ???
 	/** Maximum simultaneous operations per channel */
 	uint32_t max_channel_ops;
 
+    // zhou: just a string
 	/** Blobstore type */
 	struct spdk_bs_type bstype;
 
