@@ -278,6 +278,7 @@ struct spdk_fs_request {
 	struct spdk_fs_channel		*channel;
 };
 
+// zhou: README,
 struct spdk_fs_channel {
 	struct spdk_fs_request		*req_mem;
 	TAILQ_HEAD(, spdk_fs_request)	reqs;

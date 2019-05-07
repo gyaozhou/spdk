@@ -79,15 +79,18 @@ spdk_bs_call_cpl(struct spdk_bs_cpl *cpl, int bserrno)
 	}
 }
 
-// zhou:
+// zhou: invoke Client's Request Set completion Callback function, which obviously
+//       shared with both Sequnce and Batch mode..
 static void
 spdk_bs_request_set_complete(struct spdk_bs_request_set *set)
 {
 	struct spdk_bs_cpl cpl = set->cpl;
 	int bserrno = set->bserrno;
 
+    // zhou: put back this Request Set into free list.
 	TAILQ_INSERT_TAIL(&set->channel->reqs, set, link);
 
+    // zhou: invoke client's Request Set Completion function.
 	spdk_bs_call_cpl(&cpl, bserrno);
 }
 
@@ -102,7 +105,9 @@ spdk_bs_sequence_completion(struct spdk_io_channel *channel, void *cb_arg, int b
 	set->u.sequence.cb_fn((spdk_bs_sequence_t *)set, set->u.sequence.cb_arg, bserrno);
 }
 
-// zhou:
+// zhou: Just setup a Request Set common part.
+//       Comparing to Batch Request Set, Sequnce Mode completion function will not
+//       check all outstanding Requests are completed.
 spdk_bs_sequence_t *
 spdk_bs_sequence_start(struct spdk_io_channel *_channel,
 		       struct spdk_bs_cpl *cpl)
@@ -121,6 +126,8 @@ spdk_bs_sequence_start(struct spdk_io_channel *_channel,
 	set->cpl = *cpl;
 	set->bserrno = 0;
 	set->channel = channel;
+
+    // zhou: not init "set->u.sequence.cb_fn" and "set->u.sequence.cb_arg"
 
 	set->cb_args.cb_fn = spdk_bs_sequence_completion;
 	set->cb_args.cb_arg = set;
@@ -146,6 +153,7 @@ spdk_bs_sequence_read_bs_dev(spdk_bs_sequence_t *seq, struct spdk_bs_dev *bs_dev
 	bs_dev->read(bs_dev, spdk_io_channel_from_ctx(channel), payload, lba, lba_count, &set->cb_args);
 }
 
+// zhou: same function with spdk_bs_sequence_read_bs_dev(), just with less parameter.
 void
 spdk_bs_sequence_read_dev(spdk_bs_sequence_t *seq, void *payload,
 			  uint64_t lba, uint32_t lba_count,
@@ -182,6 +190,7 @@ spdk_bs_sequence_write_dev(spdk_bs_sequence_t *seq, void *payload,
 			    &set->cb_args);
 }
 
+// zhou: same function with spdk_bs_sequence_read_bs_dev(), just with IO Vector.
 void
 spdk_bs_sequence_readv_bs_dev(spdk_bs_sequence_t *seq, struct spdk_bs_dev *bs_dev,
 			      struct iovec *iov, int iovcnt, uint64_t lba, uint32_t lba_count,
@@ -200,6 +209,7 @@ spdk_bs_sequence_readv_bs_dev(spdk_bs_sequence_t *seq, struct spdk_bs_dev *bs_de
 		      &set->cb_args);
 }
 
+// zhou: same function with spdk_bs_sequence_readv_bs_dev(), just with less parameter.
 void
 spdk_bs_sequence_readv_dev(spdk_bs_sequence_t *seq, struct iovec *iov, int iovcnt,
 			   uint64_t lba, uint32_t lba_count, spdk_bs_sequence_cpl cb_fn, void *cb_arg)
@@ -216,6 +226,7 @@ spdk_bs_sequence_readv_dev(spdk_bs_sequence_t *seq, struct iovec *iov, int iovcn
 			    &set->cb_args);
 }
 
+// zhou: same function with spdk_bs_sequence_write_dev(), just with IO Vector.
 void
 spdk_bs_sequence_writev_dev(spdk_bs_sequence_t *seq, struct iovec *iov, int iovcnt,
 			    uint64_t lba, uint32_t lba_count,
@@ -234,6 +245,7 @@ spdk_bs_sequence_writev_dev(spdk_bs_sequence_t *seq, struct iovec *iov, int iovc
 			     &set->cb_args);
 }
 
+// zhou: unmap in Sequence Request Set, nobody use it.
 void
 spdk_bs_sequence_unmap_dev(spdk_bs_sequence_t *seq,
 			   uint64_t lba, uint32_t lba_count,
@@ -252,6 +264,7 @@ spdk_bs_sequence_unmap_dev(spdk_bs_sequence_t *seq,
 			    &set->cb_args);
 }
 
+// zhou: write zero in Sequence Request Set
 void
 spdk_bs_sequence_write_zeroes_dev(spdk_bs_sequence_t *seq,
 				  uint64_t lba, uint32_t lba_count,
@@ -288,7 +301,7 @@ spdk_bs_user_op_sequence_finish(void *cb_arg, int bserrno)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-
+// zhou: each Request in Batch Request Set will be invoke this function when it completed.
 static void
 spdk_bs_batch_completion(struct spdk_io_channel *_channel,
 			 void *cb_arg, int bserrno)
@@ -301,14 +314,18 @@ spdk_bs_batch_completion(struct spdk_io_channel *_channel,
 	}
 
 	if (set->u.batch.outstanding_ops == 0 && set->u.batch.batch_closed) {
-		if (set->u.batch.cb_fn) {
 
+        // zhou: once "u.batch.cb_fn" be set, which means this Request Set was
+        //       converted from Sequence Mode.
+		if (set->u.batch.cb_fn) {
+            // zhou: ???
 			set->cb_args.cb_fn = spdk_bs_sequence_completion;
-            // zhou: e.g. "_spdk_bs_init_trim_cpl()"
+
 			set->u.batch.cb_fn((spdk_bs_sequence_t *)set, set->u.batch.cb_arg, bserrno);
 		} else {
 			spdk_bs_request_set_complete(set);
 		}
+
 	}
 }
 
@@ -430,6 +447,8 @@ spdk_bs_batch_close(spdk_bs_batch_t *batch)
 	set->u.batch.batch_closed = 1;
 
 	if (set->u.batch.outstanding_ops == 0) {
+        // zhou: once "u.batch.cb_fn" be set, which means this Request Set was
+        //       converted from Sequence Mode.
 		if (set->u.batch.cb_fn) {
 			set->cb_args.cb_fn = spdk_bs_sequence_completion;
 			set->u.batch.cb_fn((spdk_bs_sequence_t *)set, set->u.batch.cb_arg, set->bserrno);
@@ -441,7 +460,8 @@ spdk_bs_batch_close(spdk_bs_batch_t *batch)
 
 ////////////////////////////////////////////////////////////////////////////////
 
-// zhou:
+// zhou: confusing, when need to convert Sequence to Batch mode???
+//       Only "u.batch.cb_fn" could be set in this function.
 spdk_bs_batch_t *
 spdk_bs_sequence_to_batch(spdk_bs_sequence_t *seq, spdk_bs_sequence_cpl cb_fn, void *cb_arg)
 {
@@ -561,6 +581,7 @@ spdk_bs_user_op_abort(spdk_bs_user_op_t *op)
 	TAILQ_INSERT_TAIL(&set->channel->reqs, set, link);
 }
 
+// zhou: spdk_bs_batch_to_sequence() will register this function.
 void
 spdk_bs_sequence_to_batch_completion(void *cb_arg, int bserrno)
 {

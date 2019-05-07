@@ -31,6 +31,8 @@
  *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+// zhou: README,
+
 /** \file
  * Blob Storage System
  *
@@ -142,6 +144,7 @@ typedef void (*spdk_blob_op_with_handle_complete)(void *cb_arg, struct spdk_blob
 typedef void (*spdk_bs_dev_cpl)(struct spdk_io_channel *channel,
 				void *cb_arg, int bserrno);
 
+// zhou:
 struct spdk_bs_dev_cb_args {
 	spdk_bs_dev_cpl		cb_fn;
 	struct spdk_io_channel	*channel;

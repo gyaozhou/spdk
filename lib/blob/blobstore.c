@@ -174,6 +174,7 @@ spdk_blob_open_opts_init(struct spdk_blob_open_opts *opts)
 	opts->clear_method = BLOB_CLEAR_WITH_UNMAP;
 }
 
+// zhou: create "blob" object.
 static struct spdk_blob *
 _spdk_blob_alloc(struct spdk_blob_store *bs, spdk_blob_id id)
 {
@@ -1407,6 +1408,7 @@ _spdk_blob_resize(struct spdk_blob *blob, uint64_t sz)
 	return 0;
 }
 
+// zhou: README,
 static void
 _spdk_blob_persist_start(struct spdk_blob_persist_ctx *ctx)
 {
@@ -1509,7 +1511,7 @@ _spdk_blob_persist_dirty(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
 	_spdk_bs_write_super(seq, ctx->blob->bs, ctx->super, _spdk_blob_persist_dirty_cpl, ctx);
 }
 
-
+// zhou: README,
 /* Write a blob to disk */
 static void
 _spdk_blob_persist(spdk_bs_sequence_t *seq, struct spdk_blob *blob,
@@ -3750,13 +3752,12 @@ spdk_bs_init(struct spdk_bs_dev *dev, struct spdk_bs_opts *o,
 	bs->total_data_clusters = bs->num_free_clusters;
 
 
-    // zhou: batch way
-
-    // zhou: set request "struct spdk_bs_cpl"
+    // zhou: client's Request Set Completion, "struct spdk_bs_cpl".
 	cpl.type = SPDK_BS_CPL_TYPE_BS_HANDLE;
 	cpl.u.bs_handle.cb_fn = cb_fn;
 	cpl.u.bs_handle.cb_arg = cb_arg;
 	cpl.u.bs_handle.bs = bs;
+
 
 	seq = spdk_bs_sequence_start(bs->md_channel, &cpl);
 	if (!seq) {
@@ -3767,7 +3768,7 @@ spdk_bs_init(struct spdk_bs_dev *dev, struct spdk_bs_opts *o,
 		return;
 	}
 
-    // zhou:
+    // zhou: confusing ???
 	batch = spdk_bs_sequence_to_batch(seq, _spdk_bs_init_trim_cpl, ctx);
 
     // zhou: write 0 into all reserved metadata pages/blocks.
@@ -4154,6 +4155,8 @@ uint64_t spdk_blob_get_num_clusters(struct spdk_blob *blob)
 	return blob->active.num_clusters;
 }
 
+////////////////////////////////////////////////////////////////////////////////
+
 /* START spdk_bs_create_blob */
 
 static void
@@ -4220,13 +4223,18 @@ _spdk_bs_create_blob(struct spdk_blob_store *bs,
 		cb_fn(cb_arg, 0, -ENOMEM);
 		return;
 	}
+    // zhou: Metadata Page index used as Blob Id
 	spdk_bit_array_set(bs->used_blobids, page_idx);
 	spdk_bit_array_set(bs->used_md_pages, page_idx);
 
+    // zhou: The blob id is a 64 bit number. The lower 32 bits are the page_idx.
+    //       The upper 32 bits are not currently used.
+    //       Stick a 1 there just to catch bugs where the code assumes blob id == page_idx.
 	id = _spdk_bs_page_to_blobid(page_idx);
 
 	SPDK_DEBUGLOG(SPDK_LOG_BLOB, "Creating blob with id %lu at page %u\n", id, page_idx);
 
+    // zhou: create "blob" object.
 	blob = _spdk_blob_alloc(bs, id);
 	if (!blob) {
 		cb_fn(cb_arg, 0, -ENOMEM);
@@ -4266,6 +4274,7 @@ _spdk_bs_create_blob(struct spdk_blob_store *bs,
 		cb_fn(cb_arg, 0, rc);
 		return;
 	}
+
 	cpl.type = SPDK_BS_CPL_TYPE_BLOBID;
 	cpl.u.blobid.cb_fn = cb_fn;
 	cpl.u.blobid.cb_arg = cb_arg;
@@ -4278,6 +4287,7 @@ _spdk_bs_create_blob(struct spdk_blob_store *bs,
 		return;
 	}
 
+    // zhou: Write a blob to disk
 	_spdk_blob_persist(seq, blob, _spdk_bs_create_blob_cpl, blob);
 }
 
@@ -4295,6 +4305,8 @@ void spdk_bs_create_blob_ext(struct spdk_blob_store *bs, const struct spdk_blob_
 }
 
 /* END spdk_bs_create_blob */
+
+////////////////////////////////////////////////////////////////////////////////
 
 /* START blob_cleanup */
 
@@ -4777,6 +4789,8 @@ void spdk_bs_create_clone(struct spdk_blob_store *bs, spdk_blob_id blobid,
 
 /* END spdk_bs_create_clone */
 
+////////////////////////////////////////////////////////////////////////////////
+
 /* START spdk_bs_inflate_blob */
 
 static void
@@ -4990,6 +5004,8 @@ spdk_bs_blob_decouple_parent(struct spdk_blob_store *bs, struct spdk_io_channel 
 }
 /* END spdk_bs_inflate_blob */
 
+////////////////////////////////////////////////////////////////////////////////
+
 /* START spdk_blob_resize */
 struct spdk_bs_resize_ctx {
 	spdk_blob_op_complete cb_fn;
@@ -5036,7 +5052,7 @@ _spdk_bs_resize_freeze_cpl(void *cb_arg, int rc)
 	_spdk_blob_unfreeze_io(ctx->blob, _spdk_bs_resize_unfreeze_cpl, ctx);
 }
 
-// zhou:
+// zhou: README
 void
 spdk_blob_resize(struct spdk_blob *blob, uint64_t sz, spdk_blob_op_complete cb_fn, void *cb_arg)
 {
@@ -5046,6 +5062,7 @@ spdk_blob_resize(struct spdk_blob *blob, uint64_t sz, spdk_blob_op_complete cb_f
 
 	SPDK_DEBUGLOG(SPDK_LOG_BLOB, "Resizing blob %lu to %lu clusters\n", blob->id, sz);
 
+    // zhou: metadata readonly.
 	if (blob->md_ro) {
 		cb_fn(cb_arg, -EPERM);
 		return;
@@ -5077,6 +5094,7 @@ spdk_blob_resize(struct spdk_blob *blob, uint64_t sz, spdk_blob_op_complete cb_f
 
 /* END spdk_blob_resize */
 
+////////////////////////////////////////////////////////////////////////////////
 
 /* START spdk_bs_delete_blob */
 

@@ -60,6 +60,12 @@ struct spdk_xattr {
 	TAILQ_ENTRY(spdk_xattr)	link;
 };
 
+// zhou: each blob on disk structure
+//      "This is a per blob structure, included the struct spdk_blob struct that
+//       actually defines the blob itself. It has the specific information on size
+//       and makeup of the blob (ie how many clusters are allocated for this blob
+//       and which ones.)"
+
 /* The mutable part of the blob data that is sync'd to
  * disk. The data in here is both mutable and persistent.
  */
@@ -111,6 +117,11 @@ struct spdk_blob_list {
 	TAILQ_ENTRY(spdk_blob_list) link;
 };
 
+// zhou: object blob,
+//       "This is an in-memory data structure that contains key elements like
+//        the blob identifier, it's current state and two copies of the mutable
+//        metadata for the blob; one copy is the current metadata and the other
+//        is the last copy written to disk."
 struct spdk_blob {
 	struct spdk_blob_store *bs;
 
@@ -129,11 +140,16 @@ struct spdk_blob {
 	struct spdk_blob_mut_data	clean;
 	struct spdk_blob_mut_data	active;
 
+
 	bool		invalid;
+
+    // zhou: client data readonly
 	bool		data_ro;
+    // zhou: metadata readonly
 	bool		md_ro;
 
 	uint64_t	invalid_flags;
+
 	uint64_t	data_ro_flags;
 	uint64_t	md_ro_flags;
 
@@ -153,6 +169,9 @@ struct spdk_blob {
 };
 
 // zhou: core data for BlobStore.
+//       "This is the main in-memory structure for the entire Blobstore. It defines
+//       the global on disk metadata region and maintains information relevant to
+//       the entire system - initialization options such as cluster size, etc."
 struct spdk_blob_store {
 	uint64_t			md_start; /* Offset from beginning of disk, in pages */
 	uint32_t			md_len; /* Count, in pages */
