@@ -63,40 +63,48 @@ typedef struct spdk_bs_request_set spdk_bs_user_op_t;
 
 typedef void (*spdk_bs_nested_seq_complete)(void *cb_arg, spdk_bs_sequence_t *parent, int bserrno);
 
-// zhou: completion with different arguments depending on type.
-//       Just a collection of all kinds of callback function.
+// zhou: pay attention that each completion function as first field of structure.
+//       And the completion function knows how to parse the other fields as arguments.
+//       The "enum spdk_bs_cpl_type" used to indicate the completion function signature,
+//       NOT the same function !!!
 struct spdk_bs_cpl {
 	enum spdk_bs_cpl_type type;
 
 	union {
+        // zhou: SPDK_BS_CPL_TYPE_BS_BASIC
 		struct {
 			spdk_bs_op_complete     cb_fn;
 			void                    *cb_arg;
 		} bs_basic;
 
+        // zhou: SPDK_BS_CPL_TYPE_BS_HANDLE
 		struct {
 			spdk_bs_op_with_handle_complete cb_fn;
 			void                            *cb_arg;
 			struct spdk_blob_store          *bs;
 		} bs_handle;
 
+        // zhou: SPDK_BS_CPL_TYPE_BLOB_BASIC
 		struct {
 			spdk_blob_op_complete   cb_fn;
 			void                    *cb_arg;
 		} blob_basic;
 
+        // zhou: SPDK_BS_CPL_TYPE_BLOBID
 		struct {
 			spdk_blob_op_with_id_complete   cb_fn;
 			void                            *cb_arg;
 			spdk_blob_id                     blobid;
 		} blobid;
 
+        // zhou: SPDK_BS_CPL_TYPE_BLOB_HANDLE
 		struct {
 			spdk_blob_op_with_handle_complete       cb_fn;
 			void                                    *cb_arg;
 			struct spdk_blob                        *blob;
 		} blob_handle;
 
+        // zhou: SPDK_BS_CPL_TYPE_NESTED_SEQUENCE
 		struct {
 			spdk_bs_nested_seq_complete	cb_fn;
 			void				*cb_arg;

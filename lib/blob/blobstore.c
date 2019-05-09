@@ -244,6 +244,9 @@ struct freeze_io_ctx {
 	struct spdk_blob *blob;
 };
 
+// zhou: do nothing except iterated to next thread.
+//       The spdk_for_each_channel() process, will insert memory barrier make sure
+//       'frozen_refcnt' latest value be seen by all related threads.
 static void
 _spdk_blob_io_sync(struct spdk_io_channel_iter *i)
 {
@@ -273,15 +276,20 @@ _spdk_blob_execute_queued_io(struct spdk_io_channel_iter *i)
 	spdk_for_each_channel_continue(i, 0);
 }
 
+// zhou: all thread freeze or unfreeze IO completed.
 static void
 _spdk_blob_io_cpl(struct spdk_io_channel_iter *i, int status)
 {
 	struct freeze_io_ctx *ctx = spdk_io_channel_iter_get_ctx(i);
 
+    // zhou: e.g. _spdk_bs_resize_freeze_cpl()
 	ctx->cpl.u.blob_basic.cb_fn(ctx->cpl.u.blob_basic.cb_arg, 0);
 
 	free(ctx);
 }
+
+// zhou: when performing snapshot and resize, need to make
+//       Blobstore quiesced (new IO requested queued, on going IO request completion? ).
 
 static void
 _spdk_blob_freeze_io(struct spdk_blob *blob, spdk_blob_op_complete cb_fn, void *cb_arg)
@@ -294,6 +302,7 @@ _spdk_blob_freeze_io(struct spdk_blob *blob, spdk_blob_op_complete cb_fn, void *
 		return;
 	}
 
+    // zhou: new context is a nested context.
 	ctx->cpl.type = SPDK_BS_CPL_TYPE_BS_BASIC;
 	ctx->cpl.u.blob_basic.cb_fn = cb_fn;
 	ctx->cpl.u.blob_basic.cb_arg = cb_arg;
@@ -303,9 +312,22 @@ _spdk_blob_freeze_io(struct spdk_blob *blob, spdk_blob_op_complete cb_fn, void *
 	blob->frozen_refcnt++;
 
 	if (blob->frozen_refcnt == 1) {
+        // zhou: schedule _spdk_blob_io_sync() running on IO device all related threads.
+        //       When all
 		spdk_for_each_channel(blob->bs, _spdk_blob_io_sync, ctx, _spdk_blob_io_cpl);
 	} else {
+        // zhou: all blob metadata related operations should be executed on
+        //       metadata thread only.
+        //       Flag "locked_operation_in_progress" will block most of the parallal
+        //       operations.
+        //       Only Snapshot and Resize will freeze (original blob) IO. And all these
+        //       operations will set "locked_operation_in_progress". And reset it after,
+        //       "frozen_refcnt" decrease.
+        //       So, I don't know, when this path will be run.
+        //       And this path is unsafe, since _spdk_blob_io_cpl() may not completed.
+        //       Not all IO channel be notified.
 		cb_fn(cb_arg, 0);
+
 		free(ctx);
 	}
 }
@@ -333,6 +355,9 @@ _spdk_blob_unfreeze_io(struct spdk_blob *blob, spdk_blob_op_complete cb_fn, void
 	if (blob->frozen_refcnt == 0) {
 		spdk_for_each_channel(blob->bs, _spdk_blob_execute_queued_io, ctx, _spdk_blob_io_cpl);
 	} else {
+        // zhou: so, just make sure frozen_refcnt > 0, and there is no new IO be
+        //       handled in other threads.
+        //       But how about on-fly IO request ? No need to wait for completion?
 		cb_fn(cb_arg, 0);
 		free(ctx);
 	}
@@ -1335,6 +1360,7 @@ _spdk_blob_persist_write_page_chain(spdk_bs_sequence_t *seq, void *cb_arg, int b
 	spdk_bs_batch_close(batch);
 }
 
+// zhou: do solid work, "spdk_blob_resize()"
 static int
 _spdk_blob_resize(struct spdk_blob *blob, uint64_t sz)
 {
@@ -4514,6 +4540,7 @@ _spdk_bs_snapshot_newblob_sync_cpl(void *cb_arg, int bserrno)
 	spdk_blob_sync_md(origblob, _spdk_bs_snapshot_origblob_sync_cpl, ctx);
 }
 
+// zhou: freeze completed, copy into something from original blob to snapshot blob.
 static void
 _spdk_bs_snapshot_freeze_cpl(void *cb_arg, int rc)
 {
@@ -4553,6 +4580,7 @@ _spdk_bs_snapshot_freeze_cpl(void *cb_arg, int rc)
 	spdk_blob_sync_md(newblob, _spdk_bs_snapshot_newblob_sync_cpl, ctx);
 }
 
+// zhou: open new created snapshot blob completed.
 static void
 _spdk_bs_snapshot_newblob_open_cpl(void *cb_arg, struct spdk_blob *_blob, int bserrno)
 {
@@ -4571,9 +4599,13 @@ _spdk_bs_snapshot_newblob_open_cpl(void *cb_arg, struct spdk_blob *_blob, int bs
 	memset(newblob->active.clusters, 0,
 	       newblob->active.num_clusters * sizeof(newblob->active.clusters));
 
+    // zhou: at this time, the new created snapshot blob still empty, we will resize
+    //       it as orignal blob.
+    //       So, right now, we must freeze original blob.
 	_spdk_blob_freeze_io(origblob, _spdk_bs_snapshot_freeze_cpl, ctx);
 }
 
+// zhou: created snapshot blob completed.
 static void
 _spdk_bs_snapshot_newblob_create_cpl(void *cb_arg, spdk_blob_id blobid, int bserrno)
 {
@@ -4585,6 +4617,7 @@ _spdk_bs_snapshot_newblob_create_cpl(void *cb_arg, spdk_blob_id blobid, int bser
 		return;
 	}
 
+    // zhou: snapshot blob id.
 	ctx->new.id = blobid;
 	ctx->cpl.u.blobid.blobid = blobid;
 
@@ -4626,6 +4659,7 @@ _spdk_bs_snapshot_origblob_open_cpl(void *cb_arg, struct spdk_blob *_blob, int b
 		return;
 	}
 
+    // zhou: can not work when locked.
 	if (_blob->locked_operation_in_progress) {
 		SPDK_DEBUGLOG(SPDK_LOG_BLOB, "Cannot create snapshot - another operation in progress\n");
 		ctx->bserrno = -EBUSY;
@@ -4633,6 +4667,7 @@ _spdk_bs_snapshot_origblob_open_cpl(void *cb_arg, struct spdk_blob *_blob, int b
 		return;
 	}
 
+    // zhou: original blob operation been locked.
 	_blob->locked_operation_in_progress = true;
 
 	spdk_blob_opts_init(&opts);
@@ -4653,6 +4688,7 @@ _spdk_bs_snapshot_origblob_open_cpl(void *cb_arg, struct spdk_blob *_blob, int b
 	internal_xattrs.names = xattrs_names;
 	internal_xattrs.get_value = _spdk_bs_xattr_snapshot;
 
+    // zhou: created snapshot blob.
 	_spdk_bs_create_blob(_blob->bs, &opts, &internal_xattrs,
 			     _spdk_bs_snapshot_newblob_create_cpl, ctx);
 }
@@ -5015,6 +5051,7 @@ struct spdk_bs_resize_ctx {
 	int rc;
 };
 
+// zhou: unfreeze IO (due to resize request) completed.
 static void
 _spdk_bs_resize_unfreeze_cpl(void *cb_arg, int rc)
 {
@@ -5029,17 +5066,20 @@ _spdk_bs_resize_unfreeze_cpl(void *cb_arg, int rc)
 		rc = ctx->rc;
 	}
 
+    // zhou: set false after frozen_refcnt--.
 	ctx->blob->locked_operation_in_progress = false;
 
 	ctx->cb_fn(ctx->cb_arg, rc);
 	free(ctx);
 }
 
+// zhou: freeze IO (due to resize request) completed.
 static void
 _spdk_bs_resize_freeze_cpl(void *cb_arg, int rc)
 {
 	struct spdk_bs_resize_ctx *ctx = (struct spdk_bs_resize_ctx *)cb_arg;
 
+    // zhou: something wrong, give up.
 	if (rc != 0) {
 		ctx->blob->locked_operation_in_progress = false;
 		ctx->cb_fn(ctx->cb_arg, rc);
@@ -5047,12 +5087,14 @@ _spdk_bs_resize_freeze_cpl(void *cb_arg, int rc)
 		return;
 	}
 
+    // zhou: do solid work.
 	ctx->rc = _spdk_blob_resize(ctx->blob, ctx->sz);
 
+    // zhou: ask to unfreeze IO
 	_spdk_blob_unfreeze_io(ctx->blob, _spdk_bs_resize_unfreeze_cpl, ctx);
 }
 
-// zhou: README
+// zhou: README,
 void
 spdk_blob_resize(struct spdk_blob *blob, uint64_t sz, spdk_blob_op_complete cb_fn, void *cb_arg)
 {
@@ -5068,16 +5110,19 @@ spdk_blob_resize(struct spdk_blob *blob, uint64_t sz, spdk_blob_op_complete cb_f
 		return;
 	}
 
+    // zhou: already hold such number cluster, success immediately
 	if (sz == blob->active.num_clusters) {
 		cb_fn(cb_arg, 0);
 		return;
 	}
 
+    // zhou: busy,
 	if (blob->locked_operation_in_progress) {
 		cb_fn(cb_arg, -EBUSY);
 		return;
 	}
 
+    // zhou: pack all parameters into context.
 	ctx = calloc(1, sizeof(*ctx));
 	if (!ctx) {
 		cb_fn(cb_arg, -ENOMEM);
@@ -5085,10 +5130,13 @@ spdk_blob_resize(struct spdk_blob *blob, uint64_t sz, spdk_blob_op_complete cb_f
 	}
 
 	blob->locked_operation_in_progress = true;
+
 	ctx->cb_fn = cb_fn;
 	ctx->cb_arg = cb_arg;
 	ctx->blob = blob;
 	ctx->sz = sz;
+
+    // zhou: "locked_operation_in_progress" was set true.
 	_spdk_blob_freeze_io(blob, _spdk_bs_resize_freeze_cpl, ctx);
 }
 
@@ -5355,6 +5403,8 @@ int spdk_blob_set_read_only(struct spdk_blob *blob)
 	return 0;
 }
 /* END spdk_blob_set_read_only */
+
+////////////////////////////////////////////////////////////////////////////////
 
 /* START spdk_blob_sync_md */
 

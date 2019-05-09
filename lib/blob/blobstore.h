@@ -163,8 +163,17 @@ struct spdk_blob {
 
 	TAILQ_ENTRY(spdk_blob) link;
 
+    // zhou: frozen request count, will be read/write in Metadata Thread, and
+    //       be read IO channel when processing READ/WRITE request.
+    //       Should be shared between threads. How to protect ?
+    //       In one cache line, and go through each thread which will using
+    //       "spp_ring_enqueue()", which should include a memory fence.
 	uint32_t frozen_refcnt;
+
+    // zhou: avoid several requests conflict, only one Request be handled in
+    //       Metadata Thread.
 	bool locked_operation_in_progress;
+
 	enum blob_clear_method clear_method;
 };
 

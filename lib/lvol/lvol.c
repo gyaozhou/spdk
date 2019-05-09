@@ -1222,6 +1222,8 @@ spdk_lvol_create_clone(struct spdk_lvol *origlvol, const char *clone_name,
 			     req);
 }
 
+// zhou: step 2 done. No matter mistake or not, this is finnal step,
+//       So, invoke completion function registered in spdk_lvol_resize().
 static void
 _spdk_lvol_resize_done(void *cb_arg, int lvolerrno)
 {
@@ -1231,21 +1233,35 @@ _spdk_lvol_resize_done(void *cb_arg, int lvolerrno)
 	free(req);
 }
 
+// zhou: step 1 done. completion of Blob Resize.
 static void
 _spdk_lvol_blob_resize_cb(void *cb_arg, int bserrno)
 {
 	struct spdk_lvol_req *req = cb_arg;
 	struct spdk_lvol *lvol = req->lvol;
 
+    // zhou: mistake happened, give up.
+    //       Invoke completion function registered in step 1, spdk_lvol_resize().
 	if (bserrno != 0) {
 		req->cb_fn(req->cb_arg, bserrno);
 		free(req);
 		return;
 	}
 
+    // zhou: step 1, resize success. Perform step 2, sync metadata to disk.
 	spdk_blob_sync_md(lvol->blob, _spdk_lvol_resize_done, req);
 }
-
+// zhou: each nested async processing, will create a new context to preserve
+//       registered completion function and arguments.
+//       while sequence processing, no need to create a new context. In sequence
+//       processing, the completion know what's the next step. Just like,
+//       _spdk_lvol_blob_resize_cb().
+//
+//       step 1, spdk_blob_resize()
+//           step 1.1, _spdk_blob_freeze_io()
+//                step 1.1.1, _spdk_blob_io_sync()
+//                     step 1.1.1.1, spdk_thread_send_msg()
+//       step 2, spdk_blob_sync_md()
 void
 spdk_lvol_resize(struct spdk_lvol *lvol, uint64_t sz,
 		 spdk_lvol_op_complete cb_fn, void *cb_arg)
@@ -1265,6 +1281,7 @@ spdk_lvol_resize(struct spdk_lvol *lvol, uint64_t sz,
 	req->cb_arg = cb_arg;
 	req->lvol = lvol;
 
+    // zhou: step 1, resize.
 	spdk_blob_resize(blob, new_clusters, _spdk_lvol_blob_resize_cb, req);
 }
 

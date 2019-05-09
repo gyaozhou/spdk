@@ -140,6 +140,7 @@ struct spdk_thread {
 	uint8_t				ctx[0];
 };
 
+// zhou: all threads
 static TAILQ_HEAD(, spdk_thread) g_threads = TAILQ_HEAD_INITIALIZER(g_threads);
 static uint32_t g_thread_count = 0;
 
@@ -645,7 +646,12 @@ spdk_thread_get_stats(struct spdk_thread_stats *stats)
 }
 
 
-// zhou: message is also a Fibre which inter-thread.
+// zhou: "Send a message to the given thread.
+//       The message may be sent asynchronously - i.e. spdk_thread_send_msg may return
+//       prior to `fn` being called."
+//
+//       Just like distributing a Fibre to thread, the fibre should be executed on
+//       destination thread.
 //       Pay attention, not allowed to revoke message which already been sent out.
 void
 spdk_thread_send_msg(const struct spdk_thread *thread, spdk_msg_fn fn, void *ctx)
@@ -797,6 +803,9 @@ spdk_on_thread(void *ctx)
 	}
 }
 
+// zhou: "Send a message to each thread, serially.
+//       The message is sent asynchronously - i.e. spdk_for_each_thread will return
+//       prior to `fn` being called on each thread."
 void
 spdk_for_each_thread(spdk_msg_fn fn, void *ctx, spdk_msg_fn cpl)
 {
@@ -833,7 +842,11 @@ spdk_for_each_thread(spdk_msg_fn fn, void *ctx, spdk_msg_fn cpl)
 	spdk_thread_send_msg(ct->cur_thread, spdk_on_thread, ct);
 }
 
-// zhou: IO device and IO channel are abstraction, you can compare with EthDev, which
+// zhou: "Register the opaque io_device context as an I/O device.
+//       After an I/O device is registered, it can return I/O channels using the
+//       spdk_get_io_channel() function."
+//
+//       IO device and IO channel are abstraction, you can compare with EthDev, which
 //       owns several queues, and each queue could be assgined to a dedicated thread.
 //       Then, these threads could submit IO without lock.
 //       The Ethdev is a instance of IO device, and the queue is a instance of IO channel.
@@ -975,7 +988,15 @@ spdk_io_device_unregister(void *io_device, spdk_io_device_unregister_cb unregist
 	_spdk_io_device_free(dev);
 }
 
-// zhou: README, different channel multiplex over this thread to avoid locking.
+// zhou: "Get an I/O channel for the specified io_device to be used by the calling thread.
+//       The io_device context pointer specified must have previously been registered
+//       using spdk_io_device_register(). If an existing I/O channel does not exist
+//       yet for the given io_device on the calling thread, it will allocate an I/O
+//       channel and invoke the create_cb function pointer specified in spdk_io_device_register().
+//       If an I/O channel already exists for the given io_device on the calling thread,
+//       its reference is returned rather than creating a new I/O channel."
+//
+//       README, different channel multiplex over this thread to avoid locking.
 //       Find or Create IO Channel.
 struct spdk_io_channel *
 spdk_get_io_channel(void *io_device)
@@ -1119,6 +1140,12 @@ _spdk_put_io_channel(void *arg)
 	free(ch);
 }
 
+// zhou: "Release a reference to an I/O channel. This happens asynchronously.
+//       Actual release will happen on the same thread that called spdk_get_io_channel()
+//       for the specified I/O channel. If this releases the last reference to the
+//       I/O channel, The destroy_cb function specified in spdk_io_device_register()
+//       will be invoked to release any associated resources."
+
 void
 spdk_put_io_channel(struct spdk_io_channel *ch)
 {
@@ -1134,11 +1161,16 @@ spdk_put_io_channel(struct spdk_io_channel *ch)
 	}
 }
 
+// zhou: "Get I/O channel from the context buffer. This is the inverse of
+//       spdk_io_channel_get_ctx()."
+
 struct spdk_io_channel *
 spdk_io_channel_from_ctx(void *ctx)
 {
 	return (struct spdk_io_channel *)((uint8_t *)ctx - sizeof(struct spdk_io_channel));
 }
+
+// zhou: "Get the thread associated with an I/O channel."
 
 struct spdk_thread *
 spdk_io_channel_get_thread(struct spdk_io_channel *ch)
@@ -1160,18 +1192,22 @@ struct spdk_io_channel_iter {
 	spdk_channel_for_each_cpl cpl;
 };
 
+// zhou: "Get io_device from the I/O channel iterator."
+
 void *
 spdk_io_channel_iter_get_io_device(struct spdk_io_channel_iter *i)
 {
 	return i->io_device;
 }
 
+// zhou: "Get I/O channel from the I/O channel iterator."
 struct spdk_io_channel *
 spdk_io_channel_iter_get_channel(struct spdk_io_channel_iter *i)
 {
 	return i->ch;
 }
 
+// zhou: "Get context buffer from the I/O channel iterator."
 void *
 spdk_io_channel_iter_get_ctx(struct spdk_io_channel_iter *i)
 {
@@ -1215,6 +1251,17 @@ _call_channel(void *ctx)
 	}
 }
 
+// zhou: "Call 'fn' on each channel associated with io_device.
+//       This happens asynchronously, so fn may be called after spdk_for_each_channel
+//       returns. 'fn' will be called for each channel serially, such that two calls
+//       to 'fn' will not overlap in time. After 'fn' has been called, call
+//       spdk_for_each_channel_continue() to continue iterating."
+//
+//       "'cpl' Called on the thread that spdk_for_each_channel was initially called
+//       from when 'fn' has been called on each channel."
+//
+//       When 'fn' executed on all IO device related threads, 'cpl' will be run on
+//       'spdk_for_each_channel()' invoking thread, notifing the completion.
 void
 spdk_for_each_channel(void *io_device, spdk_channel_msg fn, void *ctx,
 		      spdk_channel_for_each_cpl cpl)
@@ -1238,13 +1285,17 @@ spdk_for_each_channel(void *io_device, spdk_channel_msg fn, void *ctx,
 	i->orig_thread = _get_thread();
 
 	TAILQ_FOREACH(thread, &g_threads, tailq) {
+
 		TAILQ_FOREACH(ch, &thread->io_channels, tailq) {
+
 			if (ch->dev->io_device == io_device) {
 				ch->dev->for_each_count++;
 				i->dev = ch->dev;
 				i->cur_thread = thread;
 				i->ch = ch;
+
 				pthread_mutex_unlock(&g_devlist_mutex);
+
 				spdk_thread_send_msg(thread, _call_channel, i);
 				return;
 			}
@@ -1256,6 +1307,7 @@ spdk_for_each_channel(void *io_device, spdk_channel_msg fn, void *ctx,
 	spdk_thread_send_msg(i->orig_thread, _call_completion, i);
 }
 
+// zhou: "Helper function to iterate all channels for spdk_for_each_channel()."
 void
 spdk_for_each_channel_continue(struct spdk_io_channel_iter *i, int status)
 {
