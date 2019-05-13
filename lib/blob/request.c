@@ -105,7 +105,12 @@ spdk_bs_sequence_completion(struct spdk_io_channel *channel, void *cb_arg, int b
 	set->u.sequence.cb_fn((spdk_bs_sequence_t *)set, set->u.sequence.cb_arg, bserrno);
 }
 
-// zhou: Just setup a Request Set common part.
+// zhou: first alloc a "spdk_bs_sequence_t", then this seq could be reused in
+//       each previous IO completion. By this way, each IO will
+//       submit-completion-submit-completion-...
+//       But, there is a list "reqs" for each IO channel.
+//
+//       Just setup a Request Set common part.
 //       Comparing to Batch Request Set, Sequnce Mode completion function will not
 //       check all outstanding Requests are completed.
 spdk_bs_sequence_t *
@@ -150,6 +155,7 @@ spdk_bs_sequence_read_bs_dev(spdk_bs_sequence_t *seq, struct spdk_bs_dev *bs_dev
 	set->u.sequence.cb_fn = cb_fn;
 	set->u.sequence.cb_arg = cb_arg;
 
+    // zhou: e.g. bdev_blob_read()
 	bs_dev->read(bs_dev, spdk_io_channel_from_ctx(channel), payload, lba, lba_count, &set->cb_args);
 }
 
@@ -329,6 +335,9 @@ spdk_bs_batch_completion(struct spdk_io_channel *_channel,
 	}
 }
 
+// zhou: when all kinds IO request's comletion are same, or we don't care about
+//       each IO completion, just take care about all submited IO completed.
+//
 spdk_bs_batch_t *
 spdk_bs_batch_open(struct spdk_io_channel *_channel,
 		   struct spdk_bs_cpl *cpl)
@@ -462,6 +471,11 @@ spdk_bs_batch_close(spdk_bs_batch_t *batch)
 
 // zhou: confusing, when need to convert Sequence to Batch mode???
 //       Only "u.batch.cb_fn" could be set in this function.
+//
+//       Sequence IO submit, means one by one completion. But we want some mode, like
+//       one IO submit-one IO completion-batch IO submit-all batch IO completion-one
+//       IO submit-one IO completion ...
+//       Then make batch IO be keep sequence with other sequence.
 spdk_bs_batch_t *
 spdk_bs_sequence_to_batch(spdk_bs_sequence_t *seq, spdk_bs_sequence_cpl cb_fn, void *cb_arg)
 {

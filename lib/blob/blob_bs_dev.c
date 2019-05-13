@@ -122,6 +122,7 @@ blob_bs_dev_destroy(struct spdk_bs_dev *bs_dev)
 }
 
 
+// zhou: README, looks like virtual layer, comparing to spdk_bdev_create_bs_dev().
 struct spdk_bs_dev *
 spdk_bs_create_blob_bs_dev(struct spdk_blob *blob)
 {

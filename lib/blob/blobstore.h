@@ -60,7 +60,8 @@ struct spdk_xattr {
 	TAILQ_ENTRY(spdk_xattr)	link;
 };
 
-// zhou: each blob on disk structure
+// zhou: info about the blob, which could be parsed from on disk metadata.
+//
 //      "This is a per blob structure, included the struct spdk_blob struct that
 //       actually defines the blob itself. It has the specific information on size
 //       and makeup of the blob (ie how many clusters are allocated for this blob
@@ -73,6 +74,9 @@ struct spdk_blob_mut_data {
 	/* Number of data clusters in the blob */
 	uint64_t	num_clusters;
 
+
+    // zhou: when sector size is 512 Bytes, uint32_t is not big enough to
+    //       hold all number of sectors when disk size is greater than 2T.
 	/* Array LBAs that are the beginning of a cluster, in
 	 * the order they appear in the blob.
 	 */
@@ -83,9 +87,11 @@ struct spdk_blob_mut_data {
 	 */
 	size_t		cluster_array_size;
 
+
 	/* Number of metadata pages */
 	uint32_t	num_pages;
 
+    // zhou:
 	/* Array of page offsets into the metadata region, in
 	 * the order of the metadata page sequence.
 	 */
@@ -103,6 +109,7 @@ enum spdk_blob_state {
 	 */
 	SPDK_BLOB_STATE_CLEAN,
 
+    // zhou: reading from disk, nothing could be done.
 	/* The in-memory state being synchronized with the on-disk
 	 * blob state. */
 	SPDK_BLOB_STATE_LOADING,
@@ -225,7 +232,7 @@ struct spdk_blob_store {
 	bool                            clean;
 };
 
-// zhou:
+// zhou: context with IO channel.
 struct spdk_bs_channel {
 	struct spdk_bs_request_set	*req_mem;
 

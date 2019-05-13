@@ -190,8 +190,12 @@ _spdk_blob_alloc(struct spdk_blob_store *bs, spdk_blob_id id)
 
 	blob->parent_id = SPDK_BLOBID_INVALID;
 
+    // zhou: dirty need to flush to disk.
 	blob->state = SPDK_BLOB_STATE_DIRTY;
+
 	blob->active.num_pages = 1;
+    // zhou: will be realloc() each time when metapage number changed.
+    //       When blob firstly created, array size is 1.
 	blob->active.pages = calloc(1, sizeof(*blob->active.pages));
 	if (!blob->active.pages) {
 		free(blob);
@@ -833,6 +837,7 @@ _spdk_blob_serialize_xattrs(const struct spdk_blob *blob,
 	return 0;
 }
 
+// zhou: README, what's the serialize?
 static int
 _spdk_blob_serialize(const struct spdk_blob *blob, struct spdk_blob_md_page **pages,
 		     uint32_t *page_count)
@@ -4271,6 +4276,7 @@ _spdk_bs_create_blob(struct spdk_blob_store *bs,
 		spdk_blob_opts_init(&opts_default);
 		opts = &opts_default;
 	}
+
 	if (!internal_xattrs) {
 		_spdk_blob_xattrs_init(&internal_xattrs_default);
 		internal_xattrs = &internal_xattrs_default;
@@ -4301,6 +4307,7 @@ _spdk_bs_create_blob(struct spdk_blob_store *bs,
 		return;
 	}
 
+    // zhou: client's callback function
 	cpl.type = SPDK_BS_CPL_TYPE_BLOBID;
 	cpl.u.blobid.cb_fn = cb_fn;
 	cpl.u.blobid.cb_arg = cb_arg;

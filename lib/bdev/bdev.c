@@ -2649,12 +2649,14 @@ spdk_bdev_read_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
 	bdev_io->internal.ch = channel;
 	bdev_io->internal.desc = desc;
 	bdev_io->type = SPDK_BDEV_IO_TYPE_READ;
+
 	bdev_io->u.bdev.iovs = &bdev_io->iov;
 	bdev_io->u.bdev.iovs[0].iov_base = buf;
 	bdev_io->u.bdev.iovs[0].iov_len = num_blocks * bdev->blocklen;
 	bdev_io->u.bdev.iovcnt = 1;
 	bdev_io->u.bdev.num_blocks = num_blocks;
 	bdev_io->u.bdev.offset_blocks = offset_blocks;
+
 	spdk_bdev_io_init(bdev_io, bdev, cb_arg, cb);
 
 	spdk_bdev_io_submit(bdev_io);
