@@ -177,6 +177,9 @@ spdk_bs_sequence_read_dev(spdk_bs_sequence_t *seq, void *payload,
 	channel->dev->read(channel->dev, channel->dev_channel, payload, lba, lba_count, &set->cb_args);
 }
 
+// zhou: "payload",   data in memory;
+//       "lba",       write target begining, block/sector Index;
+//       "lba_count", number of block/sectgor.
 void
 spdk_bs_sequence_write_dev(spdk_bs_sequence_t *seq, void *payload,
 			   uint64_t lba, uint32_t lba_count,
@@ -307,7 +310,7 @@ spdk_bs_user_op_sequence_finish(void *cb_arg, int bserrno)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// zhou: each Request in Batch Request Set will be invoke this function when it completed.
+// zhou: will be invoked when completion of each one task in Batch Request Set.
 static void
 spdk_bs_batch_completion(struct spdk_io_channel *_channel,
 			 void *cb_arg, int bserrno)
@@ -319,12 +322,13 @@ spdk_bs_batch_completion(struct spdk_io_channel *_channel,
 		set->bserrno = bserrno;
 	}
 
+    // zhou: "batch_closed" indicate whether client want add more task into batch.
 	if (set->u.batch.outstanding_ops == 0 && set->u.batch.batch_closed) {
 
         // zhou: once "u.batch.cb_fn" be set, which means this Request Set was
-        //       converted from Sequence Mode.
+        //       converted from Sequence Mode. Because Sequence Mode need submit
+        //       next IO request in completion.
 		if (set->u.batch.cb_fn) {
-            // zhou: ???
 			set->cb_args.cb_fn = spdk_bs_sequence_completion;
 
 			set->u.batch.cb_fn((spdk_bs_sequence_t *)set, set->u.batch.cb_arg, bserrno);
@@ -369,7 +373,7 @@ spdk_bs_batch_open(struct spdk_io_channel *_channel,
 	return (spdk_bs_batch_t *)set;
 }
 
-// zhou: README,
+// zhou: read data, used in batch
 void
 spdk_bs_batch_read_bs_dev(spdk_bs_batch_t *batch, struct spdk_bs_dev *bs_dev,
 			  void *payload, uint64_t lba, uint32_t lba_count)
@@ -385,6 +389,7 @@ spdk_bs_batch_read_bs_dev(spdk_bs_batch_t *batch, struct spdk_bs_dev *bs_dev,
 	bs_dev->read(bs_dev, spdk_io_channel_from_ctx(channel), payload, lba, lba_count, &set->cb_args);
 }
 
+// zhou: read data, used in batch
 void
 spdk_bs_batch_read_dev(spdk_bs_batch_t *batch, void *payload,
 		       uint64_t lba, uint32_t lba_count)
@@ -400,6 +405,7 @@ spdk_bs_batch_read_dev(spdk_bs_batch_t *batch, void *payload,
 	channel->dev->read(channel->dev, channel->dev_channel, payload, lba, lba_count, &set->cb_args);
 }
 
+// zhou: write data, used in batch
 void
 spdk_bs_batch_write_dev(spdk_bs_batch_t *batch, void *payload,
 			uint64_t lba, uint32_t lba_count)
@@ -415,7 +421,7 @@ spdk_bs_batch_write_dev(spdk_bs_batch_t *batch, void *payload,
 			    &set->cb_args);
 }
 
-// zhou: unmap all other sectors
+// zhou: unmap all other sectors, used in batch
 void
 spdk_bs_batch_unmap_dev(spdk_bs_batch_t *batch,
 			uint64_t lba, uint32_t lba_count)
@@ -431,7 +437,7 @@ spdk_bs_batch_unmap_dev(spdk_bs_batch_t *batch,
 			    &set->cb_args);
 }
 
-// zhou:
+// zhou: write zero, used in batch
 void
 spdk_bs_batch_write_zeroes_dev(spdk_bs_batch_t *batch,
 			       uint64_t lba, uint32_t lba_count)
@@ -447,7 +453,7 @@ spdk_bs_batch_write_zeroes_dev(spdk_bs_batch_t *batch,
 				   &set->cb_args);
 }
 
-// zhou:
+// zhou: no more task will be added into batch.
 void
 spdk_bs_batch_close(spdk_bs_batch_t *batch)
 {
@@ -455,6 +461,7 @@ spdk_bs_batch_close(spdk_bs_batch_t *batch)
 
 	set->u.batch.batch_closed = 1;
 
+    // zhou: at this time, may be all previously added tasks have been completed.
 	if (set->u.batch.outstanding_ops == 0) {
         // zhou: once "u.batch.cb_fn" be set, which means this Request Set was
         //       converted from Sequence Mode.
@@ -481,6 +488,9 @@ spdk_bs_sequence_to_batch(spdk_bs_sequence_t *seq, spdk_bs_sequence_cpl cb_fn, v
 {
 	struct spdk_bs_request_set *set = (struct spdk_bs_request_set *)seq;
 
+    // zhou: when all tasks in batch completed, and batch it self closed by client,
+    //       this callback function works as completion to submit next request in
+    //       sequence.
 	set->u.batch.cb_fn = cb_fn;
 	set->u.batch.cb_arg = cb_arg;
 	set->u.batch.outstanding_ops = 0;
@@ -491,6 +501,7 @@ spdk_bs_sequence_to_batch(spdk_bs_sequence_t *seq, spdk_bs_sequence_cpl cb_fn, v
 	return set;
 }
 
+// zhou: no one use it.
 spdk_bs_sequence_t *
 spdk_bs_batch_to_sequence(spdk_bs_batch_t *batch)
 {

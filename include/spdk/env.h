@@ -49,6 +49,7 @@ extern "C" {
 #define SPDK_ENV_SOCKET_ID_ANY	(-1)
 #define SPDK_ENV_LCORE_ID_ANY	(UINT32_MAX)
 
+// zhou: malloc flags seems not be used.
 /**
  * Memory is dma-safe.
  */

@@ -81,7 +81,7 @@ struct spdk_blob_mut_data {
 	 * the order they appear in the blob.
 	 */
 	uint64_t	*clusters;
-
+    // zhou: "clusters" array szie
 	/* The size of the clusters array. This is greater than or
 	 * equal to 'num_clusters'.
 	 */
@@ -206,11 +206,13 @@ struct spdk_blob_store {
 
     // zhou: bitmap for meta-data pages
 	struct spdk_bit_array		*used_md_pages;
-    // zhou: bitmap for cluster.
+    // zhou: bitmap for clusters.
 	struct spdk_bit_array		*used_clusters;
     // zhou: bitmap for blob ID
 	struct spdk_bit_array		*used_blobids;
 
+    // zhou: used to protect clusters allocation. Why we need the this lock,
+    //       all metadata should be done in metadata thread.
 	pthread_mutex_t			used_clusters_mutex;
 
 	uint32_t			cluster_sz;
@@ -378,7 +380,7 @@ struct spdk_bs_super_block {
     // zhou: lenth of "struct spdk_bs_super_block"
 	uint32_t        length;
 
-    // zhou: graceful shutdown.
+    // zhou: graceful shutdown, will be changed when create/resize blob.
 	uint32_t	clean; /* If there was a clean shutdown, this is 1. */
 
     // zhou: ???
@@ -389,10 +391,12 @@ struct spdk_bs_super_block {
     // zhou: the Page 0 is used by Super Block.
     //       The Page begins at used_page_mask_start, for Used Page Bitmap.
 	uint32_t	used_page_mask_start; /* Offset from beginning of disk, in pages */
+    // zhou: how many Pages used by "used page mask"
 	uint32_t	used_page_mask_len; /* Count, in pages */
 
     // zhou: The Page begins at used_cluster_mask_start, for Used Cluster Bitmap.
 	uint32_t	used_cluster_mask_start; /* Offset from beginning of disk, in pages */
+    // zhou: how many Pages used by "used cluster mask"
 	uint32_t	used_cluster_mask_len; /* Count, in pages */
 
     // zhou: The Page begins at md_start, for meta-date page.
@@ -404,6 +408,7 @@ struct spdk_bs_super_block {
 
     // zhou: The Page begins at used_blobid_mask_start, for Used Blob ID Bitmap.
 	uint32_t	used_blobid_mask_start; /* Offset from beginning of disk, in pages */
+    // zhou: how many Pages used by "used blobid mask"
 	uint32_t	used_blobid_mask_len; /* Count, in pages */
 
 	uint64_t        size; /* size of blobstore in bytes */
@@ -440,6 +445,8 @@ struct spdk_bs_dev *spdk_bs_create_blob_bs_dev(struct spdk_blob *blob);
  *        lba certainly isn't the right lba that corresponds to a page offset
  *        for a particular blob.
  */
+
+// zhou: convert to number of block/sector.
 static inline uint64_t
 _spdk_bs_byte_to_lba(struct spdk_blob_store *bs, uint64_t length)
 {

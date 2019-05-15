@@ -52,6 +52,8 @@ enum spdk_blob_op_type;
 
 struct spdk_bs_request_set;
 
+// zhou: sequence, batch are same object.
+
 /* Use a sequence to submit a set of requests serially */
 typedef struct spdk_bs_request_set spdk_bs_sequence_t;
 
@@ -125,7 +127,9 @@ struct spdk_bs_request_set {
     // zhou: used by "cb_args"
 	int                     bserrno;
 	struct spdk_bs_channel		*channel;
-    // zhou: Blobstore device completion callback, arguments and IO channel.
+
+    // zhou: Blobstore backing device (bdev) need this type of parameter as
+    //       completion callback, arguments and IO channel.
 	struct spdk_bs_dev_cb_args	cb_args;
 
 	union {
