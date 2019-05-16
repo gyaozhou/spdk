@@ -137,6 +137,7 @@ struct spdk_blob {
 	spdk_blob_id	id;
 	spdk_blob_id	parent_id;
 
+    // zhou:
 	enum spdk_blob_state		state;
 
 	/* Two copies of the mutable data. One is a version
@@ -231,6 +232,7 @@ struct spdk_blob_store {
 	TAILQ_HEAD(, spdk_blob)		blobs;
 	TAILQ_HEAD(, spdk_blob_list)	snapshots;
 
+    // zhou:
 	bool                            clean;
 };
 
@@ -295,6 +297,7 @@ struct spdk_bs_md_mask {
 #define SPDK_MD_DESCRIPTOR_TYPE_FLAGS 3
 #define SPDK_MD_DESCRIPTOR_TYPE_XATTR_INTERNAL 4
 
+// zhou: on disk structure, fill in "spdk_blob_md_page.descriptors".
 struct spdk_blob_md_descriptor_xattr {
 	uint8_t		type;
 	uint32_t	length;
@@ -306,6 +309,10 @@ struct spdk_blob_md_descriptor_xattr {
 	/* String name immediately followed by string value. */
 };
 
+// zhou: on disk structure, fill in "spdk_blob_md_page.descriptors".
+//       used to describe allocated clusters info. Once there is no enough room
+//       of first Blob Metadata Page, then we need allocate more Blob Metadata Page
+//       to hold it.
 struct spdk_blob_md_descriptor_extent {
 	uint8_t		type;
 	uint32_t	length;
@@ -324,8 +331,11 @@ struct spdk_blob_md_descriptor_extent {
 #define SPDK_BLOB_DATA_RO_FLAGS_MASK	SPDK_BLOB_READ_ONLY
 #define SPDK_BLOB_MD_RO_FLAGS_MASK	0
 
+// zhou: on disk structure, fill in "spdk_blob_md_page.descriptors".
+//       Not only this struct will be fill in it, so "type" and "length" is important.
 struct spdk_blob_md_descriptor_flags {
 	uint8_t		type;
+    // zhou: length is important, which used to indicate border.
 	uint32_t	length;
 
 	/*
@@ -354,20 +364,29 @@ struct spdk_blob_md_descriptor {
 
 #define SPDK_INVALID_MD_PAGE UINT32_MAX
 
+// zhou: 4 KB, on disk structure
 struct spdk_blob_md_page {
+    // zhou: this Metadata Page belongs to which Blob.
+    //       By this field and "next" field, we can reconstruct all metadata info
+    //       when system loading.
 	spdk_blob_id     id;
 
+    // zhou: sequence num of Metadata Page of this Blob.
 	uint32_t        sequence_num;
 	uint32_t	reserved0;
 
 	/* Descriptors here */
 	uint8_t		descriptors[4072];
 
+    // zhou: because of this is on disk structure, no pointer to reference next
+    //       Meta Page. So use Page ID to reference it.
 	uint32_t	next;
+
+    // zhou: protect metadata page content.
 	uint32_t	crc;
 };
 
-// zhou: 4 KByte
+// zhou: 4 KB
 #define SPDK_BS_PAGE_SIZE 0x1000
 SPDK_STATIC_ASSERT(SPDK_BS_PAGE_SIZE == sizeof(struct spdk_blob_md_page), "Invalid md page size");
 
@@ -411,6 +430,7 @@ struct spdk_bs_super_block {
     // zhou: how many Pages used by "used blobid mask"
 	uint32_t	used_blobid_mask_len; /* Count, in pages */
 
+    // zhou: blobstore size
 	uint64_t        size; /* size of blobstore in bytes */
 	uint32_t        io_unit_size; /* Size of io unit in bytes */
 
@@ -446,7 +466,7 @@ struct spdk_bs_dev *spdk_bs_create_blob_bs_dev(struct spdk_blob *blob);
  *        for a particular blob.
  */
 
-// zhou: convert to number of block/sector.
+// zhou: convert bytes to number of block/sector.
 static inline uint64_t
 _spdk_bs_byte_to_lba(struct spdk_blob_store *bs, uint64_t length)
 {
@@ -463,9 +483,9 @@ _spdk_bs_dev_byte_to_lba(struct spdk_bs_dev *bs_dev, uint64_t length)
 	return length / bs_dev->blocklen;
 }
 
-// zhou: convert to sector/block
+// zhou: convert page index to sector/block index
 static inline uint64_t
-_spdk_bs_page_to_lba(struct spdk_blob_store *bs, uint64_t page)
+[_spdk_bs_page_to_lba(struct spdk_blob_store *bs, uint64_t page)
 {
 	return page * SPDK_BS_PAGE_SIZE / bs->dev->blocklen;
 }

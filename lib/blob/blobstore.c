@@ -328,7 +328,7 @@ _spdk_blob_freeze_io(struct spdk_blob *blob, spdk_blob_op_complete cb_fn, void *
 	} else {
         // zhou: all blob metadata related operations should be executed on
         //       metadata thread only.
-        //       Flag "locked_operation_in_progress" will block most of the parallal
+        //       Flag "locked_operation_in_progress" will block most of the parallel
         //       operations.
         //       Only Snapshot and Resize will freeze (original blob) IO. And all these
         //       operations will set "locked_operation_in_progress". And reset it after,
@@ -632,6 +632,7 @@ _spdk_blob_parse(const struct spdk_blob_md_page *pages, uint32_t page_count,
 	return 0;
 }
 
+// zhou: allocate DMA memory for a new Blob Metadata Pages.
 static int
 _spdk_blob_serialize_add_page(const struct spdk_blob *blob,
 			      struct spdk_blob_md_page **pages,
@@ -645,28 +646,38 @@ _spdk_blob_serialize_add_page(const struct spdk_blob *blob,
 
 	if (*page_count == 0) {
 		assert(*pages == NULL);
+
+        // zhou: allocate first Blob Metadata Page.
 		*page_count = 1;
 		*pages = spdk_malloc(SPDK_BS_PAGE_SIZE, SPDK_BS_PAGE_SIZE,
 				     NULL, SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
+
 	} else {
 		assert(*pages != NULL);
+
+        // zhou: expand Blob Metadata Page.
 		(*page_count)++;
 		*pages = spdk_realloc(*pages,
 				      SPDK_BS_PAGE_SIZE * (*page_count),
 				      SPDK_BS_PAGE_SIZE);
 	}
 
+    // zhou: DMA allocation failure.
 	if (*pages == NULL) {
 		*page_count = 0;
 		*last_page = NULL;
 		return -ENOMEM;
 	}
 
+    // zhou: memset just allocated Page.
 	page = &(*pages)[*page_count - 1];
 	memset(page, 0, sizeof(*page));
+
+    // zhou: fill on disk structure of this Blob Metadata Page.
 	page->id = blob->id;
 	page->sequence_num = *page_count - 1;
 	page->next = SPDK_INVALID_MD_PAGE;
+
 	*last_page = page;
 
 	return 0;
@@ -709,6 +720,7 @@ _spdk_blob_serialize_xattr(const struct spdk_xattr *xattr,
 	return 0;
 }
 
+// zhou: fill Blob's clusters information in it's Metadata Pages.
 static void
 _spdk_blob_serialize_extent(const struct spdk_blob *blob,
 			    uint64_t start_cluster, uint64_t *next_cluster,
@@ -782,6 +794,7 @@ _spdk_blob_serialize_flags(const struct spdk_blob *blob,
 	assert(*buf_sz >= sizeof(*desc));
 
 	desc = (struct spdk_blob_md_descriptor_flags *)buf;
+
 	desc->type = SPDK_MD_DESCRIPTOR_TYPE_FLAGS;
 	desc->length = sizeof(*desc) - sizeof(struct spdk_blob_md_descriptor);
 	desc->invalid_flags = blob->invalid_flags;
@@ -843,12 +856,15 @@ _spdk_blob_serialize_xattrs(const struct spdk_blob *blob,
 	return 0;
 }
 
-// zhou: Generate the new metadata. README, what's the serialize?
+// zhou: Generate metadata page contents according to "blob".
+//       Allocate DMA memory and assign to "pages" and "page_count"
 static int
 _spdk_blob_serialize(const struct spdk_blob *blob, struct spdk_blob_md_page **pages,
 		     uint32_t *page_count)
 {
+    // zhou: iterator for add Page Metadata Page one by one.
 	struct spdk_blob_md_page		*cur_page;
+
 	int					rc;
 	uint8_t					*buf;
 	size_t					remaining_sz;
@@ -862,6 +878,7 @@ _spdk_blob_serialize(const struct spdk_blob *blob, struct spdk_blob_md_page **pa
 	*pages = NULL;
 	*page_count = 0;
 
+    // zhou: add the first Metadata Page for this Blob.
 	/* A blob always has at least 1 page, even if it has no descriptors */
 	rc = _spdk_blob_serialize_add_page(blob, pages, page_count, &cur_page);
 	if (rc < 0) {
@@ -871,10 +888,12 @@ _spdk_blob_serialize(const struct spdk_blob *blob, struct spdk_blob_md_page **pa
 	buf = (uint8_t *)cur_page->descriptors;
 	remaining_sz = sizeof(cur_page->descriptors);
 
+    // zhou: fill in "spdk_blob_md_page.descriptors"
 	/* Serialize flags */
 	_spdk_blob_serialize_flags(blob, buf, &remaining_sz);
 	buf += sizeof(struct spdk_blob_md_descriptor_flags);
 
+    // zhou: fill in "spdk_blob_md_page.descriptors"
 	/* Serialize xattrs */
 	rc = _spdk_blob_serialize_xattrs(blob, &blob->xattrs, false,
 					 pages, cur_page, page_count, &buf, &remaining_sz);
@@ -882,6 +901,7 @@ _spdk_blob_serialize(const struct spdk_blob *blob, struct spdk_blob_md_page **pa
 		return rc;
 	}
 
+    // zhou: fill in "spdk_blob_md_page.descriptors"
 	/* Serialize internal xattrs */
 	rc = _spdk_blob_serialize_xattrs(blob, &blob->xattrs_internal, true,
 					 pages, cur_page, page_count, &buf, &remaining_sz);
@@ -895,10 +915,12 @@ _spdk_blob_serialize(const struct spdk_blob *blob, struct spdk_blob_md_page **pa
 		_spdk_blob_serialize_extent(blob, last_cluster, &last_cluster,
 					    buf, remaining_sz);
 
+        // zhou: the Blob Metadata Page number is enough to hold all allocated clusters.
 		if (last_cluster == blob->active.num_clusters) {
 			break;
 		}
 
+        // zhou: otherwise, expand more Metadata Page to hold cluster info.
 		rc = _spdk_blob_serialize_add_page(blob, pages, page_count,
 						   &cur_page);
 		if (rc < 0) {
@@ -911,6 +933,9 @@ _spdk_blob_serialize(const struct spdk_blob *blob, struct spdk_blob_md_page **pa
 
 	return 0;
 }
+
+////////////////////////////////////////////////////////////////////////////////
+// zhou: START spdk_blob_load()
 
 struct spdk_blob_load_ctx {
 	struct spdk_blob		*blob;
@@ -1113,14 +1138,21 @@ _spdk_blob_load(spdk_bs_sequence_t *seq, struct spdk_blob *blob,
 				  _spdk_blob_load_cpl, ctx);
 }
 
+// zhou: END spdk_blob_load()
+////////////////////////////////////////////////////////////////////////////////
+// zhou: START spdk_blob_persist()
+
 // zhou: used as blob persist callback function argument.
 struct spdk_blob_persist_ctx {
+    // zhou: blob which we are handling
 	struct spdk_blob		*blob;
 
+    // zhou: DMA memory, to be write to Page 0 on disk
 	struct spdk_bs_super_block	*super;
-
+    // zhou: DMA memory, to be write to one metadata Pages on disk.
 	struct spdk_blob_md_page	*pages;
 
+    // zhou:
 	uint64_t			idx;
 
 	spdk_bs_sequence_t		*seq;
@@ -1140,6 +1172,7 @@ spdk_bs_batch_clear_dev(struct spdk_blob_persist_ctx *ctx, spdk_bs_batch_t *batc
 	}
 }
 
+// zhou: Blob Metadata Page have been wroten to disk.
 static void
 _spdk_blob_persist_complete(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
 {
@@ -1275,10 +1308,16 @@ _spdk_blob_persist_zero_pages_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bse
 	_spdk_blob_persist_clear_clusters(seq, ctx, 0);
 }
 
+// zhou: overwrite blob metadata pages as 0 except the first metadata page.
+//       The first metadata page of this blob will only be overwrite as 0
+//       in case of blob was deleted.
+//       Pay attention to "blob->clean.", it represent situation on disk.
+//       "blob->active.", still in memory.
 static void
 _spdk_blob_persist_zero_pages(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
 {
 	struct spdk_blob_persist_ctx	*ctx = cb_arg;
+
 	struct spdk_blob		*blob = ctx->blob;
 	struct spdk_blob_store		*bs = blob->bs;
 	uint64_t			lba;
@@ -1288,6 +1327,7 @@ _spdk_blob_persist_zero_pages(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno
 
 	batch = spdk_bs_sequence_to_batch(seq, _spdk_blob_persist_zero_pages_cpl, ctx);
 
+    // zhou: block/sector number per page.
 	lba_count = _spdk_bs_byte_to_lba(bs, SPDK_BS_PAGE_SIZE);
 
 	/* This loop starts at 1 because the first page is special and handled
@@ -1295,8 +1335,9 @@ _spdk_blob_persist_zero_pages(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno
 	 * so any pages in the clean list must be zeroed.
 	 */
 	for (i = 1; i < blob->clean.num_pages; i++) {
+        // zhou: each this blob metadata page, except the first one.
 		lba = _spdk_bs_page_to_lba(bs, bs->md_start + blob->clean.pages[i]);
-
+        // zhou: overwrite as 0, each page writing in parallel in batch
 		spdk_bs_batch_write_zeroes_dev(batch, lba, lba_count);
 	}
 
@@ -1314,6 +1355,7 @@ _spdk_blob_persist_zero_pages(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno
 	spdk_bs_batch_close(batch);
 }
 
+// zhou: write one Blob Metadata Page from DMA memory to disk.
 static void
 _spdk_blob_persist_write_page_root(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
 {
@@ -1340,6 +1382,7 @@ _spdk_blob_persist_write_page_root(spdk_bs_sequence_t *seq, void *cb_arg, int bs
 				   _spdk_blob_persist_zero_pages, ctx);
 }
 
+// zhou: write all Blob Metadata Pages from DMA memory "ctx->pages" to disk.
 static void
 _spdk_blob_persist_write_page_chain(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
 {
@@ -1459,7 +1502,7 @@ _spdk_blob_resize(struct spdk_blob *blob, uint64_t sz)
 	return 0;
 }
 
-// zhou: README,
+// zhou: start of write blob metadata to disk.
 static void
 _spdk_blob_persist_start(struct spdk_blob_persist_ctx *ctx)
 {
@@ -1471,17 +1514,25 @@ _spdk_blob_persist_start(struct spdk_blob_persist_ctx *ctx)
 	void *tmp;
 	int rc;
 
+    // zhou: blob has just been deleted.
 	if (blob->active.num_pages == 0) {
+
 		/* This is the signal that the blob should be deleted.
 		 * Immediately jump to the clean up routine. */
 		assert(blob->clean.num_pages > 0);
+
 		ctx->idx = blob->clean.num_pages - 1;
 		blob->state = SPDK_BLOB_STATE_CLEAN;
+
+        // zhou: overwrite all metapage of this blob as 0.
 		_spdk_blob_persist_zero_pages(seq, ctx, 0);
+
+        // zhou: nothing else need to do in case of blob deletion.
 		return;
 
 	}
 
+    // zhou: generate new metadata, referenced by "ctx->pages"
 	/* Generate the new metadata */
 	rc = _spdk_blob_serialize(blob, &ctx->pages, &blob->active.num_pages);
 	if (rc < 0) {
@@ -1507,7 +1558,9 @@ _spdk_blob_persist_start(struct spdk_blob_persist_ctx *ctx)
 
 	/* Note that this loop starts at one. The first page location is fixed by the blobid. */
 	for (i = 1; i < blob->active.num_pages; i++) {
+
 		page_num = spdk_bit_array_find_first_clear(bs->used_md_pages, page_num);
+
 		if (page_num == UINT32_MAX) {
 			_spdk_blob_persist_complete(seq, ctx, -ENOMEM);
 			return;
@@ -1517,20 +1570,26 @@ _spdk_blob_persist_start(struct spdk_blob_persist_ctx *ctx)
 
 	page_num = 0;
 	blob->active.pages[0] = _spdk_bs_blobid_to_page(blob->id);
+
 	for (i = 1; i < blob->active.num_pages; i++) {
 		page_num = spdk_bit_array_find_first_clear(bs->used_md_pages, page_num);
 		ctx->pages[i - 1].next = page_num;
+
 		/* Now that previous metadata page is complete, calculate the crc for it. */
 		ctx->pages[i - 1].crc = _spdk_blob_md_page_calc_crc(&ctx->pages[i - 1]);
 		blob->active.pages[i] = page_num;
 		spdk_bit_array_set(bs->used_md_pages, page_num);
+
 		SPDK_DEBUGLOG(SPDK_LOG_BLOB, "Claiming page %u for blob %lu\n", page_num, blob->id);
 		page_num++;
 	}
 	ctx->pages[i - 1].crc = _spdk_blob_md_page_calc_crc(&ctx->pages[i - 1]);
+
 	/* Start writing the metadata from last page to first */
 	ctx->idx = blob->active.num_pages - 1;
 	blob->state = SPDK_BLOB_STATE_CLEAN;
+
+    // zhou: write all Blob Metadat Pages in DMA memory "ctx->pages" to disk.
 	_spdk_blob_persist_write_page_chain(seq, ctx, 0);
 }
 
@@ -1568,7 +1627,7 @@ _spdk_blob_persist_dirty(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
 	_spdk_bs_write_super(seq, ctx->blob->bs, ctx->super, _spdk_blob_persist_dirty_cpl, ctx);
 }
 
-// zhou: README,
+// zhou: write a blob related metadata to disk
 /* Write a blob to disk */
 static void
 _spdk_blob_persist(spdk_bs_sequence_t *seq, struct spdk_blob *blob,
@@ -1588,13 +1647,16 @@ _spdk_blob_persist(spdk_bs_sequence_t *seq, struct spdk_blob *blob,
 		cb_fn(seq, cb_arg, -ENOMEM);
 		return;
 	}
+
 	ctx->blob = blob;
 	ctx->seq = seq;
+
 	ctx->cb_fn = cb_fn;
 	ctx->cb_arg = cb_arg;
 
+    // zhou: Just load Super Block from disk ??? why we read again???
 	if (blob->bs->clean) {
-        // zhou: Allocate DMA memory for the super block writing.
+        // zhou: Allocate DMA memory for the super block reading
 		ctx->super = spdk_zmalloc(sizeof(*ctx->super), 0x1000, NULL,
 					  SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
 		if (!ctx->super) {
@@ -1603,6 +1665,8 @@ _spdk_blob_persist(spdk_bs_sequence_t *seq, struct spdk_blob *blob,
 			return;
 		}
 
+        // zhou: _spdk_blob_persist_start() will be invoked when
+        //       _spdk_blob_persist_dirty() completed.
 		spdk_bs_sequence_read_dev(seq, ctx->super, _spdk_bs_page_to_lba(blob->bs, 0),
 					  _spdk_bs_byte_to_lba(blob->bs, sizeof(*ctx->super)),
 					  _spdk_blob_persist_dirty, ctx);
@@ -1612,6 +1676,10 @@ _spdk_blob_persist(spdk_bs_sequence_t *seq, struct spdk_blob *blob,
 		_spdk_blob_persist_start(ctx);
 	}
 }
+
+// zhou: END spdk_blob_persist()
+////////////////////////////////////////////////////////////////////////////////
+// zhou: START spdk_blob_copy()
 
 struct spdk_blob_copy_cluster_ctx {
 	struct spdk_blob *blob;
@@ -1788,6 +1856,11 @@ _spdk_bs_allocate_and_copy_cluster(struct spdk_blob *blob,
 	}
 }
 
+
+// zhou: END spdk_blob_copy()
+////////////////////////////////////////////////////////////////////////////////
+// zhou: START spdk_request_submit
+
 static void
 _spdk_blob_calculate_lba_and_lba_count(struct spdk_blob *blob, uint64_t io_unit, uint64_t length,
 				       uint64_t *lba,	uint32_t *lba_count)
@@ -1906,7 +1979,7 @@ _spdk_blob_request_submit_op_split(struct spdk_io_channel *ch, struct spdk_blob 
 	_spdk_blob_request_submit_op_split_next(ctx, 0);
 }
 
-// zhou: README,
+// zhou:
 static void
 _spdk_blob_request_submit_op_single(struct spdk_io_channel *_ch, struct spdk_blob *blob,
 				    void *payload, uint64_t offset, uint64_t length,
@@ -2048,6 +2121,10 @@ _spdk_blob_request_submit_op(struct spdk_blob *blob, struct spdk_io_channel *_ch
 						   cb_fn, cb_arg, op_type);
 	}
 }
+
+// zhou: END spdk rquest submit
+////////////////////////////////////////////////////////////////////////////////
+// zhou: START spdk iov request
 
 struct rw_iov_ctx {
 	struct spdk_blob *blob;
@@ -2269,6 +2346,10 @@ _spdk_blob_request_submit_rw_iov(struct spdk_blob *blob, struct spdk_io_channel 
 		_spdk_rw_iov_split_next(ctx, 0);
 	}
 }
+
+// zhou: END spdk iov request
+////////////////////////////////////////////////////////////////////////////////
+// zhou: START spdk blob create
 
 static struct spdk_blob *
 _spdk_blob_lookup(struct spdk_blob_store *bs, spdk_blob_id blobid)
@@ -2768,6 +2849,10 @@ _spdk_bs_write_used_blobids(spdk_bs_sequence_t *seq, void *arg, spdk_bs_sequence
 	lba_count = _spdk_bs_page_to_lba(ctx->bs, ctx->super->used_blobid_mask_len);
 	spdk_bs_sequence_write_dev(seq, ctx->mask, lba, lba_count, cb_fn, arg);
 }
+
+// zhou: END
+////////////////////////////////////////////////////////////////////////////////
+// zhou: START bs load
 
 static void
 _spdk_bs_load_iter(void *arg, struct spdk_blob *blob, int bserrno)
@@ -3323,7 +3408,7 @@ spdk_bs_load(struct spdk_bs_dev *dev, struct spdk_bs_opts *o,
 }
 
 /* END spdk_bs_load */
-
+////////////////////////////////////////////////////////////////////////////////
 /* START spdk_bs_dump */
 
 struct spdk_bs_dump_ctx {
@@ -4239,6 +4324,8 @@ _spdk_bs_create_blob_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
 {
 	struct spdk_blob *blob = cb_arg;
 
+    // zhou: release "struct spdk_blob" object, since client only need take care
+    //       of Blob ID.
 	_spdk_blob_free(blob);
 
 	spdk_bs_sequence_finish(seq, bserrno);
@@ -4370,7 +4457,7 @@ _spdk_bs_create_blob(struct spdk_blob_store *bs,
 		return;
 	}
 
-    // zhou: last step of create a blob, write a blob to disk
+    // zhou: finnal step of create a blob, write a blob to disk
 	_spdk_blob_persist(seq, blob, _spdk_bs_create_blob_cpl, blob);
 }
 
@@ -4511,7 +4598,7 @@ _spdk_bs_clone_snapshot_newblob_cleanup(void *cb_arg, int bserrno)
 }
 
 /* END blob_cleanup */
-
+////////////////////////////////////////////////////////////////////////////////
 /* START spdk_bs_create_snapshot */
 
 static void
@@ -4771,8 +4858,9 @@ void spdk_bs_create_snapshot(struct spdk_blob_store *bs, spdk_blob_id blobid,
 
 	spdk_bs_open_blob(bs, ctx->original.id, _spdk_bs_snapshot_origblob_open_cpl, ctx);
 }
-/* END spdk_bs_create_snapshot */
 
+/* END spdk_bs_create_snapshot */
+////////////////////////////////////////////////////////////////////////////////
 /* START spdk_bs_create_clone */
 
 static void
@@ -5092,9 +5180,11 @@ spdk_bs_blob_decouple_parent(struct spdk_blob_store *bs, struct spdk_io_channel 
 {
 	_spdk_bs_inflate_blob(bs, channel, blobid, false, cb_fn, cb_arg);
 }
+
 /* END spdk_bs_inflate_blob */
 ////////////////////////////////////////////////////////////////////////////////
 /* START spdk_blob_resize */
+
 struct spdk_bs_resize_ctx {
 	spdk_blob_op_complete cb_fn;
 	void *cb_arg;
@@ -5352,7 +5442,7 @@ spdk_bs_delete_blob(struct spdk_blob_store *bs, spdk_blob_id blobid,
 }
 
 /* END spdk_bs_delete_blob */
-
+////////////////////////////////////////////////////////////////////////////////
 /* START spdk_bs_open_blob */
 
 static void
@@ -5374,7 +5464,7 @@ _spdk_bs_open_blob_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
 	spdk_bs_sequence_finish(seq, bserrno);
 }
 
-// zhou: README,
+// zhou: loading Blob Metadata Pages from disk.
 static void _spdk_bs_open_blob(struct spdk_blob_store *bs, spdk_blob_id blobid,
 			       struct spdk_blob_open_opts *opts, spdk_blob_op_with_handle_complete cb_fn, void *cb_arg)
 {
@@ -5429,7 +5519,6 @@ static void _spdk_bs_open_blob(struct spdk_blob_store *bs, spdk_blob_id blobid,
 	_spdk_blob_load(seq, blob, _spdk_bs_open_blob_cpl, blob);
 }
 
-// zhou: README,
 void spdk_bs_open_blob(struct spdk_blob_store *bs, spdk_blob_id blobid,
 		       spdk_blob_op_with_handle_complete cb_fn, void *cb_arg)
 {
@@ -5443,7 +5532,7 @@ void spdk_bs_open_blob_ext(struct spdk_blob_store *bs, spdk_blob_id blobid,
 }
 
 /* END spdk_bs_open_blob */
-
+////////////////////////////////////////////////////////////////////////////////
 /* START spdk_blob_set_read_only */
 int spdk_blob_set_read_only(struct spdk_blob *blob)
 {
@@ -5454,6 +5543,7 @@ int spdk_blob_set_read_only(struct spdk_blob *blob)
 	blob->state = SPDK_BLOB_STATE_DIRTY;
 	return 0;
 }
+
 /* END spdk_blob_set_read_only */
 ////////////////////////////////////////////////////////////////////////////////
 /* START spdk_blob_sync_md */
@@ -5508,6 +5598,8 @@ spdk_blob_sync_md(struct spdk_blob *blob, spdk_blob_op_complete cb_fn, void *cb_
 }
 
 /* END spdk_blob_sync_md */
+////////////////////////////////////////////////////////////////////////////////
+// zhou: START spdk blob insert
 
 struct spdk_blob_insert_cluster_ctx {
 	struct spdk_thread	*thread;
@@ -5574,6 +5666,8 @@ _spdk_blob_insert_cluster_on_md_thread(struct spdk_blob *blob, uint32_t cluster_
 	spdk_thread_send_msg(blob->bs->md_thread, _spdk_blob_insert_cluster_msg, ctx);
 }
 
+// zhou: END spdk blob insert
+////////////////////////////////////////////////////////////////////////////////
 /* START spdk_blob_close */
 
 static void
@@ -5630,6 +5724,7 @@ void spdk_blob_close(struct spdk_blob *blob, spdk_blob_op_complete cb_fn, void *
 
 /* END spdk_blob_close */
 ////////////////////////////////////////////////////////////////////////////////
+// zhou:
 
 struct spdk_io_channel *spdk_bs_alloc_io_channel(struct spdk_blob_store *bs)
 {

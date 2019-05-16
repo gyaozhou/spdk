@@ -121,17 +121,22 @@ typedef void (*spdk_bs_sequence_cpl)(spdk_bs_sequence_t *sequence,
 // zhou: request
 /* A generic request set. Can be a sequence, batch or a user_op. */
 struct spdk_bs_request_set {
-    // zhou: Client's Request Set Completion function.
+    // zhou: this part used to register client's Request Set Completion function.
+    //       Because client's callback function owns several kinds type,
+    //       so a union be used to accomdate the difference.
 	struct spdk_bs_cpl      cpl;
 
-    // zhou: used by "cb_args"
+
+    // zhou: this part used to register backing storage bdev IO completion function.
+    //       All Blobstore bdev IO handling function will use these parameters.
 	int                     bserrno;
 	struct spdk_bs_channel		*channel;
-
     // zhou: Blobstore backing device (bdev) need this type of parameter as
     //       completion callback, arguments and IO channel.
 	struct spdk_bs_dev_cb_args	cb_args;
 
+
+    // zhou: this part used to manage Sequence/Batch task set.
 	union {
 		struct {
 			spdk_bs_sequence_cpl    cb_fn;
@@ -157,6 +162,7 @@ struct spdk_bs_request_set {
 		} user_op;
 	} u;
 
+    // zhou: used to link in list.
 	TAILQ_ENTRY(spdk_bs_request_set) link;
 };
 
