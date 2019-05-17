@@ -664,8 +664,10 @@ spdk_nvme_ns_cmd_readv(struct spdk_nvme_ns *ns, struct spdk_nvme_qpair *qpair,
 
 	req = _nvme_ns_cmd_rw(ns, qpair, &payload, 0, 0, lba, lba_count, cb_fn, cb_arg, SPDK_NVME_OPC_READ,
 			      io_flags, 0, 0, true);
+
 	if (req != NULL) {
 		return nvme_qpair_submit_request(qpair, req);
+
 	} else if (spdk_nvme_ns_check_request_length(lba_count,
 			ns->sectors_per_max_io,
 			ns->sectors_per_stripe,

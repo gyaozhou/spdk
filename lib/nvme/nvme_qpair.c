@@ -487,6 +487,7 @@ nvme_qpair_deinit(struct spdk_nvme_qpair *qpair)
 	spdk_dma_free(qpair->req_buf);
 }
 
+// zhou:
 int
 nvme_qpair_submit_request(struct spdk_nvme_qpair *qpair, struct nvme_request *req)
 {

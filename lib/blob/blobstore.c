@@ -2013,6 +2013,8 @@ _spdk_blob_request_submit_op_single(struct spdk_io_channel *_ch, struct spdk_blo
 		return;
 	}
 
+    // zhou: handle
+
 	switch (op_type) {
 	case SPDK_BLOB_READ: {
 		spdk_bs_batch_t *batch;
@@ -2022,6 +2024,8 @@ _spdk_blob_request_submit_op_single(struct spdk_io_channel *_ch, struct spdk_blo
 			cb_fn(cb_arg, -ENOMEM);
 			return;
 		}
+
+        // zhou: once thin provision, and have been allocated???
 
 		if (_spdk_bs_io_unit_is_allocated(blob, offset)) {
 			/* Read from the blob */
@@ -2114,9 +2118,11 @@ _spdk_blob_request_submit_op(struct spdk_blob *blob, struct spdk_io_channel *_ch
 	}
 
 	if (length <= _spdk_bs_num_io_units_to_cluster_boundary(blob, offset)) {
+        // zhou: could be handled in one IO request (cluster as boundary)
 		_spdk_blob_request_submit_op_single(_channel, blob, payload, offset, length,
 						    cb_fn, cb_arg, op_type);
 	} else {
+        // zhou: need to be splited to several IO request.
 		_spdk_blob_request_submit_op_split(_channel, blob, payload, offset, length,
 						   cb_fn, cb_arg, op_type);
 	}

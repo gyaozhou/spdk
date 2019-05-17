@@ -593,6 +593,8 @@ _bdev_io_unset_bounce_buf(struct spdk_bdev_io *bdev_io)
 	spdk_bdev_io_put_buf(bdev_io);
 }
 
+// zhou: README, all kinds of driver, will fetch buffer before submit IO.
+//       "cb" in parameters, will be invoked to notify driver.
 void
 spdk_bdev_io_get_buf(struct spdk_bdev_io *bdev_io, spdk_bdev_io_get_buf_cb cb, uint64_t len)
 {
@@ -902,7 +904,9 @@ spdk_bdev_init_failed(void *cb_arg)
 	spdk_bdev_init_complete(-1);
 }
 
-// zhou: README,
+// zhou: from an allocated thread, the bdev library may be initialized by calling
+//       this function, which is an asynchronous operation. Uuntil the completion
+//       callback is called, no other bdev library functions may be invoked.
 void
 spdk_bdev_initialize(spdk_bdev_init_cb cb_fn, void *cb_arg)
 {
@@ -978,6 +982,7 @@ spdk_bdev_initialize(spdk_bdev_init_cb cb_fn, void *cb_arg)
 		return;
 	}
 
+
 	cache_size = BUF_LARGE_POOL_SIZE / (2 * spdk_thread_get_count());
 	snprintf(mempool_name, sizeof(mempool_name), "buf_large_pool_%d", getpid());
 
@@ -992,6 +997,7 @@ spdk_bdev_initialize(spdk_bdev_init_cb cb_fn, void *cb_arg)
 		spdk_bdev_init_complete(-1);
 		return;
 	}
+
 
 	g_bdev_mgr.zero_buffer = spdk_zmalloc(ZERO_BUFFER_SIZE, ZERO_BUFFER_SIZE,
 					      NULL, SPDK_ENV_LCORE_ID_ANY, SPDK_MALLOC_DMA);
@@ -1170,6 +1176,7 @@ _spdk_bdev_finish_unregister_bdevs_iter(void *cb_arg, int bdeverrno)
 	}
 }
 
+// zhou: tear down the bdev library.
 void
 spdk_bdev_finish(spdk_bdev_fini_cb cb_fn, void *cb_arg)
 {
@@ -1707,9 +1714,11 @@ _spdk_bdev_io_submit(void *ctx)
 	bdev_ch->io_outstanding++;
 	shared_resource->io_outstanding++;
 	bdev_io->internal.in_submit_request = true;
+
 	if (spdk_likely(bdev_ch->flags == 0)) {
 		if (spdk_likely(TAILQ_EMPTY(&shared_resource->nomem_io))) {
-            // zhou:
+            // zhou: e.g. bdev_aio_submit_request(), bdev_nvme_submit_request()
+            //       bdev_uring_submit_request(),
 			bdev->fn_table->submit_request(ch, bdev_io);
 		} else {
 			bdev_ch->io_outstanding--;
@@ -1727,6 +1736,7 @@ _spdk_bdev_io_submit(void *ctx)
 		SPDK_ERRLOG("unknown bdev_ch flag %x found\n", bdev_ch->flags);
 		spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_FAILED);
 	}
+
 	bdev_io->internal.in_submit_request = false;
 }
 
@@ -3813,9 +3823,9 @@ _spdk_bdev_qos_config(struct spdk_bdev *bdev)
 	return;
 }
 
-// zhou: README,
+// zhou: init bdev backing storage.
 static int
-spdk_bdev_init(struct spdk_bdev *bdev)
+spdk_bdev_init(truct spdk_bdev *bdev)
 {
 	char *bdev_name;
 
@@ -3946,7 +3956,7 @@ spdk_bdev_start(struct spdk_bdev *bdev)
 	}
 }
 
-// zhou:
+// zhou: used register a backing storage after bdev library initilized.
 int
 spdk_bdev_register(struct spdk_bdev *bdev)
 {

@@ -1812,6 +1812,7 @@ bdev_nvme_no_pi_readv(struct nvme_bdev *nbdev, struct spdk_io_channel *ch,
 	return rc;
 }
 
+// zhou:
 static int
 bdev_nvme_readv(struct nvme_bdev *nbdev, struct spdk_io_channel *ch,
 		struct nvme_bdev_io *bio,

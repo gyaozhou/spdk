@@ -526,6 +526,8 @@ _spdk_super_blob_create_cb(void *cb_arg, spdk_blob_id blobid, int lvolerrno)
 	spdk_bs_open_blob(bs, blobid, _spdk_super_blob_create_open_cb, req);
 }
 
+////////////////////////////////////////////////////////////////////////////////
+
 // zhou: completion of spdk_lvs_init()
 static void
 _spdk_lvs_init_cb(void *cb_arg, struct spdk_blob_store *bs, int lvserrno)
@@ -645,6 +647,8 @@ spdk_lvs_init(struct spdk_bs_dev *bs_dev, struct spdk_lvs_opts *o,
 
 	return 0;
 }
+
+////////////////////////////////////////////////////////////////////////////////
 
 static void
 _spdk_lvs_rename_cb(void *cb_arg, int lvolerrno)

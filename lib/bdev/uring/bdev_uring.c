@@ -137,6 +137,7 @@ bdev_uring_close(struct bdev_uring *bdev)
 	return 0;
 }
 
+// zhou:
 static int64_t
 bdev_uring_readv(struct bdev_uring *uring, struct spdk_io_channel *ch,
 		 struct bdev_uring_task *uring_task,

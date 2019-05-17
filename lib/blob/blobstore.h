@@ -640,6 +640,7 @@ _spdk_bs_io_unit_to_cluster_number(struct spdk_blob *blob, uint64_t io_unit)
 	return (io_unit / _spdk_bs_io_unit_per_page(blob->bs)) / blob->bs->pages_per_cluster;
 }
 
+
 /* Given an io unit offset into a blob, look up if it is from allocated cluster. */
 static inline bool
 _spdk_bs_io_unit_is_allocated(struct spdk_blob *blob, uint64_t io_unit)

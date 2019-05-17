@@ -166,6 +166,7 @@ bdev_aio_close(struct file_disk *disk)
 	return 0;
 }
 
+// zhou:
 static int64_t
 bdev_aio_readv(struct file_disk *fdisk, struct spdk_io_channel *ch,
 	       struct bdev_aio_task *aio_task,
@@ -182,6 +183,7 @@ bdev_aio_readv(struct file_disk *fdisk, struct spdk_io_channel *ch,
 
 	SPDK_DEBUGLOG(SPDK_LOG_AIO, "read %d iovs size %lu to off: %#lx\n",
 		      iovcnt, nbytes, offset);
+
 
 	rc = io_submit(aio_ch->group_ch->io_ctx, 1, &iocb);
 	if (rc < 0) {
@@ -400,6 +402,7 @@ bdev_aio_reset(struct file_disk *fdisk, struct bdev_aio_task *aio_task)
 	bdev_aio_reset_retry_timer(fdisk);
 }
 
+// zhou: README, submit IO
 static void
 bdev_aio_get_buf_cb(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io,
 		    bool success)
@@ -434,6 +437,7 @@ bdev_aio_get_buf_cb(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io,
 	}
 }
 
+// zhou: README,
 static int _bdev_aio_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io)
 {
 	switch (bdev_io->type) {
@@ -442,6 +446,7 @@ static int _bdev_aio_submit_request(struct spdk_io_channel *ch, struct spdk_bdev
 	 * get the aligned buffer from the pool by calling spdk_bdev_io_get_buf. */
 	case SPDK_BDEV_IO_TYPE_READ:
 	case SPDK_BDEV_IO_TYPE_WRITE:
+        // zhou: when get buffer completed, execute "bdev_aio_get_buf_cb()"
 		spdk_bdev_io_get_buf(bdev_io, bdev_aio_get_buf_cb,
 				     bdev_io->u.bdev.num_blocks * bdev_io->bdev->blocklen);
 		return 0;
