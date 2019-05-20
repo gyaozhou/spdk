@@ -79,4 +79,5 @@ static struct spdk_subsystem g_spdk_subsystem_bdev = {
 };
 
 SPDK_SUBSYSTEM_REGISTER(g_spdk_subsystem_bdev);
+// zhou: "bdev" depend on "copy".
 SPDK_SUBSYSTEM_DEPEND(bdev, copy)

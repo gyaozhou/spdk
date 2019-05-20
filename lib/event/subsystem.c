@@ -51,12 +51,16 @@ static void *g_app_stop_arg = NULL;
 static struct spdk_thread *g_fini_thread = NULL;
 
 // zhou: these two functions will be invoked before main(). Be careful !
+//       Up to depend on relationship, we need sort them before really start them.
+
+// zhou: list of all subsystem inited before main()
 void
 spdk_add_subsystem(struct spdk_subsystem *subsystem)
 {
 	TAILQ_INSERT_TAIL(&g_subsystems, subsystem, tailq);
 }
 
+// zhou: list of dependency relationship.
 void
 spdk_add_subsystem_depend(struct spdk_subsystem_depend *depend)
 {
@@ -78,6 +82,7 @@ spdk_subsystem_find(struct spdk_subsystem_list *list, const char *name)
 	return NULL;
 }
 
+// zhou: will sort "g_subsystems" according to dependency!!! Just like including.
 static void
 subsystem_sort(void)
 {
@@ -85,34 +90,58 @@ subsystem_sort(void)
 	struct spdk_subsystem *subsystem, *subsystem_tmp;
 	struct spdk_subsystem_depend *subsystem_dep;
 
+    // zhou: tempory list, sorted list.
 	struct spdk_subsystem_list subsystems_list = TAILQ_HEAD_INITIALIZER(subsystems_list);
 
 	while (!TAILQ_EMPTY(&g_subsystems)) {
+
 		TAILQ_FOREACH_SAFE(subsystem, &g_subsystems, tailq, subsystem_tmp) {
+            // zhou: this subsystem "subsystem" depends on other subsystem.
 			depends_on = false;
+
+            // zhou: once one subsystem depends on other two subsytem, there will be
+            //       two entries in list "g_subsystems_deps"
 			TAILQ_FOREACH(subsystem_dep, &g_subsystems_deps, tailq) {
+
 				if (strcmp(subsystem->name, subsystem_dep->name) == 0) {
 					depends_on = true;
+                    // zhou: already in sorted list.
 					depends_on_sorted = !!spdk_subsystem_find(&subsystems_list, subsystem_dep->depends_on);
 					if (depends_on_sorted) {
+                        // zhou: need make sure all depended subsystem are in sorted list.
 						continue;
 					}
+
+                    // zhou: the subystem be depended, not in sorted list.
 					break;
 				}
 			}
 
+            // zhou: in case of "depends_on == true && depends_on_sorted == false",
+            //       means can't append to sorted list, wait for more depended subsytem
+            //       append firstly.
+
 			if (depends_on == false) {
+                // zhou: depends on nothing, just remove from "g_subsystems" to
+                //       "subsystems_list"
 				TAILQ_REMOVE(&g_subsystems, subsystem, tailq);
 				TAILQ_INSERT_TAIL(&subsystems_list, subsystem, tailq);
 			} else {
 				if (depends_on_sorted == true) {
+                    // zhou: depended subsytems already in sorted list, which means
+                    //       the order is correct.
 					TAILQ_REMOVE(&g_subsystems, subsystem, tailq);
 					TAILQ_INSERT_TAIL(&subsystems_list, subsystem, tailq);
 				}
 			}
+
+            // zhou: next subsystem
 		}
+
+        // zhou: keep looping subsystem list in case not empty.
 	}
 
+    // zhou: move from sorted temporary list back to "g_subsystems"
 	TAILQ_FOREACH_SAFE(subsystem, &subsystems_list, tailq, subsystem_tmp) {
 		TAILQ_REMOVE(&subsystems_list, subsystem, tailq);
 		TAILQ_INSERT_TAIL(&g_subsystems, subsystem, tailq);
@@ -176,7 +205,7 @@ spdk_subsystem_init(spdk_msg_fn cb_fn, void *cb_arg)
 			return;
 		}
 	}
-
+    // zhou: make sure in dependency order.
 	subsystem_sort();
 
     // zhou: start to init each subsystem

@@ -683,10 +683,12 @@ create_aio_bdev(const char *name, const char *filename, uint32_t block_size)
 
 	fdisk->disk.fn_table = &aio_fn_table;
 
+    // zhou: README,
 	spdk_io_device_register(fdisk, bdev_aio_create_cb, bdev_aio_destroy_cb,
 				sizeof(struct bdev_aio_io_channel),
 				fdisk->disk.name);
 
+    // zhou: README,
 	rc = spdk_bdev_register(&fdisk->disk);
 	if (rc) {
 		spdk_io_device_unregister(fdisk, NULL);

@@ -105,6 +105,7 @@ void spdk_subsystem_config_json(struct spdk_json_write_ctx *w, struct spdk_subsy
 void spdk_rpc_initialize(const char *listen_addr);
 void spdk_rpc_finish(void);
 
+// zhou: will be executed before main() running.
 /**
  * \brief Register a new subsystem
  */

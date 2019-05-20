@@ -91,6 +91,7 @@ static const char *qos_rpc_type[] = {"rw_ios_per_sec",
 
 TAILQ_HEAD(spdk_bdev_list, spdk_bdev);
 
+// zhou:
 struct spdk_bdev_mgr {
 	struct spdk_mempool *bdev_io_pool;
 
@@ -111,6 +112,7 @@ struct spdk_bdev_mgr {
 #endif
 };
 
+// zhou:
 static struct spdk_bdev_mgr g_bdev_mgr = {
 	.bdev_modules = TAILQ_HEAD_INITIALIZER(g_bdev_mgr.bdev_modules),
 	.bdevs = TAILQ_HEAD_INITIALIZER(g_bdev_mgr.bdevs),
@@ -177,6 +179,7 @@ struct spdk_bdev_qos {
 	struct spdk_poller *poller;
 };
 
+// zhou: README,
 struct spdk_bdev_mgmt_channel {
 	bdev_io_stailq_t need_buf_small;
 	bdev_io_stailq_t need_buf_large;
@@ -196,6 +199,7 @@ struct spdk_bdev_mgmt_channel {
 	TAILQ_HEAD(, spdk_bdev_io_wait_entry)	io_wait_queue;
 };
 
+// zhou: README,
 /*
  * Per-module (or per-io_device) data. Multiple bdevs built on the same io_device
  * will queue here their IO that awaits retry. It makes it possible to retry sending
@@ -234,6 +238,7 @@ struct spdk_bdev_shared_resource {
 #define BDEV_CH_RESET_IN_PROGRESS	(1 << 0)
 #define BDEV_CH_QOS_ENABLED		(1 << 1)
 
+// zhou:
 struct spdk_bdev_channel {
 	struct spdk_bdev	*bdev;
 
@@ -275,7 +280,7 @@ struct spdk_bdev_desc {
 
 	struct spdk_thread		*thread;
 
-    // zhou: passed by client
+    // zhou: callback to handle backing device removed, passed by client
 	spdk_bdev_remove_cb_t		remove_cb;
 	void				*remove_ctx;
 
@@ -1198,6 +1203,8 @@ spdk_bdev_finish(spdk_bdev_fini_cb cb_fn, void *cb_arg)
 	_spdk_bdev_finish_unregister_bdevs_iter(NULL, 0);
 }
 
+// zhou: README, get a empty IO request, limited by queue depth and other resource
+//       limitation.
 static struct spdk_bdev_io *
 spdk_bdev_get_io(struct spdk_bdev_channel *channel)
 {
@@ -1205,10 +1212,14 @@ spdk_bdev_get_io(struct spdk_bdev_channel *channel)
 	struct spdk_bdev_io *bdev_io;
 
 	if (ch->per_thread_cache_count > 0) {
+
 		bdev_io = STAILQ_FIRST(&ch->per_thread_cache);
 		STAILQ_REMOVE_HEAD(&ch->per_thread_cache, internal.buf_link);
+
 		ch->per_thread_cache_count--;
+
 	} else if (spdk_unlikely(!TAILQ_EMPTY(&ch->io_wait_queue))) {
+        // zhou: in case of already some IO blocked on "io_wait_queue".
 		/*
 		 * Don't try to look for bdev_ios in the global pool if there are
 		 * waiters on bdev_ios - we don't want this caller to jump the line.
@@ -1695,6 +1706,7 @@ _spdk_bdev_io_split_get_buf_cb(struct spdk_io_channel *ch, struct spdk_bdev_io *
 	_spdk_bdev_io_split(ch, bdev_io);
 }
 
+// zhou: README,
 /* Explicitly mark this inline, since it's used as a function pointer and otherwise won't
  *  be inlined, at least on some compilers.
  */
@@ -1709,6 +1721,7 @@ _spdk_bdev_io_submit(void *ctx)
 	uint64_t tsc;
 
 	tsc = spdk_get_ticks();
+
 	bdev_io->internal.submit_tsc = tsc;
 	spdk_trace_record_tsc(tsc, TRACE_BDEV_IO_START, 0, 0, (uintptr_t)bdev_io, bdev_io->type);
 	bdev_ch->io_outstanding++;
@@ -1716,22 +1729,28 @@ _spdk_bdev_io_submit(void *ctx)
 	bdev_io->internal.in_submit_request = true;
 
 	if (spdk_likely(bdev_ch->flags == 0)) {
+
 		if (spdk_likely(TAILQ_EMPTY(&shared_resource->nomem_io))) {
             // zhou: e.g. bdev_aio_submit_request(), bdev_nvme_submit_request()
             //       bdev_uring_submit_request(),
 			bdev->fn_table->submit_request(ch, bdev_io);
+
 		} else {
+
 			bdev_ch->io_outstanding--;
 			shared_resource->io_outstanding--;
 			TAILQ_INSERT_TAIL(&shared_resource->nomem_io, bdev_io, internal.link);
 		}
+
 	} else if (bdev_ch->flags & BDEV_CH_RESET_IN_PROGRESS) {
 		spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_FAILED);
 	} else if (bdev_ch->flags & BDEV_CH_QOS_ENABLED) {
+
 		bdev_ch->io_outstanding--;
 		shared_resource->io_outstanding--;
 		TAILQ_INSERT_TAIL(&bdev->internal.qos->queued, bdev_io, internal.link);
 		_spdk_bdev_qos_io_submit(bdev_ch, bdev->internal.qos);
+
 	} else {
 		SPDK_ERRLOG("unknown bdev_ch flag %x found\n", bdev_ch->flags);
 		spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_FAILED);
@@ -1740,7 +1759,7 @@ _spdk_bdev_io_submit(void *ctx)
 	bdev_io->internal.in_submit_request = false;
 }
 
-// zhou: transform READ and WRITE to IO Submit.
+// zhou: README,
 static void
 spdk_bdev_io_submit(struct spdk_bdev_io *bdev_io)
 {
@@ -1752,15 +1771,19 @@ spdk_bdev_io_submit(struct spdk_bdev_io *bdev_io)
 
 	if (bdev->split_on_optimal_io_boundary && _spdk_bdev_io_should_split(bdev_io)) {
 		if (bdev_io->type == SPDK_BDEV_IO_TYPE_READ) {
+            // zhou: prepare buffer space for read.
 			spdk_bdev_io_get_buf(bdev_io, _spdk_bdev_io_split_get_buf_cb,
 					     bdev_io->u.bdev.num_blocks * bdev_io->bdev->blocklen);
 		} else {
 			_spdk_bdev_io_split(NULL, bdev_io);
 		}
+
 		return;
 	}
 
+    // zhou:
 	if (bdev_io->internal.ch->flags & BDEV_CH_QOS_ENABLED) {
+
 		if ((thread == bdev->internal.qos->thread) || !bdev->internal.qos->thread) {
 			_spdk_bdev_io_submit(bdev_io);
 		} else {
@@ -1768,7 +1791,9 @@ spdk_bdev_io_submit(struct spdk_bdev_io *bdev_io)
 			bdev_io->internal.ch = bdev->internal.qos->ch;
 			spdk_thread_send_msg(bdev->internal.qos->thread, _spdk_bdev_io_submit, bdev_io);
 		}
+
 	} else {
+
 		_spdk_bdev_io_submit(bdev_io);
 	}
 }
@@ -1787,7 +1812,7 @@ spdk_bdev_io_submit_reset(struct spdk_bdev_io *bdev_io)
 	bdev_io->internal.in_submit_request = false;
 }
 
-// zhou:
+// zhou: set other private data of a IO request.
 static void
 spdk_bdev_io_init(struct spdk_bdev_io *bdev_io,
 		  struct spdk_bdev *bdev, void *cb_arg,
@@ -2499,6 +2524,7 @@ _calculate_measured_qd(struct spdk_io_channel_iter *i)
 	struct spdk_io_channel *io_ch = spdk_io_channel_iter_get_channel(i);
 	struct spdk_bdev_channel *ch = spdk_io_channel_get_ctx(io_ch);
 
+    // zhou: collect outstanding IO number in different IO channel.
 	bdev->internal.temporary_queue_depth += ch->io_outstanding;
 	spdk_for_each_channel_continue(i, 0);
 }
@@ -2508,6 +2534,7 @@ spdk_bdev_calculate_measured_queue_depth(void *ctx)
 {
 	struct spdk_bdev *bdev = ctx;
 	bdev->internal.temporary_queue_depth = 0;
+
 	spdk_for_each_channel(__bdev_to_io_dev(bdev), _calculate_measured_qd, bdev,
 			      _calculate_measured_qd_cpl);
 	return 0;
@@ -2550,6 +2577,7 @@ spdk_bdev_notify_blockcnt_change(struct spdk_bdev *bdev, uint64_t size)
 	return ret;
 }
 
+// zhou: "offset_blocks", "num_blocks" are output parameters
 /*
  * Convert I/O offset and length from bytes to blocks.
  *
@@ -2564,18 +2592,23 @@ spdk_bdev_bytes_to_blocks(struct spdk_bdev *bdev, uint64_t offset_bytes, uint64_
 
 	/* Avoid expensive div operations if possible. These spdk_u32 functions are very cheap. */
 	if (spdk_likely(spdk_u32_is_pow2(block_size))) {
+
 		shift_cnt = spdk_u32log2(block_size);
 		*offset_blocks = offset_bytes >> shift_cnt;
 		*num_blocks = num_bytes >> shift_cnt;
 		return (offset_bytes - (*offset_blocks << shift_cnt)) |
 		       (num_bytes - (*num_blocks << shift_cnt));
+
 	} else {
+
 		*offset_blocks = offset_bytes / block_size;
 		*num_blocks = num_bytes / block_size;
+
 		return (offset_bytes % block_size) | (num_bytes % block_size);
 	}
 }
 
+// zhou: check whether the device has so many blocks.
 static bool
 spdk_bdev_io_valid_blocks(struct spdk_bdev *bdev, uint64_t offset_blocks, uint64_t num_blocks)
 {
@@ -2592,6 +2625,8 @@ spdk_bdev_io_valid_blocks(struct spdk_bdev *bdev, uint64_t offset_blocks, uint64
 
 	return true;
 }
+
+////////////////////////////////////////////////////////////////////////////////
 
 // zhou:
 /*
@@ -2620,6 +2655,8 @@ spdk_bdev_io_valid_blocks(struct spdk_bdev *bdev, uint64_t offset_blocks, uint64
   fail asynchronously. In that case, the associated spdk_bdev_io will be passed to
   the callback and it will report error information."
 */
+
+// zhou:
 int
 spdk_bdev_read(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
 	       void *buf, uint64_t offset, uint64_t nbytes,
@@ -2627,6 +2664,7 @@ spdk_bdev_read(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
 {
 	uint64_t offset_blocks, num_blocks;
 
+    // zhou: convert from byte to block num, just consider block size of the device.
 	if (spdk_bdev_bytes_to_blocks(desc->bdev, offset, &offset_blocks, nbytes, &num_blocks) != 0) {
 		return -EINVAL;
 	}
@@ -2634,8 +2672,10 @@ spdk_bdev_read(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
 	return spdk_bdev_read_blocks(desc, ch, buf, offset_blocks, num_blocks, cb, cb_arg);
 }
 
-// zhou: spdk_bdev_io_submit() -> _spdk_bdev_io_submit() -> fn_table->submit_request()
+// zhou: core function for read.
+//       spdk_bdev_io_submit() -> _spdk_bdev_io_submit() -> fn_table->submit_request()
 //       -> invoke each kind of backend storage registered callback function.
+//
 //       AIO: bdev_aio_submit_request()
 //       NVMe: bdev_nvme_submit_request()
 int
@@ -2651,6 +2691,8 @@ spdk_bdev_read_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
 		return -EINVAL;
 	}
 
+    // zhou: get a empty IO request, limited by queue depth and other resource
+    //       limitation.
 	bdev_io = spdk_bdev_get_io(channel);
 	if (!bdev_io) {
 		return -ENOMEM;
@@ -2722,6 +2764,8 @@ int spdk_bdev_readv_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *
 	return 0;
 }
 
+////////////////////////////////////////////////////////////////////////////////
+
 int
 spdk_bdev_write(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
 		void *buf, uint64_t offset, uint64_t nbytes,
@@ -2736,6 +2780,7 @@ spdk_bdev_write(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
 	return spdk_bdev_write_blocks(desc, ch, buf, offset_blocks, num_blocks, cb, cb_arg);
 }
 
+// zhou: core function for write.
 int
 spdk_bdev_write_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
 		       void *buf, uint64_t offset_blocks, uint64_t num_blocks,
@@ -3956,7 +4001,8 @@ spdk_bdev_start(struct spdk_bdev *bdev)
 	}
 }
 
-// zhou: used register a backing storage after bdev library initilized.
+// zhou: used by backing storage to register to bdev framework after bdev library
+//       initilized.
 int
 spdk_bdev_register(struct spdk_bdev *bdev)
 {

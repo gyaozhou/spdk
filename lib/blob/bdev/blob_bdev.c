@@ -96,6 +96,7 @@ bdev_blob_io_complete(struct spdk_bdev_io *bdev_io, bool success, void *arg)
 	spdk_bdev_free_io(bdev_io);
 }
 
+// zhou: still queue in bdev
 static void
 bdev_blob_queue_io(struct spdk_bs_dev *dev, struct spdk_io_channel *channel, void *payload,
 		   int iovcnt,

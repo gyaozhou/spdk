@@ -109,6 +109,7 @@ spdk_notify_get_types(spdk_notify_get_type_cb cb, void *ctx)
 	pthread_mutex_unlock(&g_events_lock);
 }
 
+// zhou:
 uint64_t
 spdk_notify_send(const char *type, const char *ctx)
 {
