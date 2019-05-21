@@ -2400,6 +2400,7 @@ _spdk_blob_get_snapshot_and_clone_entries(struct spdk_blob *blob,
 	}
 }
 
+// zhou: callback for create IO channel
 static int
 _spdk_bs_channel_create(void *io_device, void *ctx_buf)
 {
@@ -2425,7 +2426,7 @@ _spdk_bs_channel_create(void *io_device, void *ctx_buf)
 	channel->bs = bs;
 	channel->dev = dev;
 
-    // zhou: bdev_blob_create_channel()
+    // zhou: underlying IO channel created by bdev_blob_create_channel().
 	channel->dev_channel = dev->create_channel(dev);
 
 	if (!channel->dev_channel) {
@@ -5734,6 +5735,7 @@ void spdk_blob_close(struct spdk_blob *blob, spdk_blob_op_complete cb_fn, void *
 
 struct spdk_io_channel *spdk_bs_alloc_io_channel(struct spdk_blob_store *bs)
 {
+    // zhou: previously spdk_io_device_register() using "struct spdk_blob_store".
 	return spdk_get_io_channel(bs);
 }
 

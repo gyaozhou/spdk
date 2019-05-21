@@ -157,15 +157,17 @@ typedef void (*spdk_channel_for_each_cpl)(struct spdk_io_channel_iter *i, int st
  * This structure is not part of the API - all accesses should be done through
  *  spdk_io_channel function calls.
  */
-// zhou:
+// zhou: README,
 struct spdk_io_channel {
 	struct spdk_thread		*thread;
 	struct io_device		*dev;
+
 	uint32_t			ref;
 	uint32_t			destroy_ref;
 	TAILQ_ENTRY(spdk_io_channel)	tailq;
 	spdk_io_channel_destroy_cb	destroy_cb;
 
+    // zhou: more private data allocate together.
 	/*
 	 * Modules will allocate extra memory off the end of this structure
 	 *  to store references to hardware-specific references (i.e. NVMe queue
@@ -457,6 +459,7 @@ void spdk_put_io_channel(struct spdk_io_channel *ch);
  *
  * \return a pointer to the context buffer.
  */
+// zhou: get private data
 static inline void *
 spdk_io_channel_get_ctx(struct spdk_io_channel *ch)
 {

@@ -75,6 +75,7 @@ struct bdev_aio_task {
 struct file_disk {
 	struct bdev_aio_task	*reset_task;
 	struct spdk_poller	*reset_retry_timer;
+
 	struct spdk_bdev	disk;
 	char			*filename;
 	int			fd;
@@ -121,6 +122,7 @@ static struct spdk_bdev_module aio_if = {
 	.get_ctx_size	= bdev_aio_get_ctx_size,
 };
 
+// zhou: it's really a good method.
 SPDK_BDEV_MODULE_REGISTER(aio, &aio_if)
 
 static int
@@ -464,6 +466,7 @@ static int _bdev_aio_submit_request(struct spdk_io_channel *ch, struct spdk_bdev
 	}
 }
 
+// zhou: lib bdev will submit IO with it.
 static void bdev_aio_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io)
 {
 	if (_bdev_aio_submit_request(ch, bdev_io) < 0) {
@@ -594,7 +597,9 @@ bdev_aio_group_destroy_cb(void *io_device, void *ctx_buf)
 	spdk_poller_unregister(&ch->poller);
 }
 
-// zhou: AIO is special, which will invoke spdk_io_device_register() two times.
+// zhou: create working AIO disk.
+//
+//       AIO is special, which will invoke spdk_io_device_register() two times.
 //       AIO module level will create a epoll fd for each spdk_get_io_channel() thread.
 //       AIO disk level will create a disk/file fd for each spdk_get_io_channel() thread.
 struct spdk_bdev *
@@ -688,7 +693,7 @@ create_aio_bdev(const char *name, const char *filename, uint32_t block_size)
 				sizeof(struct bdev_aio_io_channel),
 				fdisk->disk.name);
 
-    // zhou: README,
+    // zhou: register to bdev framework
 	rc = spdk_bdev_register(&fdisk->disk);
 	if (rc) {
 		spdk_io_device_unregister(fdisk, NULL);
@@ -739,7 +744,9 @@ delete_aio_bdev(struct spdk_bdev *bdev, delete_aio_bdev_complete cb_fn, void *cb
 	spdk_bdev_unregister(bdev, aio_bdev_unregister_cb, ctx);
 }
 
-// zhou: AIO is special, which will invoke spdk_io_device_register() two times.
+// zhou: Init with lib bdev, when create really AIO disk, using RPC/create_aio_bdev().
+//
+//       AIO is special, which will invoke spdk_io_device_register() two times.
 //       AIO module level will create a epoll fd for each spdk_get_io_channel() thread.
 //       AIO disk level will create a disk/file fd for each spdk_get_io_channel() thread.
 static int
@@ -792,6 +799,7 @@ bdev_aio_initialize(void)
 			block_size = (uint32_t)tmp;
 		}
 
+        // zhou: default disk?
 		bdev = create_aio_bdev(name, file, block_size);
 		if (!bdev) {
 			SPDK_ERRLOG("Unable to create AIO bdev from file %s\n", file);

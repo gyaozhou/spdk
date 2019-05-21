@@ -44,30 +44,44 @@
 
 #define SPDK_MSG_BATCH_SIZE		8
 
+// zhou: protect "g_io_devices"
 static pthread_mutex_t g_devlist_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static spdk_new_thread_fn g_new_thread_fn = NULL;
 static size_t g_ctx_sz = 0;
 
+// zhou: An I/O device may be a physical entity (i.e. NVMe controller) or a software
+//       entity (i.e. a blobstore).
+//       Once we want perform IO over a object, we must create a corresponding IO device.
 struct io_device {
-    // zhou: the address was used to identify type of backend storage.
+    // zhou: the address was used to identify who register this IO device.
     //       e.g. "struct spdk_bdev_module aio_if",
 	void				*io_device;
 
 	char				*name;
+
+    // zhou: IO device client registered
 	spdk_io_channel_create_cb	create_cb;
 	spdk_io_channel_destroy_cb	destroy_cb;
+
+
 	spdk_io_device_unregister_cb	unregister_cb;
 	struct spdk_thread		*unregister_thread;
+
+    // zhou: reserve private workspace when creating IO channel.
 	uint32_t			ctx_size;
 	uint32_t			for_each_count;
+
 	TAILQ_ENTRY(io_device)		tailq;
 
+    // zhou: how many client refer it, such get a new/exist IO channel.
+    //       "refcnt" >= IO channel number.
 	uint32_t			refcnt;
 
 	bool				unregistered;
 };
 
+// zhou: IO device list, protected by "g_devlist_mutex"
 static TAILQ_HEAD(, io_device) g_io_devices = TAILQ_HEAD_INITIALIZER(g_io_devices);
 
 // zhou: just like Fibre, which includes callback function and context.
@@ -108,7 +122,9 @@ struct spdk_poller {
 
 // zhou: SPDK thread private data.
 struct spdk_thread {
+    // zhou: IO channel list used in this thread
 	TAILQ_HEAD(, spdk_io_channel)	io_channels;
+
 	TAILQ_ENTRY(spdk_thread)	tailq;
 	char				*name;
 
@@ -877,11 +893,13 @@ spdk_io_device_register(void *io_device, spdk_io_channel_create_cb create_cb,
 	}
 
 	dev->io_device = io_device;
+
 	if (name) {
 		dev->name = strdup(name);
 	} else {
 		dev->name = spdk_sprintf_alloc("%p", dev);
 	}
+
 	dev->create_cb = create_cb;
 	dev->destroy_cb = destroy_cb;
 	dev->unregister_cb = NULL;
@@ -894,7 +912,10 @@ spdk_io_device_register(void *io_device, spdk_io_channel_create_cb create_cb,
 		      dev->name, dev->io_device, thread->name);
 
 	pthread_mutex_lock(&g_devlist_mutex);
+
+    // zhou: abort due to already registered.
 	TAILQ_FOREACH(tmp, &g_io_devices, tailq) {
+        // zhou: the client's memory address is the only key.
 		if (tmp->io_device == io_device) {
 			SPDK_ERRLOG("io_device %p already registered (old:%s new:%s)\n",
 				    io_device, tmp->name, dev->name);
@@ -904,6 +925,8 @@ spdk_io_device_register(void *io_device, spdk_io_channel_create_cb create_cb,
 			return;
 		}
 	}
+
+    // zhou:
 	TAILQ_INSERT_TAIL(&g_io_devices, dev, tailq);
 	pthread_mutex_unlock(&g_devlist_mutex);
 }
@@ -988,7 +1011,9 @@ spdk_io_device_unregister(void *io_device, spdk_io_device_unregister_cb unregist
 	_spdk_io_device_free(dev);
 }
 
-// zhou: "Get an I/O channel for the specified io_device to be used by the calling thread.
+// zhou: parameter "io_device" refer to IO device owner.
+//
+//       "Get an I/O channel for the specified io_device to be used by the calling thread.
 //       The io_device context pointer specified must have previously been registered
 //       using spdk_io_device_register(). If an existing I/O channel does not exist
 //       yet for the given io_device on the calling thread, it will allocate an I/O
@@ -996,7 +1021,7 @@ spdk_io_device_unregister(void *io_device, spdk_io_device_unregister_cb unregist
 //       If an I/O channel already exists for the given io_device on the calling thread,
 //       its reference is returned rather than creating a new I/O channel."
 //
-//       README, different channel multiplex over this thread to avoid locking.
+//       Different channel multiplex over this thread to avoid locking.
 //       Find or Create IO Channel.
 struct spdk_io_channel *
 spdk_get_io_channel(void *io_device)
@@ -1006,12 +1031,17 @@ spdk_get_io_channel(void *io_device)
 	struct io_device *dev;
 	int rc;
 
+
+    // zhou: find the corresponding IO device firstly. Fortunately, IO channel should
+    //       be keep by client.
+
 	pthread_mutex_lock(&g_devlist_mutex);
 	TAILQ_FOREACH(dev, &g_io_devices, tailq) {
 		if (dev->io_device == io_device) {
 			break;
 		}
 	}
+
 	if (dev == NULL) {
 		SPDK_ERRLOG("could not find io_device %p\n", io_device);
 		pthread_mutex_unlock(&g_devlist_mutex);
@@ -1027,6 +1057,7 @@ spdk_get_io_channel(void *io_device)
 
     // zhou: once created already, could be found in this thread's IO channel list.
 	TAILQ_FOREACH(ch, &thread->io_channels, tailq) {
+        // zhou: found the IO channel be created before.
 		if (ch->dev == dev) {
 			ch->ref++;
 
@@ -1042,10 +1073,11 @@ spdk_get_io_channel(void *io_device)
 		}
 	}
 
-    // zhou: otherwise, create right now.
 
-    // zhou: struct spdk_io_channel + backend storage private data struct
-    //       (e.g. struct bdev_aio_group_channel, struct bdev_aio_io_channel).
+    // zhou: otherwise, create IO channel right now.
+
+    // zhou: struct spdk_io_channel + IO device private workspace size provided when
+    //       IO device registered.
 	ch = calloc(1, sizeof(*ch) + dev->ctx_size);
 	if (ch == NULL) {
 		SPDK_ERRLOG("could not calloc spdk_io_channel\n");
@@ -1058,7 +1090,8 @@ spdk_get_io_channel(void *io_device)
 	ch->thread = thread;
 	ch->ref = 1;
 	ch->destroy_ref = 0;
-    // zhou: insert inot this thread IO channel list.
+
+    // zhou: insert in this thread's IO channel list.
 	TAILQ_INSERT_TAIL(&thread->io_channels, ch, tailq);
 
 	SPDK_DEBUGLOG(SPDK_LOG_THREAD, "Get io_channel %p for io_device %s (%p) on thread %s refcnt %u\n",

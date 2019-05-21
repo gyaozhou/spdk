@@ -236,7 +236,7 @@ struct spdk_blob_store {
 	bool                            clean;
 };
 
-// zhou: context with IO channel.
+// zhou: IO channel private workspace
 struct spdk_bs_channel {
 	struct spdk_bs_request_set	*req_mem;
 
@@ -245,6 +245,7 @@ struct spdk_bs_channel {
 	struct spdk_blob_store		*bs;
 
 	struct spdk_bs_dev		*dev;
+    // zhou: !!! refer to IO channel of underlying device.
 	struct spdk_io_channel		*dev_channel;
 
 	TAILQ_HEAD(, spdk_bs_request_set) need_cluster_alloc;

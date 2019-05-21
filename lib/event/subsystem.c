@@ -279,6 +279,7 @@ spdk_subsystem_config(FILE *fp)
 	}
 }
 
+// zhou:
 void
 spdk_subsystem_config_json(struct spdk_json_write_ctx *w, struct spdk_subsystem *subsystem)
 {

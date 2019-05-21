@@ -93,18 +93,27 @@ TAILQ_HEAD(spdk_bdev_list, spdk_bdev);
 
 // zhou:
 struct spdk_bdev_mgr {
+    // zhou: each member includes
+    //       "struct spdk_bdev_io" + private space for backing storage.
 	struct spdk_mempool *bdev_io_pool;
 
+    // zhou: general purpose for small and large object
 	struct spdk_mempool *buf_small_pool;
 	struct spdk_mempool *buf_large_pool;
 
+    // zhou: 1 MB memory
 	void *zero_buffer;
 
+    // zhou: manage all kinds of backing storage.
 	TAILQ_HEAD(bdev_module_list, spdk_bdev_module) bdev_modules;
 
+    // zhou: no mattach which type, here just a list of backing disks.
+    //       Pay attention, may be more than one disks of one type backing storage.
 	struct spdk_bdev_list bdevs;
 
+    // zhou: bdev init completed.
 	bool init_complete;
+    // zhou: backing storage module init completed
 	bool module_init_complete;
 
 #ifdef SPDK_CONFIG_VTUNE
@@ -121,7 +130,9 @@ static struct spdk_bdev_mgr g_bdev_mgr = {
 };
 
 static struct spdk_bdev_opts	g_bdev_opts = {
+    // zhou: by default, 64*1024 - 1
 	.bdev_io_pool_size = SPDK_BDEV_IO_POOL_SIZE,
+    // zhou: 256
 	.bdev_io_cache_size = SPDK_BDEV_IO_CACHE_SIZE,
 };
 
@@ -179,11 +190,15 @@ struct spdk_bdev_qos {
 	struct spdk_poller *poller;
 };
 
-// zhou: README,
+// zhou: definitely, there is no underlying IO channel.
+//       This IO channel private workspace just for context to fetch
+//       "struct spdk_bdev_io".
 struct spdk_bdev_mgmt_channel {
+
 	bdev_io_stailq_t need_buf_small;
 	bdev_io_stailq_t need_buf_large;
 
+    // zhou: list of "struct spdk_bdev_io"
 	/*
 	 * Each thread keeps a cache of bdev_io - this allows
 	 *  bdev threads which are *not* DPDK threads to still
@@ -192,10 +207,12 @@ struct spdk_bdev_mgmt_channel {
 	 *  incur a cmpxchg on get and put.
 	 */
 	bdev_io_stailq_t per_thread_cache;
+
 	uint32_t	per_thread_cache_count;
 	uint32_t	bdev_io_cache_size;
 
 	TAILQ_HEAD(, spdk_bdev_shared_resource)	shared_resources;
+    // zhou:
 	TAILQ_HEAD(, spdk_bdev_io_wait_entry)	io_wait_queue;
 };
 
@@ -238,10 +255,13 @@ struct spdk_bdev_shared_resource {
 #define BDEV_CH_RESET_IN_PROGRESS	(1 << 0)
 #define BDEV_CH_QOS_ENABLED		(1 << 1)
 
-// zhou:
+// zhou: IO channel private workspace, for each backing disk.
 struct spdk_bdev_channel {
+
 	struct spdk_bdev	*bdev;
 
+    // zhou: !!! used to refer to IO channel of underlying device.
+    //       Different backing storage has its own IO device.
 	/* The channel for the underlying device */
 	struct spdk_io_channel	*channel;
 
@@ -319,6 +339,7 @@ spdk_bdev_get_opts(struct spdk_bdev_opts *opts)
 	*opts = g_bdev_opts;
 }
 
+// zhou: make sure each thread cache size will no more than pool size.
 int
 spdk_bdev_set_opts(struct spdk_bdev_opts *opts)
 {
@@ -330,7 +351,9 @@ spdk_bdev_set_opts(struct spdk_bdev_opts *opts)
 	 *  but before the deferred put_io_channel event is executed for the first mgmt_ch.
 	 */
 	min_pool_size = opts->bdev_io_cache_size * (spdk_thread_get_count() + 1);
+
 	if (opts->bdev_io_pool_size < min_pool_size) {
+
 		SPDK_ERRLOG("bdev_io_pool_size %" PRIu32 " is not compatible with bdev_io_cache_size %" PRIu32
 			    " and %" PRIu32 " threads\n", opts->bdev_io_pool_size, opts->bdev_io_cache_size,
 			    spdk_thread_get_count());
@@ -339,8 +362,12 @@ spdk_bdev_set_opts(struct spdk_bdev_opts *opts)
 	}
 
 	g_bdev_opts = *opts;
+
 	return 0;
 }
+
+////////////////////////////////////////////////////////////////////////////////
+// zhou: START of finding backing storage
 
 struct spdk_bdev *
 spdk_bdev_first(void)
@@ -410,7 +437,7 @@ spdk_bdev_next_leaf(struct spdk_bdev *prev)
 	return bdev;
 }
 
-// zhou: search already created bdev by name.
+// zhou: search already created disk by name from "g_bdev_mgr.bdevs"
 struct spdk_bdev *
 spdk_bdev_get_by_name(const char *bdev_name)
 {
@@ -433,6 +460,10 @@ spdk_bdev_get_by_name(const char *bdev_name)
 
 	return NULL;
 }
+
+// zhou: END of finding backing storage
+////////////////////////////////////////////////////////////////////////////////
+// zhou: START of IO Request's buffer operations.
 
 void
 spdk_bdev_io_set_buf(struct spdk_bdev_io *bdev_io, void *buf, size_t len)
@@ -661,6 +692,15 @@ spdk_bdev_io_get_buf(struct spdk_bdev_io *bdev_io, spdk_bdev_io_get_buf_cb cb, u
 	}
 }
 
+// zhou: END of IO Request's buffer operations.
+////////////////////////////////////////////////////////////////////////////////
+// zhou: START of subsystem related operations, includes ".init", ".fini", ".config", .write_config_json"
+
+// zhou: although the backing storage will be installed by RPC, but the adapter layer
+//       of each supporting backing storage will be init with library bdev.
+//
+//       For this function, will find out enough room to hold context of all supporting
+//       bakcing storage.
 static int
 spdk_bdev_module_get_max_ctx_size(void)
 {
@@ -668,6 +708,7 @@ spdk_bdev_module_get_max_ctx_size(void)
 	int max_bdev_module_size = 0;
 
 	TAILQ_FOREACH(bdev_module, &g_bdev_mgr.bdev_modules, internal.tailq) {
+
 		if (bdev_module->get_ctx_size && bdev_module->get_ctx_size() > max_bdev_module_size) {
 			max_bdev_module_size = bdev_module->get_ctx_size();
 		}
@@ -676,6 +717,7 @@ spdk_bdev_module_get_max_ctx_size(void)
 	return max_bdev_module_size;
 }
 
+// zhou: read config file.
 void
 spdk_bdev_config_text(FILE *fp)
 {
@@ -716,6 +758,7 @@ spdk_bdev_qos_config_json(struct spdk_bdev *bdev, struct spdk_json_write_ctx *w)
 	spdk_json_write_object_end(w);
 }
 
+// zhou: write current using config in json.
 void
 spdk_bdev_subsystem_config_json(struct spdk_json_write_ctx *w)
 {
@@ -751,6 +794,8 @@ spdk_bdev_subsystem_config_json(struct spdk_json_write_ctx *w)
 	spdk_json_write_array_end(w);
 }
 
+// zhou: README, bdev management channel create.
+//       Only one IO channel for bdev will be created ?
 static int
 spdk_bdev_mgmt_channel_create(void *io_device, void *ctx_buf)
 {
@@ -766,10 +811,14 @@ spdk_bdev_mgmt_channel_create(void *io_device, void *ctx_buf)
 
 	/* Pre-populate bdev_io cache to ensure this thread cannot be starved. */
 	ch->per_thread_cache_count = 0;
+
 	for (i = 0; i < ch->bdev_io_cache_size; i++) {
+
 		bdev_io = spdk_mempool_get(g_bdev_mgr.bdev_io_pool);
 		assert(bdev_io != NULL);
+
 		ch->per_thread_cache_count++;
+
 		STAILQ_INSERT_HEAD(&ch->per_thread_cache, bdev_io, internal.buf_link);
 	}
 
@@ -885,6 +934,7 @@ spdk_bdev_module_examine_done(struct spdk_bdev_module *module)
 /** The last initialized bdev module */
 static struct spdk_bdev_module *g_resume_bdev_module = NULL;
 
+// zhou: init backing storage adapter layer one by one.
 static int
 spdk_bdev_modules_init(void)
 {
@@ -892,7 +942,10 @@ spdk_bdev_modules_init(void)
 	int rc = 0;
 
 	TAILQ_FOREACH(module, &g_bdev_mgr.bdev_modules, internal.tailq) {
+
 		g_resume_bdev_module = module;
+
+        // zhou: e.g. bdev_aio_initialize(), bdev_nvme_library_init()
 		rc = module->module_init();
 		if (rc != 0) {
 			return rc;
@@ -912,6 +965,8 @@ spdk_bdev_init_failed(void *cb_arg)
 // zhou: from an allocated thread, the bdev library may be initialized by calling
 //       this function, which is an asynchronous operation. Uuntil the completion
 //       callback is called, no other bdev library functions may be invoked.
+//
+//       "cb_fn" will invoke next subsytem's initialize.
 void
 spdk_bdev_initialize(spdk_bdev_init_cb cb_fn, void *cb_arg)
 {
@@ -967,6 +1022,8 @@ spdk_bdev_initialize(spdk_bdev_init_cb cb_fn, void *cb_arg)
 		return;
 	}
 
+    // zhou: general purpose for small and large object
+
 	/**
 	 * Ensure no more than half of the total buffers end up local caches, by
 	 *   using spdk_thread_get_count() to determine how many local caches we need
@@ -1004,6 +1061,7 @@ spdk_bdev_initialize(spdk_bdev_init_cb cb_fn, void *cb_arg)
 	}
 
 
+    // zhou: 1MB
 	g_bdev_mgr.zero_buffer = spdk_zmalloc(ZERO_BUFFER_SIZE, ZERO_BUFFER_SIZE,
 					      NULL, SPDK_ENV_LCORE_ID_ANY, SPDK_MALLOC_DMA);
 	if (!g_bdev_mgr.zero_buffer) {
@@ -1016,15 +1074,24 @@ spdk_bdev_initialize(spdk_bdev_init_cb cb_fn, void *cb_arg)
 	g_bdev_mgr.domain = __itt_domain_create("spdk_bdev");
 #endif
 
+
+    // zhou: no matter bdev, backing storag device, frontend device...
+    //       all of them looks as a IO device from lib/thread perspective.
 	spdk_io_device_register(&g_bdev_mgr, spdk_bdev_mgmt_channel_create,
 				spdk_bdev_mgmt_channel_destroy,
 				sizeof(struct spdk_bdev_mgmt_channel),
 				"bdev_mgr");
 
+
+    // zhou: init all types backing storage, but no backing disk are created/attached.
+    //       Just make them ready to handle RPC. Then create disk RPC will trigger
+    //       disk creation.
 	rc = spdk_bdev_modules_init();
 	g_bdev_mgr.module_init_complete = true;
+
 	if (rc != 0) {
 		SPDK_ERRLOG("bdev modules init failed\n");
+        // zhou: will be completed in async way same thread.(like deferred queue)
 		spdk_thread_send_msg(spdk_get_thread(), spdk_bdev_init_failed, NULL);
 		return;
 	}
@@ -1202,6 +1269,11 @@ spdk_bdev_finish(spdk_bdev_fini_cb cb_fn, void *cb_arg)
 
 	_spdk_bdev_finish_unregister_bdevs_iter(NULL, 0);
 }
+
+// zhou: END of subsystem related operations, includes ".init", ".fini", ".config", .write_config_json"
+////////////////////////////////////////////////////////////////////////////////
+// zhou: START of IO Request operation
+
 
 // zhou: README, get a empty IO request, limited by queue depth and other resource
 //       limitation.
@@ -1723,7 +1795,9 @@ _spdk_bdev_io_submit(void *ctx)
 	tsc = spdk_get_ticks();
 
 	bdev_io->internal.submit_tsc = tsc;
+
 	spdk_trace_record_tsc(tsc, TRACE_BDEV_IO_START, 0, 0, (uintptr_t)bdev_io, bdev_io->type);
+
 	bdev_ch->io_outstanding++;
 	shared_resource->io_outstanding++;
 	bdev_io->internal.in_submit_request = true;
@@ -1864,6 +1938,11 @@ spdk_bdev_io_type_supported(struct spdk_bdev *bdev, enum spdk_bdev_io_type io_ty
 	return supported;
 }
 
+// zhou: END of IO Request operation
+////////////////////////////////////////////////////////////////////////////////
+// zhou: START of
+
+// zhou: handle RPC "get_bdevs"
 int
 spdk_bdev_dump_info_json(struct spdk_bdev *bdev, struct spdk_json_write_ctx *w)
 {
@@ -2023,6 +2102,7 @@ spdk_bdev_channel_create(void *io_device, void *ctx_buf)
 	struct spdk_bdev_shared_resource *shared_resource;
 
 	ch->bdev = bdev;
+    // zhou: e.g. bdev_aio_get_io_channel(),
 	ch->channel = bdev->fn_table->get_io_channel(bdev->ctxt);
 	if (!ch->channel) {
 		return -1;
@@ -2577,6 +2657,9 @@ spdk_bdev_notify_blockcnt_change(struct spdk_bdev *bdev, uint64_t size)
 	return ret;
 }
 
+
+////////////////////////////////////////////////////////////////////////////////
+
 // zhou: "offset_blocks", "num_blocks" are output parameters
 /*
  * Convert I/O offset and length from bytes to blocks.
@@ -2627,6 +2710,7 @@ spdk_bdev_io_valid_blocks(struct spdk_bdev *bdev, uint64_t offset_blocks, uint64
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+// zhou: START of READ/WRITE/UNMAP/RESET API
 
 // zhou:
 /*
@@ -2764,7 +2848,6 @@ int spdk_bdev_readv_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *
 	return 0;
 }
 
-////////////////////////////////////////////////////////////////////////////////
 
 int
 spdk_bdev_write(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
@@ -3272,6 +3355,10 @@ spdk_bdev_reset(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
 	return 0;
 }
 
+// zhou: END of READ/WRITE/UNMAP/RESET API
+////////////////////////////////////////////////////////////////////////////////
+// zhou: START of
+
 void
 spdk_bdev_get_io_stat(struct spdk_bdev *bdev, struct spdk_io_channel *ch,
 		      struct spdk_bdev_io_stat *stat)
@@ -3444,6 +3531,9 @@ spdk_bdev_nvme_io_passthru_md(struct spdk_bdev_desc *desc, struct spdk_io_channe
 	spdk_bdev_io_submit(bdev_io);
 	return 0;
 }
+
+////////////////////////////////////////////////////////////////////////////////
+// zhou: START of IO management
 
 int
 spdk_bdev_queue_io_wait(struct spdk_bdev *bdev, struct spdk_io_channel *ch,
@@ -3751,6 +3841,10 @@ spdk_bdev_io_get_nvme_status(const struct spdk_bdev_io *bdev_io, int *sct, int *
 	}
 }
 
+// zhou: END of IO management
+////////////////////////////////////////////////////////////////////////////////
+// zhou: START of init backing storage.
+
 struct spdk_thread *
 spdk_bdev_io_get_thread(struct spdk_bdev_io *bdev_io)
 {
@@ -3868,9 +3962,9 @@ _spdk_bdev_qos_config(struct spdk_bdev *bdev)
 	return;
 }
 
-// zhou: init bdev backing storage.
+// zhou: init "struct spdk_bdev" which is abstract object of backing disk.
 static int
-spdk_bdev_init(truct spdk_bdev *bdev)
+spdk_bdev_init(struct spdk_bdev *bdev)
 {
 	char *bdev_name;
 
@@ -3962,7 +4056,7 @@ spdk_bdev_fini(struct spdk_bdev *bdev)
 	spdk_io_device_unregister(__bdev_to_io_dev(bdev), spdk_bdev_destroy_cb);
 }
 
-// zhou: README,
+// zhou: then this backing disk could be used by client.
 static void
 spdk_bdev_start(struct spdk_bdev *bdev)
 {
@@ -3970,10 +4064,13 @@ spdk_bdev_start(struct spdk_bdev *bdev)
 	uint32_t action;
 
 	SPDK_DEBUGLOG(SPDK_LOG_BDEV, "Inserting bdev %s into list\n", bdev->name);
+
 	TAILQ_INSERT_TAIL(&g_bdev_mgr.bdevs, bdev, internal.link);
 
 	/* Examine configuration before initializing I/O */
 	TAILQ_FOREACH(module, &g_bdev_mgr.bdev_modules, internal.tailq) {
+
+        // zhou: some vdev backing storage type need extra steps.
 		if (module->examine_config) {
 			action = module->internal.action_in_progress;
 			module->internal.action_in_progress++;
@@ -4001,17 +4098,18 @@ spdk_bdev_start(struct spdk_bdev *bdev)
 	}
 }
 
-// zhou: used by backing storage to register to bdev framework after bdev library
-//       initilized.
+// zhou: used when backing storage creating a disk, and register to a to bdev framework.
 int
 spdk_bdev_register(struct spdk_bdev *bdev)
 {
+    // zhou: init abstract object of backing disk.
 	int rc = spdk_bdev_init(bdev);
 
 	if (rc == 0) {
 		spdk_bdev_start(bdev);
 	}
 
+    // zhou: just recorded in "g_events[]", user could query by RPC.
 	spdk_notify_send("bdev_register", spdk_bdev_get_name(bdev));
 	return rc;
 }
@@ -4121,7 +4219,8 @@ spdk_bdev_unregister(struct spdk_bdev *bdev, spdk_bdev_unregister_cb cb_fn, void
 	}
 }
 
-// zhou: open block device, just like open a file.
+// zhou: already found "struct spdk_bdev", open block device, just like open a file.
+//
 //       "Multiple users may have a bdev open at the same time, and coordination
 //       of reads and writes between users must be handled by some higher level
 //       mechanism outside of the bdev layer. Opening a bdev with write permission
@@ -4275,6 +4374,10 @@ spdk_bdev_desc_get_bdev(struct spdk_bdev_desc *desc)
 {
 	return desc->bdev;
 }
+
+// zhou: END of init backing storage.
+////////////////////////////////////////////////////////////////////////////////
+// zhou: START of config backing storage
 
 void
 spdk_bdev_io_get_iovec(struct spdk_bdev_io *bdev_io, struct iovec **iovp, int *iovcntp)
@@ -4821,3 +4924,6 @@ SPDK_TRACE_REGISTER_FN(bdev_trace, "bdev", TRACE_GROUP_BDEV)
 	spdk_trace_register_description("BDEV_IO_DONE", TRACE_BDEV_IO_DONE, OWNER_BDEV,
 					OBJECT_BDEV_IO, 0, 0, "");
 }
+
+// zhou: END of config backing storage
+////////////////////////////////////////////////////////////////////////////////

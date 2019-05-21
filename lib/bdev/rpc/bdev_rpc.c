@@ -364,6 +364,7 @@ invalid:
 	free_rpc_get_bdevs(&req);
 }
 SPDK_RPC_REGISTER("get_bdevs", spdk_rpc_get_bdevs, SPDK_RPC_RUNTIME)
+////////////////////////////////////////////////////////////////////////////////
 
 struct rpc_set_bdev_qd_sampling_period {
 	char *name;

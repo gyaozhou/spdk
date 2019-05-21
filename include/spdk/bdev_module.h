@@ -49,6 +49,7 @@
 #include "spdk/util.h"
 #include "spdk/uuid.h"
 
+// zhou: each bdev backing storage
 /** Block device module */
 struct spdk_bdev_module {
 	/**
@@ -245,7 +246,7 @@ struct spdk_bdev_alias {
 typedef TAILQ_HEAD(, spdk_bdev_io) bdev_io_tailq_t;
 typedef STAILQ_HEAD(, spdk_bdev_io) bdev_io_stailq_t;
 
-// zhou: always refer to as a "bdev", represents a generic block device.
+// zhou: abstract object of backing disk, represents a generic block device (a disk).
 struct spdk_bdev {
 	/** User context passed in by the backend */
 	void *ctxt;
@@ -369,6 +370,7 @@ struct spdk_bdev {
 		/** Unregister call context */
 		void *unregister_ctx;
 
+        // zhou: FD list of this disk
 		/** List of open descriptors for this block device. */
 		TAILQ_HEAD(, spdk_bdev_desc) open_descs;
 
@@ -471,10 +473,12 @@ struct spdk_bdev_io {
 				uint8_t start : 1;
 			} zcopy;
 		} bdev;
+
 		struct {
 			/** Channel reference held while messages for this reset are in progress. */
 			struct spdk_io_channel *ch_ref;
 		} reset;
+
 		struct {
 			/* The NVMe command to execute */
 			struct spdk_nvme_cmd cmd;
@@ -491,6 +495,7 @@ struct spdk_bdev_io {
 			/* meta data buffer size to transfer */
 			size_t md_len;
 		} nvme_passthru;
+
 	} u;
 
 	/** It may be used by modules to put the bdev_io into its own list. */
@@ -501,6 +506,8 @@ struct spdk_bdev_io {
 	 *  must not read or write to these fields.
 	 */
 	struct __bdev_io_internal_fields {
+
+        // zhou:
 		/** The bdev I/O channel that this was handled on. */
 		struct spdk_bdev_channel *ch;
 
@@ -1050,6 +1057,7 @@ struct spdk_bdev *spdk_bdev_part_get_base_bdev(struct spdk_bdev_part *part);
  */
 uint64_t spdk_bdev_part_get_offset_blocks(struct spdk_bdev_part *part);
 
+// zhou: will be run before bdev init.
 /*
  *  Macro used to register module for later initialization.
  */

@@ -70,6 +70,7 @@ _spdk_bdev_subsystem_config_json(struct spdk_json_write_ctx *w)
 	spdk_bdev_subsystem_config_json(w);
 }
 
+// zhou: subsystem managed by lib event
 static struct spdk_subsystem g_spdk_subsystem_bdev = {
 	.name = "bdev",
 	.init = spdk_bdev_subsystem_initialize,
