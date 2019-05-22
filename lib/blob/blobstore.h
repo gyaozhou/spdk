@@ -201,6 +201,7 @@ struct spdk_blob_store {
 
     // zhou: operations related  "struct spdk_bdev",
     //       "struct blob_bdev" includes "struct spdk_bdev"
+    //       README,
 	struct spdk_bs_dev		*dev;
 
     // zhou: all of bitmap below will be wrote into disk.

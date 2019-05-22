@@ -47,6 +47,7 @@ struct blob_bdev {
 
     // zhou: refer to backend storage disk, "desc->bdev" refer to it also.
 	struct spdk_bdev	*bdev;
+
     // zhou: bdev descriptor, represents a handler to a given block device.
     //       Just like file descriptor(fd), one file could be opened more than
     //       once, and each one represent using a fd.
@@ -313,6 +314,7 @@ bdev_blob_create_channel(struct spdk_bs_dev *dev)
 {
 	struct blob_bdev *blob_bdev = (struct blob_bdev *)dev;
 
+    // zhou:
 	return spdk_bdev_get_io_channel(blob_bdev->desc);
 }
 
@@ -339,6 +341,7 @@ bdev_blob_destroy(struct spdk_bs_dev *bs_dev)
 // zhou: set blobstore backend block device, "struct spdk_bs_dev" represent a
 //       BlobStore backend storage
 //       Used by lvol vbdev_lvs_create() and blobfs spdk_mkfs_run().
+//       Open "struct spdk_bdev", represent as "struct blob_bdev", "struct spdk_bs_dev"
 struct spdk_bs_dev *
 spdk_bdev_create_bs_dev(struct spdk_bdev *bdev, spdk_bdev_remove_cb_t remove_cb, void *remove_ctx)
 {

@@ -459,7 +459,7 @@ void spdk_put_io_channel(struct spdk_io_channel *ch);
  *
  * \return a pointer to the context buffer.
  */
-// zhou: get private data
+// zhou: get private workspace
 static inline void *
 spdk_io_channel_get_ctx(struct spdk_io_channel *ch)
 {

@@ -71,6 +71,7 @@ struct nvme_bdev_ctrlr {
 };
 
 struct nvme_bdev {
+    // zhou:
 	struct spdk_bdev	disk;
 	struct nvme_bdev_ctrlr	*nvme_bdev_ctrlr;
 	uint32_t		id;

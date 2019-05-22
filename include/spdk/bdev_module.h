@@ -246,7 +246,10 @@ struct spdk_bdev_alias {
 typedef TAILQ_HEAD(, spdk_bdev_io) bdev_io_tailq_t;
 typedef STAILQ_HEAD(, spdk_bdev_io) bdev_io_stailq_t;
 
-// zhou: abstract object of backing disk, represents a generic block device (a disk).
+// zhou: abstract object, used to represent a generic block device (a disk).
+//       lib bdev will operate backing disk with it.
+//       And the struct should be part of backing storage their own struct,
+//       e.g. "struct nvme_bdev", "struct file_disk".
 struct spdk_bdev {
 	/** User context passed in by the backend */
 	void *ctxt;
@@ -400,6 +403,7 @@ struct spdk_bdev {
 		/** accumulated I/O statistics for previously deleted channels of this bdev */
 		struct spdk_bdev_io_stat stat;
 
+        // zhou: README,
 		/** histogram enabled on this bdev */
 		bool	histogram_enabled;
 		bool	histogram_in_progress;
@@ -507,7 +511,7 @@ struct spdk_bdev_io {
 	 */
 	struct __bdev_io_internal_fields {
 
-        // zhou:
+        // zhou: lib bdev IO channel
 		/** The bdev I/O channel that this was handled on. */
 		struct spdk_bdev_channel *ch;
 

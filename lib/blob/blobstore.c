@@ -2426,7 +2426,7 @@ _spdk_bs_channel_create(void *io_device, void *ctx_buf)
 	channel->bs = bs;
 	channel->dev = dev;
 
-    // zhou: underlying IO channel created by bdev_blob_create_channel().
+    // zhou: underlying I/O device's IO channel created by bdev_blob_create_channel().
 	channel->dev_channel = dev->create_channel(dev);
 
 	if (!channel->dev_channel) {
@@ -2667,7 +2667,7 @@ _spdk_bs_alloc(struct spdk_bs_dev *dev, struct spdk_bs_opts *opts, struct spdk_b
 
 	pthread_mutex_init(&bs->used_clusters_mutex, NULL);
 
-    // zhou: "bs" is context.
+    // zhou: "struct spdk_blob_store" is I/O device
 	spdk_io_device_register(bs, _spdk_bs_channel_create, _spdk_bs_channel_destroy,
 				sizeof(struct spdk_bs_channel), "blobstore");
 
@@ -3725,6 +3725,8 @@ _spdk_bs_init_trim_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
 //       Just like disk partition/format, need write nessary parameters into disk.
 //       Then some app like lvol could write raw disk with their private format.
 //       Other app have to based on BlobFS, to read/write file.
+//
+//       Build "struct spdk_blob_store" on "struct spdk_bs_dev"
 void
 spdk_bs_init(struct spdk_bs_dev *dev, struct spdk_bs_opts *o,
 	     spdk_bs_op_with_handle_complete cb_fn, void *cb_arg)
@@ -5733,6 +5735,8 @@ void spdk_blob_close(struct spdk_blob *blob, spdk_blob_op_complete cb_fn, void *
 ////////////////////////////////////////////////////////////////////////////////
 // zhou:
 
+// zhou: used by client to prepare I/O channel for spdk_blob_io_write(),
+//       spdk_blob_io_read(), ...
 struct spdk_io_channel *spdk_bs_alloc_io_channel(struct spdk_blob_store *bs)
 {
     // zhou: previously spdk_io_device_register() using "struct spdk_blob_store".

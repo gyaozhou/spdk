@@ -121,7 +121,9 @@ struct spdk_bdev_mgr {
 #endif
 };
 
-// zhou:
+// zhou: IO device for lib bdev itself. The only place to spdk_get_io_channel()
+//       get its channel, is when creating backing disk's I/O channel
+//       spdk_bdev_channel_create().
 static struct spdk_bdev_mgr g_bdev_mgr = {
 	.bdev_modules = TAILQ_HEAD_INITIALIZER(g_bdev_mgr.bdev_modules),
 	.bdevs = TAILQ_HEAD_INITIALIZER(g_bdev_mgr.bdevs),
@@ -190,11 +192,11 @@ struct spdk_bdev_qos {
 	struct spdk_poller *poller;
 };
 
-// zhou: definitely, there is no underlying IO channel.
-//       This IO channel private workspace just for context to fetch
+// zhou: definitely, there is no underlying I/O channel.
+//       This I/O channel private workspace just for context to fetch
 //       "struct spdk_bdev_io".
 struct spdk_bdev_mgmt_channel {
-
+    // zhou: README,
 	bdev_io_stailq_t need_buf_small;
 	bdev_io_stailq_t need_buf_large;
 
@@ -208,15 +210,21 @@ struct spdk_bdev_mgmt_channel {
 	 */
 	bdev_io_stailq_t per_thread_cache;
 
+    // zhou: how many "struct spdk_bdev_io" in list "per_thread_cache"
 	uint32_t	per_thread_cache_count;
+    // zhou: MAX number of list "per_thread_cache".
 	uint32_t	bdev_io_cache_size;
 
+    // zhou: README,
 	TAILQ_HEAD(, spdk_bdev_shared_resource)	shared_resources;
-    // zhou:
+    // zhou: README,
 	TAILQ_HEAD(, spdk_bdev_io_wait_entry)	io_wait_queue;
 };
 
-// zhou: README,
+// zhou: in case of multiply I/O device (struct spdk_bdev) based on same backing
+//       I/O device, e.g. the backing device could be access by different clients
+//       in parallally. These bdev should share same resrouce.
+
 /*
  * Per-module (or per-io_device) data. Multiple bdevs built on the same io_device
  * will queue here their IO that awaits retry. It makes it possible to retry sending
@@ -255,16 +263,17 @@ struct spdk_bdev_shared_resource {
 #define BDEV_CH_RESET_IN_PROGRESS	(1 << 0)
 #define BDEV_CH_QOS_ENABLED		(1 << 1)
 
-// zhou: IO channel private workspace, for each backing disk.
+// zhou: backing disk's I/O channel private workspace, for each backing disk.
 struct spdk_bdev_channel {
 
 	struct spdk_bdev	*bdev;
 
-    // zhou: !!! used to refer to IO channel of underlying device.
+    // zhou: !!! used to refer to I/O channel of underlying device.
     //       Different backing storage has its own IO device.
 	/* The channel for the underlying device */
 	struct spdk_io_channel	*channel;
 
+    // zhou: README,
 	/* Per io_device per thread data */
 	struct spdk_bdev_shared_resource *shared_resource;
 
@@ -323,6 +332,13 @@ struct set_qos_limit_ctx {
 	struct spdk_bdev *bdev;
 };
 
+// zhou: in case of nvme, "struct nvme_bdev{}" which first element is "struct spdk_bdev	disk"
+//       Previous struct will be passed to spdk_io_device_register() as, and later is same.
+//       So although two memory address will be passed to create IO device, but they are
+//       accidently share the same memery address.
+//
+//       So, by this way, the IO device passed to lib bdev in creating backing device, will
+//       minus 1 to differentiate IO device when link to thread.
 #define __bdev_to_io_dev(bdev)		(((char *)bdev) + 1)
 #define __bdev_from_io_dev(io_dev)	((struct spdk_bdev *)(((char *)io_dev) - 1))
 
@@ -606,6 +622,7 @@ spdk_bdev_io_put_buf(struct spdk_bdev_io *bdev_io)
 
 		STAILQ_REMOVE_HEAD(stailq, internal.buf_link);
 		tmp->internal.buf = buf;
+        // zhou: backing disk I/O channel
 		tmp->internal.get_buf_cb(tmp->internal.ch->channel, tmp, true);
 	}
 }
@@ -688,6 +705,7 @@ spdk_bdev_io_get_buf(struct spdk_bdev_io *bdev_io, spdk_bdev_io_get_buf_cb cb, u
 			spdk_bdev_io_set_buf(bdev_io, aligned_buf, len);
 		}
 		bdev_io->internal.buf = buf;
+        // zhou: backing disk I/O channel
 		bdev_io->internal.get_buf_cb(bdev_io->internal.ch->channel, bdev_io, true);
 	}
 }
@@ -794,8 +812,8 @@ spdk_bdev_subsystem_config_json(struct spdk_json_write_ctx *w)
 	spdk_json_write_array_end(w);
 }
 
-// zhou: README, bdev management channel create.
-//       Only one IO channel for bdev will be created ?
+// zhou: create I/O channel for I/O device "struct spdk_bdev_mgr".
+//       used when backing disk (I/O device "struct spdk_bdev") I/O channel created,
 static int
 spdk_bdev_mgmt_channel_create(void *io_device, void *ctx_buf)
 {
@@ -807,6 +825,7 @@ spdk_bdev_mgmt_channel_create(void *io_device, void *ctx_buf)
 	STAILQ_INIT(&ch->need_buf_large);
 
 	STAILQ_INIT(&ch->per_thread_cache);
+
 	ch->bdev_io_cache_size = g_bdev_opts.bdev_io_cache_size;
 
 	/* Pre-populate bdev_io cache to ensure this thread cannot be starved. */
@@ -2102,13 +2121,14 @@ spdk_bdev_channel_create(void *io_device, void *ctx_buf)
 	struct spdk_bdev_shared_resource *shared_resource;
 
 	ch->bdev = bdev;
-    // zhou: e.g. bdev_aio_get_io_channel(),
+    // zhou: set underlying device's I/O channel, by e.g. bdev_aio_get_io_channel(),
 	ch->channel = bdev->fn_table->get_io_channel(bdev->ctxt);
 	if (!ch->channel) {
 		return -1;
 	}
 
 	assert(ch->histogram == NULL);
+
 	if (bdev->internal.histogram_enabled) {
 		ch->histogram = spdk_histogram_data_alloc();
 		if (ch->histogram == NULL) {
@@ -2116,14 +2136,18 @@ spdk_bdev_channel_create(void *io_device, void *ctx_buf)
 		}
 	}
 
+    // zhou: get "struct spdk_bdev_mgr" I/O channel on this thread.
 	mgmt_io_ch = spdk_get_io_channel(&g_bdev_mgr);
 	if (!mgmt_io_ch) {
 		spdk_put_io_channel(ch->channel);
 		return -1;
 	}
 
+    // zhou: convert to "struct spdk_bdev_mgr" channel private workspace.
 	mgmt_ch = spdk_io_channel_get_ctx(mgmt_io_ch);
+
 	TAILQ_FOREACH(shared_resource, &mgmt_ch->shared_resources, link) {
+        // zhou: underlying device's I/O channel
 		if (shared_resource->shared_ch == ch->channel) {
 			spdk_put_io_channel(mgmt_io_ch);
 			shared_resource->ref++;
@@ -2131,6 +2155,7 @@ spdk_bdev_channel_create(void *io_device, void *ctx_buf)
 		}
 	}
 
+    // zhou:
 	if (shared_resource == NULL) {
 		shared_resource = calloc(1, sizeof(*shared_resource));
 		if (shared_resource == NULL) {
@@ -2145,6 +2170,7 @@ spdk_bdev_channel_create(void *io_device, void *ctx_buf)
 		shared_resource->nomem_threshold = 0;
 		shared_resource->shared_ch = ch->channel;
 		shared_resource->ref = 1;
+
 		TAILQ_INSERT_TAIL(&mgmt_ch->shared_resources, shared_resource, link);
 	}
 
@@ -2604,7 +2630,7 @@ _calculate_measured_qd(struct spdk_io_channel_iter *i)
 	struct spdk_io_channel *io_ch = spdk_io_channel_iter_get_channel(i);
 	struct spdk_bdev_channel *ch = spdk_io_channel_get_ctx(io_ch);
 
-    // zhou: collect outstanding IO number in different IO channel.
+    // zhou: collect outstanding IO number in different I/O channel.
 	bdev->internal.temporary_queue_depth += ch->io_outstanding;
 	spdk_for_each_channel_continue(i, 0);
 }
@@ -3576,12 +3602,15 @@ _spdk_bdev_ch_retry_io(struct spdk_bdev_channel *bdev_ch)
 	}
 
 	while (!TAILQ_EMPTY(&shared_resource->nomem_io)) {
+
 		bdev_io = TAILQ_FIRST(&shared_resource->nomem_io);
 		TAILQ_REMOVE(&shared_resource->nomem_io, bdev_io, internal.link);
+
 		bdev_io->internal.ch->io_outstanding++;
 		shared_resource->io_outstanding++;
 		bdev_io->internal.status = SPDK_BDEV_IO_STATUS_PENDING;
 		bdev->fn_table->submit_request(bdev_io->internal.ch->channel, bdev_io);
+
 		if (bdev_io->internal.status == SPDK_BDEV_IO_STATUS_NOMEM) {
 			break;
 		}
@@ -4098,7 +4127,8 @@ spdk_bdev_start(struct spdk_bdev *bdev)
 	}
 }
 
-// zhou: used when backing storage creating a disk, and register to a to bdev framework.
+// zhou: used when backing storage creating a disk, and register to a to bdev
+//       framework.  e.g. "create_aio_bdev()"
 int
 spdk_bdev_register(struct spdk_bdev *bdev)
 {
