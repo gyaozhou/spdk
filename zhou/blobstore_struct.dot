@@ -1,0 +1,100 @@
+digraph blobstore{
+  fontname = "Courier New";
+  fontsize = 10;
+  rankdir=TB;
+
+  node [fontname = "Courier New", fontsize = 10, color="skyblue", shape="record"];
+
+  edge [fontname = "Courier New", fontsize = 10, color="crimson", style="solid"];
+
+/*
+  // struct spdk_blob_mut_data
+  spdk_blob_mut_data [label="{<head> struct spdk_blob_mut_data|
+                      | uint64_t num_clusters
+                      | uint64_t * clusters
+                      | size_t cluster_array_size
+                      | uint32_t num_pages
+                      | uint32_t * pages
+                   }"];
+
+*/
+
+  // struct spdk_blob
+  spdk_blob [label="{<head> struct spdk_blob|
+                     |<bs> struct spdk_blob_store *bs
+                     |spdk_blob_id id
+                     |spdk_blob_id parent_id
+                     |enum spdk_blob_state state
+                     |<clean> struct spdk_blob_mut_data clean
+                     |<active> struct spdk_blob_mut_data active
+                     |<back_bs_dev> struct spdk_bs_dev * back_bs_dev
+                     |<link> TAILQ_ENTRY(spdk_blob) link
+                     | ...                               
+                     }"];
+
+  spdk_blob:bs -> spdk_blob_store:head[style="solid", color="forestgreen"];
+//  spdk_blob:clean -> spdk_blob_mut_data:head[arrowhead="none"]
+//  spdk_blob:active -> spdk_blob_mut_data:head[arrowhead="none"]
+  spdk_blob:back_bs_dev -> spdk_bs_dev:head[style="solid", color="forestgreen"];
+  spdk_blob:link -> spdk_blob_store:blobs[style="solid", color="forestgreen"];    
+
+
+
+  // struct spdk_blob_store
+  spdk_blob_store [label="{<head> struct spdk_blob_store|
+                   |uint64_t md_start
+                   |uint32_t md_len
+                   |<md_channel> struct spdk_io_channel * md_channel
+                   |<md_thread> struct spdk_thread * md_thread
+                   |<dev> struct spdk_bs_dev * dev
+                   |struct spdk_bit_array * used_md_pages
+                   |struct spdk_bit_array * used_clusters
+                   |struct spdk_bit_array * used_blobids
+                   | ...
+                   |<blobs> TAILQ_HEAD(, spdk_blob)		blobs
+                   | ...
+                   |bool clean
+                   }"];
+
+  //spdk_blob_store:md_channel -> spdk_io_channel:head[style="solid", color="forestgreen"];
+  //spdk_blob_store:md_thread -> spdk_thread:head[style="solid", color="forestgreen"];
+  spdk_blob_store:dev -> spdk_bs_dev:head[style="solid", color="forestgreen"];    
+
+
+
+  // struct blob_bdev
+  blob_bdev [label="{<head> struct blob_bdev|
+             |<bs_dev> struct spdk_bs_dev bs_dev
+             |<bdev> struct spdk_bdev * bdev
+             |<desc> struct spdk_bdev_desc * desc
+             |bool claimed
+             }"];
+  
+  blob_bdev:bs_dev -> spdk_bs_dev:head[arrowhead="none"]
+  // blob_bdev:bdev -> spdk_bdev:head[style="solid", color="forestgreen"];
+  // blob_bdev:desc -> spdk_bdev_desc:head[style="solid", color="forestgreen"];
+
+
+
+  // struct spdk_bs_dev
+  spdk_bs_dev [label="{<head> struct spdk_bs_dev|
+                   | (*create_channel)()
+                   | (*destroy_cahnnel)()
+                   | (*destroy)()
+                   | (*read)()
+                   | (*write)()
+                   | ...
+                   | uint64_t blockcnt
+                   | uint64_t blocklen
+                   }"];
+
+/*
+  // struct spdk_bs_type
+  spdk_bs_type [label="{<head> struct spdk_bs_type|
+                   | char bstype[SPDK_BLOBSTORE_TYPE_LENGTH];
+                   }"];
+*/
+
+
+}
+

@@ -1112,6 +1112,7 @@ struct spdk_bdev_io_wait_entry {
 	struct spdk_bdev			*bdev;
 	spdk_bdev_io_wait_cb			cb_fn;
 	void					*cb_arg;
+
 	TAILQ_ENTRY(spdk_bdev_io_wait_entry)	link;
 };
 

@@ -2671,7 +2671,12 @@ _spdk_bs_alloc(struct spdk_bs_dev *dev, struct spdk_bs_opts *opts, struct spdk_b
 	spdk_io_device_register(bs, _spdk_bs_channel_create, _spdk_bs_channel_destroy,
 				sizeof(struct spdk_bs_channel), "blobstore");
 
-    // zhou: get metadata IO channel
+    // zhou: get I/O channel for this thread.
+    //       The reason why we get so earlier is, we have to perform some IO on this
+    //       I/O device, to format disk (e.g. superblock, meta pages, ...).
+    //       Blobstore client will create I/O channel on this I/O device according
+    //       to which thread they are running. Once client share the same thread,
+    //       "struct spdk_blob_store.md_channel" will be reused.
 	rc = spdk_bs_register_md_thread(bs);
 	if (rc == -1) {
 		spdk_io_device_unregister(bs, NULL);
@@ -4276,11 +4281,12 @@ spdk_bs_total_data_cluster_count(struct spdk_blob_store *bs)
 	return bs->total_data_clusters;
 }
 
-// zhou: get metadata IO channel
+// zhou: register I/O device to thread, means get I/O channel for this thread.
 static int
 spdk_bs_register_md_thread(struct spdk_blob_store *bs)
 {
 	bs->md_channel = spdk_get_io_channel(bs);
+
 	if (!bs->md_channel) {
 		SPDK_ERRLOG("Failed to get IO channel.\n");
 		return -1;
@@ -5735,8 +5741,8 @@ void spdk_blob_close(struct spdk_blob *blob, spdk_blob_op_complete cb_fn, void *
 ////////////////////////////////////////////////////////////////////////////////
 // zhou:
 
-// zhou: used by client to prepare I/O channel for spdk_blob_io_write(),
-//       spdk_blob_io_read(), ...
+// zhou: used by client to create I/O channel for spdk_blob_io_write(),
+//       spdk_blob_io_read(), ..., according to which thread client running.
 struct spdk_io_channel *spdk_bs_alloc_io_channel(struct spdk_blob_store *bs)
 {
     // zhou: previously spdk_io_device_register() using "struct spdk_blob_store".

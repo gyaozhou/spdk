@@ -262,6 +262,7 @@ invalid:
 	free_rpc_rename_lvol_store(&req);
 }
 SPDK_RPC_REGISTER("rename_lvol_store", spdk_rpc_rename_lvol_store, SPDK_RPC_RUNTIME)
+////////////////////////////////////////////////////////////////////////////////
 
 struct rpc_destroy_lvol_store {
 	char *uuid;
@@ -450,6 +451,7 @@ invalid:
 }
 
 SPDK_RPC_REGISTER("construct_lvol_bdev", spdk_rpc_construct_lvol_bdev, SPDK_RPC_RUNTIME)
+////////////////////////////////////////////////////////////////////////////////
 
 struct rpc_snapshot_lvol_bdev {
 	char *lvol_name;

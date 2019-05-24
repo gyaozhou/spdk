@@ -164,7 +164,10 @@ struct spdk_io_channel {
 
 	uint32_t			ref;
 	uint32_t			destroy_ref;
+
+    // zhou: link to struct spdk_thread.io_channels
 	TAILQ_ENTRY(spdk_io_channel)	tailq;
+
 	spdk_io_channel_destroy_cb	destroy_cb;
 
     // zhou: more private data allocate together.

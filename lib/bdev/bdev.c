@@ -215,9 +215,28 @@ struct spdk_bdev_mgmt_channel {
     // zhou: MAX number of list "per_thread_cache".
 	uint32_t	bdev_io_cache_size;
 
-    // zhou: README,
+    // zhou: each underlying device's I/O device represent with a
+    //       "struct spdk_bdev_shared_resource". All I/O channel binding with
+    //       this thread will link with lib bdev I/O channel of this thread.
+    //
+    //       Then more than one backing disk I/O device over one underlying device,
+    //       can be identified in this list.
 	TAILQ_HEAD(, spdk_bdev_shared_resource)	shared_resources;
-    // zhou: README,
+
+    // zhou: wait queue due to no memory resource of this thread.
+    //
+    //       Refer to spdk_bdev_queue_io_wait() description:
+    /* Add an entry into the calling thread's queue to be notified when an
+       spdk_bdev_io becomes available.
+
+       When one of the @ref bdev_io_submit_functions returns -ENOMEM, it means
+       the spdk_bdev_io buffer pool has no available buffers. This function may
+       be called to register a callback to be notified when a buffer becomes
+       available on the calling thread.
+
+       The callback function will always be called on the same thread as this
+       function was called.
+     */
 	TAILQ_HEAD(, spdk_bdev_io_wait_entry)	io_wait_queue;
 };
 
@@ -257,6 +276,7 @@ struct spdk_bdev_shared_resource {
 	/* Refcount of bdev channels using this resource */
 	uint32_t		ref;
 
+    // zhou: link to "struct spdk_bdev_mgmt_channel.shared_resources"
 	TAILQ_ENTRY(spdk_bdev_shared_resource) link;
 };
 
@@ -1094,7 +1114,7 @@ spdk_bdev_initialize(spdk_bdev_init_cb cb_fn, void *cb_arg)
 #endif
 
 
-    // zhou: no matter bdev, backing storag device, frontend device...
+    // zhou: no matter lib bdev, each backing storag device, each frontend device...
     //       all of them looks as a IO device from lib/thread perspective.
 	spdk_io_device_register(&g_bdev_mgr, spdk_bdev_mgmt_channel_create,
 				spdk_bdev_mgmt_channel_destroy,
@@ -1857,6 +1877,7 @@ static void
 spdk_bdev_io_submit(struct spdk_bdev_io *bdev_io)
 {
 	struct spdk_bdev *bdev = bdev_io->bdev;
+    // zhou: get thread which the specified I/O channed binded.
 	struct spdk_thread *thread = spdk_io_channel_get_thread(bdev_io->internal.ch->channel);
 
 	assert(thread != NULL);
@@ -1880,8 +1901,12 @@ spdk_bdev_io_submit(struct spdk_bdev_io *bdev_io)
 		if ((thread == bdev->internal.qos->thread) || !bdev->internal.qos->thread) {
 			_spdk_bdev_io_submit(bdev_io);
 		} else {
+            // zhou: the specified I/O channel does not belong to current thread.
+
 			bdev_io->internal.io_submit_ch = bdev_io->internal.ch;
 			bdev_io->internal.ch = bdev->internal.qos->ch;
+
+            // zhou;
 			spdk_thread_send_msg(bdev->internal.qos->thread, _spdk_bdev_io_submit, bdev_io);
 		}
 
@@ -2136,7 +2161,7 @@ spdk_bdev_channel_create(void *io_device, void *ctx_buf)
 		}
 	}
 
-    // zhou: get "struct spdk_bdev_mgr" I/O channel on this thread.
+    // zhou: get I/O device "struct spdk_bdev_mgr" I/O channel of this thread.
 	mgmt_io_ch = spdk_get_io_channel(&g_bdev_mgr);
 	if (!mgmt_io_ch) {
 		spdk_put_io_channel(ch->channel);
@@ -2149,6 +2174,9 @@ spdk_bdev_channel_create(void *io_device, void *ctx_buf)
 	TAILQ_FOREACH(shared_resource, &mgmt_ch->shared_resources, link) {
         // zhou: underlying device's I/O channel
 		if (shared_resource->shared_ch == ch->channel) {
+            // zhou: here means "I will not keep 'mgmt_io_ch' it anymore in this case."
+            //       Because it's enough to keep it in "shared_resource->mgmt_ch" at
+            //       first time.
 			spdk_put_io_channel(mgmt_io_ch);
 			shared_resource->ref++;
 			break;
@@ -2166,7 +2194,9 @@ spdk_bdev_channel_create(void *io_device, void *ctx_buf)
 
 		shared_resource->mgmt_ch = mgmt_ch;
 		shared_resource->io_outstanding = 0;
+
 		TAILQ_INIT(&shared_resource->nomem_io);
+
 		shared_resource->nomem_threshold = 0;
 		shared_resource->shared_ch = ch->channel;
 		shared_resource->ref = 1;
@@ -3224,6 +3254,7 @@ spdk_bdev_flush(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
 	return spdk_bdev_flush_blocks(desc, ch, offset_blocks, num_blocks, cb, cb_arg);
 }
 
+// zhou:
 int
 spdk_bdev_flush_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
 		       uint64_t offset_blocks, uint64_t num_blocks,
@@ -3766,8 +3797,11 @@ spdk_bdev_io_complete(struct spdk_bdev_io *bdev_io, enum spdk_bdev_io_status sta
 		shared_resource->io_outstanding--;
 
 		if (spdk_unlikely(status == SPDK_BDEV_IO_STATUS_NOMEM)) {
+
 			assert(shared_resource->io_outstanding > 0);
+
 			TAILQ_INSERT_HEAD(&shared_resource->nomem_io, bdev_io, internal.link);
+
 			/*
 			 * Wait for some of the outstanding I/O to complete before we
 			 *  retry any of the nomem_io.  Normally we will wait for

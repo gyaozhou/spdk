@@ -54,22 +54,23 @@ static size_t g_ctx_sz = 0;
 //       entity (i.e. a blobstore).
 //       Once we want perform IO over a object, we must create a corresponding IO device.
 struct io_device {
-    // zhou: the address was used to identify who register this IO device.
+    // zhou: the address which was used to identify who register this IO device.
     //       e.g. "struct spdk_bdev_module aio_if",
 	void				*io_device;
 
+    // zhou: client provided in spdk_io_device_register(). e.g. "blobstore"
 	char				*name;
 
-    // zhou: IO device client registered
+    // zhou: used to create I/O channel of this I/O device
 	spdk_io_channel_create_cb	create_cb;
 	spdk_io_channel_destroy_cb	destroy_cb;
-
 
 	spdk_io_device_unregister_cb	unregister_cb;
 	struct spdk_thread		*unregister_thread;
 
-    // zhou: reserve private workspace when creating IO channel.
+    // zhou: reserve client's channel private workspace when creating I/O channel.
 	uint32_t			ctx_size;
+
 	uint32_t			for_each_count;
 
 	TAILQ_ENTRY(io_device)		tailq;
@@ -1059,6 +1060,7 @@ spdk_get_io_channel(void *io_device)
 	TAILQ_FOREACH(ch, &thread->io_channels, tailq) {
         // zhou: found the IO channel be created before.
 		if (ch->dev == dev) {
+            // zhou: when created already, increase reference count.
 			ch->ref++;
 
 			SPDK_DEBUGLOG(SPDK_LOG_THREAD, "Get io_channel %p for io_device %s (%p) on thread %s refcnt %u\n",
@@ -1190,6 +1192,7 @@ spdk_put_io_channel(struct spdk_io_channel *ch)
 
 	if (ch->ref == 0) {
 		ch->destroy_ref++;
+        // zhou: destroy it on binding thread.
 		spdk_thread_send_msg(ch->thread, _spdk_put_io_channel, ch);
 	}
 }

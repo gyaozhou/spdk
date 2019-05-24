@@ -1,0 +1,62 @@
+
+digraph bdev{
+  fontname = "Courier New";
+  fontsize = 10;
+  rankdir=TB;
+
+  node [fontname = "Courier New", fontsize = 10, color="skyblue", shape="record"];
+
+  edge [fontname = "Courier New", fontsize = 10, color="crimson", style="solid"];
+
+
+
+
+  // struct spdk_bdev
+  spdk_bdev [label="{<head> struct spdk_bdev|
+                     | ...
+                   }"];
+
+
+
+  // struct spdk_bdev_desc
+  spdk_bdev_desc [label="{<head> struct spdk_bdev_desc|
+                  |<bdev> struct spdk_bdev * bdev
+                  |<thread> struct spdk_thread * thread
+                  |<link> TAILQ_ENTRY(spdk_bdev_desc) link
+                  }"];
+
+  spdk_bdev_desc:bdev -> spdk_bdev:head[style="solid", color="forestgreen"];
+  spdk_bdev_desc:thread -> spdk_thread:head[style="solid", color="forestgreen"];  
+
+
+  // struct spdk_thread
+  spdk_thread [label="{<head> struct spdk_thread|
+                     |<io_channels>TAILQ_HEAD(, spdk_io_channel) io_channels
+                     | ...
+                   }"];
+
+
+
+  // struct spdk_io_channel
+  spdk_io_channel [label="{<head> struct spdk_io_channel|
+                     |<thread> struct spdk_thread * thread
+                     |<dev> struct io_device * dev
+                     |<tailq> TAILQ_ENTRY(spdk_io_channel) tailq
+                     | ...
+                   }"];
+
+  spdk_io_channel:thread -> spdk_thread:head[style="solid", color="forestgreen"];
+  spdk_io_channel:dev -> io_device:head[style="solid", color="forestgreen"];
+  spdk_io_channel:tailq -> spdk_thread:io_channels[style="solid", color="forestgreen"];      
+
+
+  // struct io_device
+  io_device [label="{<head> struct io_device|
+                     |void * io_device
+	                 |spdk_io_channel_create_cb create_cb;
+	                 |spdk_io_channel_destroy_cb destroy_cb;
+                     | ...
+                   }"];
+
+
+}

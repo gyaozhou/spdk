@@ -113,6 +113,10 @@ spdk_bs_sequence_completion(struct spdk_io_channel *channel, void *cb_arg, int b
 //       Just setup a Request Set common part.
 //       Comparing to Batch Request Set, Sequnce Mode completion function will not
 //       check all outstanding Requests are completed.
+//
+//       Always specify which I/O channed for performing this sequnce IO. For client
+//       data, the channel always is current thread. For metadata, always specify
+//       "md_channel".
 spdk_bs_sequence_t *
 spdk_bs_sequence_start(struct spdk_io_channel *_channel,
 		       struct spdk_bs_cpl *cpl)

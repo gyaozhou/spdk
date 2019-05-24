@@ -489,8 +489,7 @@ bdev_aio_io_type_supported(void *ctx, enum spdk_bdev_io_type io_type)
 	}
 }
 
-// zhou: when IO channel be find/create by spdk_get_io_channel() at first time,
-//       the "struct bdev_aio_io_channel" will be allocated by invoker.
+// zhou: README,
 static int
 bdev_aio_create_cb(void *io_device, void *ctx_buf)
 {

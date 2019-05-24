@@ -30,3 +30,5 @@ mk/config.mk
 PYTHON_COMMAND
 
 cscope.files
+zhou/*.png
+zhou/*.pdf

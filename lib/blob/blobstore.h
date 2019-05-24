@@ -193,8 +193,10 @@ struct spdk_blob_store {
 	uint64_t			md_start; /* Offset from beginning of disk, in pages */
 	uint32_t			md_len; /* Count, in pages */
 
-    // zhou: IO Channel which metadata maintenance thread.
+    // zhou: I/O Channel which created in metadata maintenance thread.
+    //       Used to perform IO of formating disk, and metadata flush.
 	struct spdk_io_channel		*md_channel;
+
 	uint32_t			max_channel_ops;
 
 	struct spdk_thread		*md_thread;
