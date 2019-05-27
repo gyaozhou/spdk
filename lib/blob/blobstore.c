@@ -179,7 +179,7 @@ spdk_blob_open_opts_init(struct spdk_blob_open_opts *opts)
 	opts->clear_method = BLOB_CLEAR_WITH_UNMAP;
 }
 
-// zhou: create "blob" object.
+// zhou: allocate "blob" object in memory.
 static struct spdk_blob *
 _spdk_blob_alloc(struct spdk_blob_store *bs, spdk_blob_id id)
 {
@@ -462,7 +462,7 @@ _spdk_blob_deserialize_xattr(struct spdk_blob *blob,
 	return 0;
 }
 
-
+// zhou: README,
 static int
 _spdk_blob_parse_page(const struct spdk_blob_md_page *page, struct spdk_blob *blob)
 {
@@ -470,6 +470,7 @@ _spdk_blob_parse_page(const struct spdk_blob_md_page *page, struct spdk_blob *bl
 	size_t	cur_desc = 0;
 	void *tmp;
 
+    // zhou: at the begining of metadata page.
 	desc = (struct spdk_blob_md_descriptor *)page->descriptors;
 	while (cur_desc < sizeof(page->descriptors)) {
 		if (desc->type == SPDK_MD_DESCRIPTOR_TYPE_PADDING) {
@@ -512,6 +513,7 @@ _spdk_blob_parse_page(const struct spdk_blob_md_page *page, struct spdk_blob *bl
 			blob->md_ro_flags = desc_flags->md_ro_flags;
 
 		} else if (desc->type == SPDK_MD_DESCRIPTOR_TYPE_EXTENT) {
+
 			struct spdk_blob_md_descriptor_extent	*desc_extent;
 			unsigned int				i, j;
 			unsigned int				cluster_count = blob->active.num_clusters;
@@ -538,23 +540,29 @@ _spdk_blob_parse_page(const struct spdk_blob_md_page *page, struct spdk_blob *bl
 			if (cluster_count == 0) {
 				return -EINVAL;
 			}
+
 			tmp = realloc(blob->active.clusters, cluster_count * sizeof(uint64_t));
 			if (tmp == NULL) {
 				return -ENOMEM;
 			}
+
 			blob->active.clusters = tmp;
 			blob->active.cluster_array_size = cluster_count;
 
 			for (i = 0; i < desc_extent->length / sizeof(desc_extent->extents[0]); i++) {
+
 				for (j = 0; j < desc_extent->extents[i].length; j++) {
+
 					if (desc_extent->extents[i].cluster_idx != 0) {
 						blob->active.clusters[blob->active.num_clusters++] = _spdk_bs_cluster_to_lba(blob->bs,
 								desc_extent->extents[i].cluster_idx + j);
+
 					} else if (spdk_blob_is_thin_provisioned(blob)) {
 						blob->active.clusters[blob->active.num_clusters++] = 0;
 					} else {
 						return -EINVAL;
 					}
+
 				}
 			}
 
@@ -1004,6 +1012,8 @@ error:
 	free(ctx);
 }
 
+// zhou: read blob one metadata page from disk completed. So it's a iteration for
+//       read metadata page one by one.
 static void
 _spdk_blob_load_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
 {
@@ -1035,10 +1045,10 @@ _spdk_blob_load_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
 		return;
 	}
 
+    // zhou: not meet the end of metadata pages, continous to read next page of disk.
 	if (page->next != SPDK_INVALID_MD_PAGE) {
 		uint32_t next_page = page->next;
 		uint64_t next_lba = _spdk_bs_page_to_lba(blob->bs, blob->bs->md_start + next_page);
-
 
 		assert(next_lba < (blob->bs->md_start + blob->bs->md_len));
 
@@ -1059,6 +1069,7 @@ _spdk_blob_load_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
 		return;
 	}
 
+    // zhou: parse all read meta pages.
 	/* Parse the pages */
 	rc = _spdk_blob_parse(ctx->pages, ctx->num_pages, blob);
 	if (rc) {
@@ -1072,6 +1083,7 @@ _spdk_blob_load_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
 
 
 	if (spdk_blob_is_thin_provisioned(blob)) {
+
 		rc = _spdk_blob_get_xattr_value(blob, BLOB_SNAPSHOT, &value, &len, true);
 		if (rc == 0) {
 			if (len != sizeof(spdk_blob_id)) {
@@ -2298,13 +2310,18 @@ _spdk_blob_request_submit_rw_iov(struct spdk_blob *blob, struct spdk_io_channel 
 				return;
 			}
 
+            // zhou:
 			if (_spdk_bs_io_unit_is_allocated(blob, offset)) {
 				spdk_bs_sequence_readv_dev(seq, iov, iovcnt, lba, lba_count, _spdk_rw_iov_done, NULL);
 			} else {
+                // zhou: thin provision,
 				spdk_bs_sequence_readv_bs_dev(seq, blob->back_bs_dev, iov, iovcnt, lba, lba_count,
 							      _spdk_rw_iov_done, NULL);
 			}
+
 		} else {
+            // zhou: write
+
 			if (_spdk_bs_io_unit_is_allocated(blob, offset)) {
 				spdk_bs_sequence_t *seq;
 
@@ -2328,6 +2345,7 @@ _spdk_blob_request_submit_rw_iov(struct spdk_blob *blob, struct spdk_io_channel 
 
 				_spdk_bs_allocate_and_copy_cluster(blob, _channel, offset, op);
 			}
+
 		}
 	} else {
 		struct rw_iov_ctx *ctx;
@@ -2638,6 +2656,7 @@ _spdk_bs_alloc(struct spdk_bs_dev *dev, struct spdk_bs_opts *opts, struct spdk_b
 
 	TAILQ_INIT(&bs->blobs);
 	TAILQ_INIT(&bs->snapshots);
+
 	bs->dev = dev;
 	bs->md_thread = spdk_get_thread();
 	assert(bs->md_thread != NULL);
@@ -5044,6 +5063,8 @@ _spdk_bs_inflate_blob_done(void *cb_arg, int bserrno)
 		_spdk_blob_remove_xattr(_blob, BLOB_SNAPSHOT, true);
 		_blob->parent_id = SPDK_BLOBID_INVALID;
 		_blob->back_bs_dev->destroy(_blob->back_bs_dev);
+
+        // zhou: create a zero disk assign to "back_bs_dev"
 		_blob->back_bs_dev = spdk_bs_create_zeroes_dev();
 	}
 
@@ -5499,6 +5520,7 @@ static void _spdk_bs_open_blob(struct spdk_blob_store *bs, spdk_blob_id blobid,
 		return;
 	}
 
+    // zhou: check all opended blob in memory.
 	blob = _spdk_blob_lookup(bs, blobid);
 	if (blob) {
 		blob->open_ref++;
@@ -5531,9 +5553,11 @@ static void _spdk_bs_open_blob(struct spdk_blob_store *bs, spdk_blob_id blobid,
 		return;
 	}
 
+    // zhou: load metadat from disk
 	_spdk_blob_load(seq, blob, _spdk_bs_open_blob_cpl, blob);
 }
 
+// zhou: each time have to open blob before READ/WRITE, even if just create it.
 void spdk_bs_open_blob(struct spdk_blob_store *bs, spdk_blob_id blobid,
 		       spdk_blob_op_with_handle_complete cb_fn, void *cb_arg)
 {

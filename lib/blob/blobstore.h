@@ -156,11 +156,22 @@ struct spdk_blob {
     // zhou: metadata readonly
 	bool		md_ro;
 
+    // zhou: SPDK_BLOB_THIN_PROV, ...
 	uint64_t	invalid_flags;
 
 	uint64_t	data_ro_flags;
 	uint64_t	md_ro_flags;
 
+    // zhou: used in thin-provision, clone/snapshot.
+    //       In such cases, the blob with featured disabled, will read bdev directly.
+    //       For normal bdev operations, have to performed on
+    //       "struct spdk_blob_store.dev".
+    //
+    //       Client read active clusters firstly, when not allocated, read
+    //       "back_bs_dev".
+    //       When thin-provision enabled, "back_bs_dev = spdk_bs_create_zeroes_dev()"
+    //       When clone/snapshot enabled, "back_bs_dev = spdk_bs_create_blob_bs_dev()"
+    //       No such feature enabled, just set NULL.
 	struct spdk_bs_dev *back_bs_dev;
 
 	/* TODO: The xattrs are mutable, but we don't want to be
@@ -201,9 +212,7 @@ struct spdk_blob_store {
 
 	struct spdk_thread		*md_thread;
 
-    // zhou: operations related  "struct spdk_bdev",
-    //       "struct blob_bdev" includes "struct spdk_bdev"
-    //       README,
+    // zhou: created by spdk_bdev_create_bs_dev(), passed when _spdk_bs_alloc().
 	struct spdk_bs_dev		*dev;
 
     // zhou: all of bitmap below will be wrote into disk.
@@ -247,6 +256,7 @@ struct spdk_bs_channel {
 
 	struct spdk_blob_store		*bs;
 
+    // zhou:
 	struct spdk_bs_dev		*dev;
     // zhou: !!! refer to IO channel of underlying device.
 	struct spdk_io_channel		*dev_channel;
@@ -270,6 +280,7 @@ enum spdk_blob_op_type {
 #define BLOB_SNAPSHOT "SNAP"
 #define SNAPSHOT_IN_PROGRESS "SNAPTMP"
 
+// zhou:
 struct spdk_blob_bs_dev {
 	struct spdk_bs_dev bs_dev;
 	struct spdk_blob *blob;
@@ -661,7 +672,9 @@ _spdk_bs_io_unit_is_allocated(struct spdk_blob *blob, uint64_t io_unit)
 	lba = blob->active.clusters[page / pages_per_cluster];
 
 	if (lba == 0) {
+        // zhou: only happened in Thin Provision.
 		assert(spdk_blob_is_thin_provisioned(blob));
+
 		return false;
 	} else {
 		return true;

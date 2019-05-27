@@ -83,7 +83,7 @@ struct spdk_lvol_with_handle_req {
 	struct spdk_lvol		*lvol;
 };
 
-// zhou: README,
+// zhou: lvol store
 struct spdk_lvol_store {
 	struct spdk_bs_dev		*bs_dev;
 	struct spdk_blob_store		*blobstore;
@@ -103,6 +103,7 @@ struct spdk_lvol_store {
 	char				new_name[SPDK_LVS_NAME_MAX];
 };
 
+// zhou: lvol
 struct spdk_lvol {
 	struct spdk_lvol_store		*lvol_store;
 	struct spdk_blob		*blob;
@@ -117,7 +118,7 @@ struct spdk_lvol {
 	bool				action_in_progress;
 	enum blob_clear_method		clear_method;
 	TAILQ_ENTRY(spdk_lvol) link;
-};
+};'
 
 struct lvol_task {
 	enum spdk_bdev_io_status	status;

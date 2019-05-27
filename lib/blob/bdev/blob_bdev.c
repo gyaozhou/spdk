@@ -309,6 +309,7 @@ spdk_bs_bdev_claim(struct spdk_bs_dev *bs_dev, struct spdk_bdev_module *module)
 	return rc;
 }
 
+// zhou:
 static struct spdk_io_channel *
 bdev_blob_create_channel(struct spdk_bs_dev *dev)
 {
@@ -342,6 +343,19 @@ bdev_blob_destroy(struct spdk_bs_dev *bs_dev)
 //       BlobStore backend storage
 //       Used by lvol vbdev_lvs_create() and blobfs spdk_mkfs_run().
 //       Open "struct spdk_bdev", represent as "struct blob_bdev", "struct spdk_bs_dev"
+/*
+	    "spdk_bs_init() requires us to fill out the structure
+	     spdk_bs_dev with a set of callbacks. These callbacks
+	     implement read, write, and other operations on the
+	     underlying disks. As a convenience, a utility function
+	     is provided that creates an spdk_bs_dev that implements
+	     all of the callbacks by forwarding the I/O to the
+	     SPDK bdev layer. Other helper functions are also
+	     available in the blob lib in blob_bdev.c that simply
+	     make it easier to layer blobstore on top of a bdev.
+	     However blobstore can be more tightly integrated into
+	     any lower layer, such as NVMe for example."
+ */
 struct spdk_bs_dev *
 spdk_bdev_create_bs_dev(struct spdk_bdev *bdev, spdk_bdev_remove_cb_t remove_cb, void *remove_ctx)
 {
