@@ -94,8 +94,11 @@ spdk_fd_get_size(int fd)
 	}
 
 	if (S_ISBLK(st.st_mode) || S_ISCHR(st.st_mode)) {
+        // zhou: Block or Char device
 		return dev_get_size(fd);
+
 	} else if (S_ISREG(st.st_mode)) {
+        // zhou: regular file
 		return st.st_size;
 	}
 

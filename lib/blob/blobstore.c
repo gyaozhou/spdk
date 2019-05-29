@@ -2037,7 +2037,7 @@ _spdk_blob_request_submit_op_single(struct spdk_io_channel *_ch, struct spdk_blo
 			return;
 		}
 
-        // zhou: once thin provision, and have been allocated???
+        // zhou: multi-layer
 
 		if (_spdk_bs_io_unit_is_allocated(blob, offset)) {
 			/* Read from the blob */
@@ -2314,7 +2314,7 @@ _spdk_blob_request_submit_rw_iov(struct spdk_blob *blob, struct spdk_io_channel 
 			if (_spdk_bs_io_unit_is_allocated(blob, offset)) {
 				spdk_bs_sequence_readv_dev(seq, iov, iovcnt, lba, lba_count, _spdk_rw_iov_done, NULL);
 			} else {
-                // zhou: thin provision,
+                // zhou: multi-layer and not allocated, redirect IO to back_bs_dev.
 				spdk_bs_sequence_readv_bs_dev(seq, blob->back_bs_dev, iov, iovcnt, lba, lba_count,
 							      _spdk_rw_iov_done, NULL);
 			}
@@ -4733,8 +4733,11 @@ _spdk_bs_snapshot_freeze_cpl(void *cb_arg, int rc)
 
 	ctx->frozen = true;
 
+    // zhou: in case of Snapshot/Clone, set old blob as "back_bs_dev"
+    //       (should bereadonly).
 	/* set new back_bs_dev for snapshot */
 	newblob->back_bs_dev = origblob->back_bs_dev;
+
 	/* Set invalid flags from origblob */
 	newblob->invalid_flags = origblob->invalid_flags;
 
@@ -5023,6 +5026,7 @@ _spdk_bs_inflate_blob_set_parent_cpl(void *cb_arg, struct spdk_blob *_parent, in
 	_spdk_blob_set_xattr(_blob, BLOB_SNAPSHOT, &_blob->parent_id,
 			     sizeof(spdk_blob_id), true);
 
+    // zhou: don't rely on old blob any more.
 	_blob->back_bs_dev->destroy(_blob->back_bs_dev);
 	_blob->back_bs_dev = spdk_bs_create_blob_bs_dev(_parent);
 	_spdk_bs_blob_list_add(_blob);
@@ -5043,6 +5047,7 @@ _spdk_bs_inflate_blob_done(void *cb_arg, int bserrno)
 	}
 
 	if (ctx->allocate_all) {
+
 		/* remove thin provisioning */
 		_spdk_bs_blob_list_remove(_blob);
 		_spdk_blob_remove_xattr(_blob, BLOB_SNAPSHOT, true);
@@ -5050,7 +5055,9 @@ _spdk_bs_inflate_blob_done(void *cb_arg, int bserrno)
 		_blob->back_bs_dev->destroy(_blob->back_bs_dev);
 		_blob->back_bs_dev = NULL;
 		_blob->parent_id = SPDK_BLOBID_INVALID;
+
 	} else {
+
 		_parent = ((struct spdk_blob_bs_dev *)(_blob->back_bs_dev))->blob;
 		if (_parent->parent_id != SPDK_BLOBID_INVALID) {
 			/* We must change the parent of the inflated blob */

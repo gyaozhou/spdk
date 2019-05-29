@@ -196,7 +196,8 @@ struct spdk_bdev_qos {
 //       This I/O channel private workspace just for context to fetch
 //       "struct spdk_bdev_io".
 struct spdk_bdev_mgmt_channel {
-    // zhou: README,
+
+    // zhou: README, IO are waiting on a data buffer.
 	bdev_io_stailq_t need_buf_small;
 	bdev_io_stailq_t need_buf_large;
 
@@ -259,6 +260,7 @@ struct spdk_bdev_shared_resource {
 	 */
 	uint64_t		io_outstanding;
 
+    // zhou: queued IO due to no memory.
 	/*
 	 * Queue of IO awaiting retry because of a previous NOMEM status returned
 	 *  on this channel.
@@ -305,6 +307,7 @@ struct spdk_bdev_channel {
 	 */
 	uint64_t		io_outstanding;
 
+    // zhou:
 	bdev_io_tailq_t		queued_resets;
 
 	uint32_t		flags;
@@ -739,6 +742,8 @@ spdk_bdev_io_get_buf(struct spdk_bdev_io *bdev_io, spdk_bdev_io_get_buf_cb cb, u
 //
 //       For this function, will find out enough room to hold context of all supporting
 //       bakcing storage.
+//       Then, we can allocate reserve enough space when create mempool for
+//       "struct spdk_bdev_io"
 static int
 spdk_bdev_module_get_max_ctx_size(void)
 {
@@ -1916,6 +1921,7 @@ spdk_bdev_io_submit(struct spdk_bdev_io *bdev_io)
 	}
 }
 
+// zhou: submit RESET to underlying device in this thread/channel.
 static void
 spdk_bdev_io_submit_reset(struct spdk_bdev_io *bdev_io)
 {
@@ -2235,6 +2241,7 @@ spdk_bdev_channel_create(void *io_device, void *ctx_buf)
 	return 0;
 }
 
+// zhou:
 /*
  * Abort I/O that are waiting on a data buffer.  These types of I/O are
  *  linked using the spdk_bdev_io internal.buf_link TAILQ_ENTRY.
@@ -2260,6 +2267,7 @@ _spdk_bdev_abort_buf_io(bdev_io_stailq_t *queue, struct spdk_bdev_channel *ch)
 	STAILQ_SWAP(&tmp, queue, spdk_bdev_io);
 }
 
+// zhou: ABORT IO in queue.
 /*
  * Abort I/O that are queued waiting for submission.  These types of I/O are
  *  linked using the spdk_bdev_io link TAILQ_ENTRY.
@@ -2392,6 +2400,7 @@ spdk_bdev_channel_destroy(void *io_device, void *ctx_buf)
 
 	_spdk_bdev_abort_queued_io(&ch->queued_resets, ch);
 	_spdk_bdev_abort_queued_io(&shared_resource->nomem_io, ch);
+
 	_spdk_bdev_abort_buf_io(&mgmt_ch->need_buf_small, ch);
 	_spdk_bdev_abort_buf_io(&mgmt_ch->need_buf_large, ch);
 
@@ -3284,12 +3293,14 @@ spdk_bdev_flush_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
 	bdev_io->u.bdev.iovcnt = 0;
 	bdev_io->u.bdev.offset_blocks = offset_blocks;
 	bdev_io->u.bdev.num_blocks = num_blocks;
+
 	spdk_bdev_io_init(bdev_io, bdev, cb_arg, cb);
 
 	spdk_bdev_io_submit(bdev_io);
 	return 0;
 }
 
+// zhou: all thread/channel be notified that IO was froze.
 static void
 _spdk_bdev_reset_dev(struct spdk_io_channel_iter *i, int status)
 {
@@ -3298,9 +3309,13 @@ _spdk_bdev_reset_dev(struct spdk_io_channel_iter *i, int status)
 
 	bdev_io = TAILQ_FIRST(&ch->queued_resets);
 	TAILQ_REMOVE(&ch->queued_resets, bdev_io, internal.link);
+
+    // zhou: unlike other IO which could be performed on all channel in parallal.
+    //       RESET will be performed on one thread/channel only.
 	spdk_bdev_io_submit_reset(bdev_io);
 }
 
+// zhou: freeze to prepare reset underlying device in this channel.
 static void
 _spdk_bdev_reset_freeze_channel(struct spdk_io_channel_iter *i)
 {
@@ -3314,7 +3329,7 @@ _spdk_bdev_reset_freeze_channel(struct spdk_io_channel_iter *i)
 
 	ch = spdk_io_channel_iter_get_channel(i);
 	channel = spdk_io_channel_get_ctx(ch);
-	shared_resource = channel->shared_resource;
+	shared_resource = channel->shared_resource;n
 	mgmt_channel = shared_resource->mgmt_ch;
 
 	channel->flags |= BDEV_CH_RESET_IN_PROGRESS;
@@ -3331,6 +3346,7 @@ _spdk_bdev_reset_freeze_channel(struct spdk_io_channel_iter *i)
 		pthread_mutex_unlock(&channel->bdev->internal.mutex);
 	}
 
+    // zhou:
 	_spdk_bdev_abort_queued_io(&shared_resource->nomem_io, channel);
 	_spdk_bdev_abort_buf_io(&mgmt_channel->need_buf_small, channel);
 	_spdk_bdev_abort_buf_io(&mgmt_channel->need_buf_large, channel);
@@ -3339,6 +3355,7 @@ _spdk_bdev_reset_freeze_channel(struct spdk_io_channel_iter *i)
 	spdk_for_each_channel_continue(i, 0);
 }
 
+// zhou: notify each thread/channel to freeze IO, no more new IO could be submited.
 static void
 _spdk_bdev_start_reset(void *ctx)
 {
@@ -3401,6 +3418,7 @@ spdk_bdev_reset(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
 	bdev_io->internal.desc = desc;
 	bdev_io->type = SPDK_BDEV_IO_TYPE_RESET;
 	bdev_io->u.reset.ch_ref = NULL;
+
 	spdk_bdev_io_init(bdev_io, bdev, cb_arg, cb);
 
 	pthread_mutex_lock(&bdev->internal.mutex);

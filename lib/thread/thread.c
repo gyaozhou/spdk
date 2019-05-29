@@ -714,9 +714,9 @@ spdk_thread_send_msg(const struct spdk_thread *thread, spdk_msg_fn fn, void *ctx
 }
 
 // zhou: register poller's callback function.
-//       Once the "period_microseconds" == 0, will be automatically append to
+//       If "period_microseconds" == 0, will be automatically append to
 //       tail of queue when completed.
-//       Once the "period_microseconds" > 0, will work like a repeatly timer.
+//       If "period_microseconds" > 0, will work like a repeatly timer.
 struct spdk_poller *
 spdk_poller_register(spdk_poller_fn fn,
 		     void *arg,
@@ -1103,7 +1103,8 @@ spdk_get_io_channel(void *io_device)
 
 	pthread_mutex_unlock(&g_devlist_mutex);
 
-    // zhou: create IO channel for this IO device in this thread.
+    // zhou: invoke callback function for create I/O channel of this I/O device in
+    //       this thread.
 	rc = dev->create_cb(io_device, (uint8_t *)ch + sizeof(*ch));
 
 	if (rc != 0) {

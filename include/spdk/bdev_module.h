@@ -110,6 +110,8 @@ struct spdk_bdev_module {
 	/** Name for the modules being defined. */
 	const char *name;
 
+    // zhou: used to get the size of driver workspace for each "struct spdk_bdev_io".
+    //       e.g. bdev_aio_get_ctx_size().
 	/**
 	 * Returns the allocation size required for the backend for uses such as local
 	 * command structs, local SGL, iovecs, or other user context.
@@ -251,6 +253,8 @@ typedef STAILQ_HEAD(, spdk_bdev_io) bdev_io_stailq_t;
 //       And the struct should be part of backing storage their own struct,
 //       e.g. "struct nvme_bdev", "struct file_disk".
 struct spdk_bdev {
+    // zhou: used by operations in "fn_table".
+    //       e.g. "struct file_disk", private context.
 	/** User context passed in by the backend */
 	void *ctxt;
 
@@ -260,6 +264,7 @@ struct spdk_bdev {
 	/** Unique aliases for this block device. */
 	TAILQ_HEAD(spdk_bdev_aliases_list, spdk_bdev_alias) aliases;
 
+    // zhou: e.g. "AIO disk"
 	/** Unique product name for this kind of block device. */
 	char *product_name;
 
@@ -337,11 +342,13 @@ struct spdk_bdev {
 	 */
 	uint32_t dif_check_flags;
 
+    // zhou: which kind of bdev subsystem. e.g. "aio_if"
 	/**
 	 * Pointer to the bdev module that registered this bdev.
 	 */
 	struct spdk_bdev_module *module;
 
+    // zhou: operations of backend storage, includes "submit_request", "get_io_channel"
 	/** function table for all LUN ops */
 	const struct spdk_bdev_fn_table *fn_table;
 
@@ -442,17 +449,21 @@ struct spdk_bdev_io {
 
 	union {
 		struct {
+            // zhou: "iovs" and "iovcnt" used to descibe data/space in memory.
 			/** For SG buffer cases, array of iovecs to transfer. */
 			struct iovec *iovs;
 
 			/** For SG buffer cases, number of iovecs in iovec array. */
 			int iovcnt;
 
+
+            // zhou: "num_blocks" and "offset_blocks" used to describe data/space in disk.
 			/** Total size of data to be transferred. */
 			uint64_t num_blocks;
 
 			/** Starting offset (in blocks) of the bdev for this I/O. */
 			uint64_t offset_blocks;
+
 
 			/** stored user callback in case we split the I/O and use a temporary callback */
 			spdk_bdev_io_completion_cb stored_user_cb;
@@ -466,6 +477,7 @@ struct spdk_bdev_io {
 			/** count of outstanding batched split I/Os */
 			uint32_t split_outstanding;
 
+
 			struct {
 				/** Whether the buffer should be populated with the real data */
 				uint8_t populate : 1;
@@ -476,6 +488,7 @@ struct spdk_bdev_io {
 				/** True if this request is in the 'start' phase of zcopy. False if in 'end'. */
 				uint8_t start : 1;
 			} zcopy;
+
 		} bdev;
 
 		struct {

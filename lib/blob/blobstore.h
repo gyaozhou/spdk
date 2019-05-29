@@ -655,7 +655,7 @@ _spdk_bs_io_unit_to_cluster_number(struct spdk_blob *blob, uint64_t io_unit)
 	return (io_unit / _spdk_bs_io_unit_per_page(blob->bs)) / blob->bs->pages_per_cluster;
 }
 
-
+// zhou: single layer, or multi-layer already allocated.
 /* Given an io unit offset into a blob, look up if it is from allocated cluster. */
 static inline bool
 _spdk_bs_io_unit_is_allocated(struct spdk_blob *blob, uint64_t io_unit)
@@ -672,7 +672,8 @@ _spdk_bs_io_unit_is_allocated(struct spdk_blob *blob, uint64_t io_unit)
 	lba = blob->active.clusters[page / pages_per_cluster];
 
 	if (lba == 0) {
-        // zhou: only happened in Thin Provision.
+        // zhou: thin provision including Thin Provisioning and Snapshot/Clone.
+        //       Just means there more than one layer for this blob.
 		assert(spdk_blob_is_thin_provisioned(blob));
 
 		return false;

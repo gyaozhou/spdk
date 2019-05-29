@@ -101,16 +101,24 @@ struct spdk_bdev_desc;
 /** bdev I/O type */
 enum spdk_bdev_io_type {
 	SPDK_BDEV_IO_TYPE_INVALID = 0,
+
 	SPDK_BDEV_IO_TYPE_READ,
 	SPDK_BDEV_IO_TYPE_WRITE,
+
 	SPDK_BDEV_IO_TYPE_UNMAP,
 	SPDK_BDEV_IO_TYPE_FLUSH,
+
+    // zhou: reset device, must wait for all outstanding IO completed.
 	SPDK_BDEV_IO_TYPE_RESET,
+
 	SPDK_BDEV_IO_TYPE_NVME_ADMIN,
 	SPDK_BDEV_IO_TYPE_NVME_IO,
 	SPDK_BDEV_IO_TYPE_NVME_IO_MD,
+
 	SPDK_BDEV_IO_TYPE_WRITE_ZEROES,
+
 	SPDK_BDEV_IO_TYPE_ZCOPY,
+
 	SPDK_BDEV_NUM_IO_TYPES /* Keep last */
 };
 
