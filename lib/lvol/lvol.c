@@ -1028,7 +1028,7 @@ _spdk_lvs_verify_lvol_name(struct spdk_lvol_store *lvs, const char *name)
 	return 0;
 }
 
-// zhou: README, Thin Provision
+// zhou: README, used by bdev/lvol
 int
 spdk_lvol_create(struct spdk_lvol_store *lvs, const char *name, uint64_t sz,
 		 bool thin_provision, enum lvol_clear_method clear_method, spdk_lvol_op_with_handle_complete cb_fn,

@@ -279,10 +279,12 @@ bdev_aio_destruct(void *ctx)
 	int rc = 0;
 
 	TAILQ_REMOVE(&g_aio_disk_head, fdisk, link);
+
 	rc = bdev_aio_close(fdisk);
 	if (rc < 0) {
 		SPDK_ERRLOG("bdev_aio_close() failed\n");
 	}
+
 	spdk_io_device_unregister(fdisk, NULL);
 	aio_free_disk(fdisk);
 	return rc;
@@ -609,13 +611,19 @@ bdev_aio_write_json_config(struct spdk_bdev *bdev, struct spdk_json_write_ctx *w
 
 // zhou: all kinds of backend storage should provide such operations.
 static const struct spdk_bdev_fn_table aio_fn_table = {
-
+    // zhou: Destroy the backend block device object
 	.destruct		= bdev_aio_destruct,
+    // zhou: Process the IO
 	.submit_request		= bdev_aio_submit_request,
+    // zhou: Check if the block device supports a specific I/O type.
 	.io_type_supported	= bdev_aio_io_type_supported,
+    // zhou: Get an I/O channel for the specific bdev for the calling thread
 	.get_io_channel		= bdev_aio_get_io_channel,
+
 	.dump_info_json		= bdev_aio_dump_info_json,
 	.write_config_json	= bdev_aio_write_json_config,
+
+    // zhou: ".get_spin_time"
 };
 
 static void aio_free_disk(struct file_disk *fdisk)
@@ -665,6 +673,9 @@ create_aio_bdev(const char *name, const char *filename, uint32_t block_size)
 	uint64_t disk_size;
 	int rc;
 
+    // zhou: each time will create a new disk register to bdev, no matter the
+    //       underlying /dev/sda or file has been used or not.
+    //       That's means, more than one bdev could be registered for a physical entity.
 	fdisk = calloc(1, sizeof(*fdisk));
 	if (!fdisk) {
 		SPDK_ERRLOG("Unable to allocate enough memory for aio backend\n");
@@ -741,6 +752,7 @@ create_aio_bdev(const char *name, const char *filename, uint32_t block_size)
 
     // zhou:
 	fdisk->disk.blockcnt = disk_size / fdisk->disk.blocklen;
+    // zhou: bdev will use it as context for invoking functions in fn_table.
 	fdisk->disk.ctxt = fdisk;
 
 	fdisk->disk.fn_table = &aio_fn_table;

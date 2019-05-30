@@ -103,7 +103,7 @@ struct spdk_lvol_store {
 	char				new_name[SPDK_LVS_NAME_MAX];
 };
 
-// zhou: lvol
+// zhou: README,
 struct spdk_lvol {
 	struct spdk_lvol_store		*lvol_store;
 	struct spdk_blob		*blob;

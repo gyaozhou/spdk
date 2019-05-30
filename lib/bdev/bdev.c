@@ -94,26 +94,27 @@ TAILQ_HEAD(spdk_bdev_list, spdk_bdev);
 // zhou:
 struct spdk_bdev_mgr {
     // zhou: each member includes
-    //       "struct spdk_bdev_io" + private space for backing storage.
+    //       "struct spdk_bdev_io" + driver private space for each type of
+    //       underlying device
 	struct spdk_mempool *bdev_io_pool;
 
-    // zhou: general purpose for small and large object
+    // zhou: general purpose for small and large object, to hold READ/WRITE buffer?
 	struct spdk_mempool *buf_small_pool;
 	struct spdk_mempool *buf_large_pool;
 
     // zhou: 1 MB memory
 	void *zero_buffer;
 
-    // zhou: manage all kinds of backing storage.
+    // zhou: manage all types of underlying device.
 	TAILQ_HEAD(bdev_module_list, spdk_bdev_module) bdev_modules;
 
-    // zhou: no mattach which type, here just a list of backing disks.
-    //       Pay attention, may be more than one disks of one type backing storage.
+    // zhou: no mattach which type, here just a list of underlying device disks.
+    //       Pay attention, may be more than one disk of one type underlying device.
 	struct spdk_bdev_list bdevs;
 
     // zhou: bdev init completed.
 	bool init_complete;
-    // zhou: backing storage module init completed
+    // zhou: all types of underlying device module init completed
 	bool module_init_complete;
 
 #ifdef SPDK_CONFIG_VTUNE
@@ -122,7 +123,7 @@ struct spdk_bdev_mgr {
 };
 
 // zhou: IO device for lib bdev itself. The only place to spdk_get_io_channel()
-//       get its channel, is when creating backing disk's I/O channel
+//       get its channel, is when creating underlying disk's I/O channel
 //       spdk_bdev_channel_create().
 static struct spdk_bdev_mgr g_bdev_mgr = {
 	.bdev_modules = TAILQ_HEAD_INITIALIZER(g_bdev_mgr.bdev_modules),
@@ -216,11 +217,11 @@ struct spdk_bdev_mgmt_channel {
     // zhou: MAX number of list "per_thread_cache".
 	uint32_t	bdev_io_cache_size;
 
-    // zhou: each underlying device's I/O device represent with a
+    // zhou: each type of underlying controller's I/O device represent with a
     //       "struct spdk_bdev_shared_resource". All I/O channel binding with
     //       this thread will link with lib bdev I/O channel of this thread.
     //
-    //       Then more than one backing disk I/O device over one underlying device,
+    //       Then more than one underlying disk I/O device over one underlying device,
     //       can be identified in this list.
 	TAILQ_HEAD(, spdk_bdev_shared_resource)	shared_resources;
 
@@ -241,9 +242,12 @@ struct spdk_bdev_mgmt_channel {
 	TAILQ_HEAD(, spdk_bdev_io_wait_entry)	io_wait_queue;
 };
 
-// zhou: in case of multiply I/O device (struct spdk_bdev) based on same backing
-//       I/O device, e.g. the backing device could be access by different clients
-//       in parallally. These bdev should share same resrouce.
+// zhou: in case of more than device (struct spdk_bdev) based on underlying disk
+//       (corresponding a I/O device).
+//       In this case, Block Device Layer understands these bdev share same
+//       underlying disk, so manage these bdev with same resource.
+//       By this method, give underlying module a way to utilize bdev framework
+//       to expose one underlying disk to more than one client (each with a bdev).
 
 /*
  * Per-module (or per-io_device) data. Multiple bdevs built on the same io_device
@@ -2152,6 +2156,7 @@ spdk_bdev_channel_create(void *io_device, void *ctx_buf)
 	struct spdk_bdev_shared_resource *shared_resource;
 
 	ch->bdev = bdev;
+
     // zhou: set underlying device's I/O channel, by e.g. bdev_aio_get_io_channel(),
 	ch->channel = bdev->fn_table->get_io_channel(bdev->ctxt);
 	if (!ch->channel) {
@@ -2178,6 +2183,7 @@ spdk_bdev_channel_create(void *io_device, void *ctx_buf)
 	mgmt_ch = spdk_io_channel_get_ctx(mgmt_io_ch);
 
 	TAILQ_FOREACH(shared_resource, &mgmt_ch->shared_resources, link) {
+
         // zhou: underlying device's I/O channel
 		if (shared_resource->shared_ch == ch->channel) {
             // zhou: here means "I will not keep 'mgmt_io_ch' it anymore in this case."

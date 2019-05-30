@@ -366,6 +366,7 @@ static const struct spdk_json_object_decoder rpc_construct_lvol_bdev_decoders[] 
 	{"clear_method", offsetof(struct rpc_construct_lvol_bdev, clear_method), spdk_json_decode_string, true},
 };
 
+// zhou:
 static void
 _spdk_rpc_construct_lvol_bdev_cb(void *cb_arg, struct spdk_lvol *lvol, int lvolerrno)
 {

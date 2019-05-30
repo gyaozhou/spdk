@@ -933,6 +933,7 @@ _create_lvol_disk_unload_cb(void *cb_arg, int bdeverrno)
 	free(lvol);
 }
 
+// zhou: README,
 static int
 _create_lvol_disk(struct spdk_lvol *lvol, bool destroy)
 {
@@ -996,6 +997,7 @@ _create_lvol_disk(struct spdk_lvol *lvol, bool destroy)
 	return rc;
 }
 
+// zhou: lvol created.
 static void
 _vbdev_lvol_create_cb(void *cb_arg, struct spdk_lvol *lvol, int lvolerrno)
 {
@@ -1008,6 +1010,7 @@ _vbdev_lvol_create_cb(void *cb_arg, struct spdk_lvol *lvol, int lvolerrno)
 	lvolerrno = _create_lvol_disk(lvol, true);
 
 end:
+    // zhou: _spdk_rpc_construct_lvol_bdev_cb()
 	req->cb_fn(req->cb_arg, lvol, lvolerrno);
 	free(req);
 }
@@ -1025,6 +1028,7 @@ vbdev_lvol_create(struct spdk_lvol_store *lvs, const char *name, uint64_t sz,
 	if (req == NULL) {
 		return -ENOMEM;
 	}
+    // zhou: _spdk_rpc_construct_lvol_bdev_cb()
 	req->cb_fn = cb_fn;
 	req->cb_arg = cb_arg;
 
