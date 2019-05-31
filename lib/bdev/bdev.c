@@ -93,9 +93,8 @@ TAILQ_HEAD(spdk_bdev_list, spdk_bdev);
 
 // zhou:
 struct spdk_bdev_mgr {
-    // zhou: each member includes
-    //       "struct spdk_bdev_io" + driver private space for each type of
-    //       underlying device
+    // zhou: "struct spdk_bdev_io" resource shared between threads.
+    //       Only can be used when per thread cache exhausted.
 	struct spdk_mempool *bdev_io_pool;
 
     // zhou: general purpose for small and large object, to hold READ/WRITE buffer?
@@ -193,8 +192,9 @@ struct spdk_bdev_qos {
 	struct spdk_poller *poller;
 };
 
-// zhou: definitely, there is no underlying I/O channel.
-//       This I/O channel private workspace just for context to fetch
+// zhou: I/O channel for I/O device "g_bdev_mgr", which used to manage shared resouce
+//       between all bdev within each thread.
+//       The shared resouces includes buffer for READ/WRITE
 //       "struct spdk_bdev_io".
 struct spdk_bdev_mgmt_channel {
 
@@ -212,7 +212,7 @@ struct spdk_bdev_mgmt_channel {
 	 */
 	bdev_io_stailq_t per_thread_cache;
 
-    // zhou: how many "struct spdk_bdev_io" in list "per_thread_cache"
+    // zhou: the number of "struct spdk_bdev_io" in list "per_thread_cache"
 	uint32_t	per_thread_cache_count;
     // zhou: MAX number of list "per_thread_cache".
 	uint32_t	bdev_io_cache_size;
@@ -226,19 +226,19 @@ struct spdk_bdev_mgmt_channel {
 	TAILQ_HEAD(, spdk_bdev_shared_resource)	shared_resources;
 
     // zhou: wait queue due to no memory resource of this thread.
+    //       Not all spdk_bdev_io alloc failure will register here. When client invoke
+    //       READ/WRITE api, failured will be returned to client. Client may decide to
+    //       register this queue or abort.
     //
     //       Refer to spdk_bdev_queue_io_wait() description:
-    /* Add an entry into the calling thread's queue to be notified when an
-       spdk_bdev_io becomes available.
-
-       When one of the @ref bdev_io_submit_functions returns -ENOMEM, it means
-       the spdk_bdev_io buffer pool has no available buffers. This function may
-       be called to register a callback to be notified when a buffer becomes
-       available on the calling thread.
-
-       The callback function will always be called on the same thread as this
-       function was called.
-     */
+    //       "Add an entry into the calling thread's queue to be notified when an
+    //       spdk_bdev_io becomes available.
+    //       When one of the @ref bdev_io_submit_functions returns -ENOMEM, it means
+    //       the spdk_bdev_io buffer pool has no available buffers. This function may
+    //       be called to register a callback to be notified when a buffer becomes
+    //       available on the calling thread.
+    //       The callback function will always be called on the same thread as this
+    //       function was called."
 	TAILQ_HEAD(, spdk_bdev_io_wait_entry)	io_wait_queue;
 };
 
@@ -264,7 +264,7 @@ struct spdk_bdev_shared_resource {
 	 */
 	uint64_t		io_outstanding;
 
-    // zhou: queued IO due to no memory.
+    // zhou: README, queued IO due to no memory.
 	/*
 	 * Queue of IO awaiting retry because of a previous NOMEM status returned
 	 *  on this channel.
@@ -276,6 +276,7 @@ struct spdk_bdev_shared_resource {
 	 */
 	uint64_t		nomem_threshold;
 
+    // zhou: underlying disk's I/O channel, created by "fn_table->get_io_channel()".
 	/* I/O channel allocated by a bdev module */
 	struct spdk_io_channel	*shared_ch;
 
@@ -289,31 +290,33 @@ struct spdk_bdev_shared_resource {
 #define BDEV_CH_RESET_IN_PROGRESS	(1 << 0)
 #define BDEV_CH_QOS_ENABLED		(1 << 1)
 
-// zhou: backing disk's I/O channel private workspace, for each backing disk.
+// zhou: bdev I/O channel private workspace, for each backing disk.
 struct spdk_bdev_channel {
 
 	struct spdk_bdev	*bdev;
 
-    // zhou: !!! used to refer to I/O channel of underlying device.
-    //       Different backing storage has its own IO device.
+    // zhou: underlying disk's I/O channel, created by "fn_table->get_io_channel()"
 	/* The channel for the underlying device */
 	struct spdk_io_channel	*channel;
 
-    // zhou: README,
+    // zhou: each bdev I/O channel will manage via "shared_resource" which linked in
+    //       "g_bdev_mgr" I/O channel "struct spdk_bdev_mgmt_channel.shared_resources".
 	/* Per io_device per thread data */
 	struct spdk_bdev_shared_resource *shared_resource;
 
 	struct spdk_bdev_io_stat stat;
 
+    // zhou: only for this bdev I/O channel, will be accounted in
+    //       "shared_resource.io_outstanding" at the same time.
 	/*
 	 * Count of I/O submitted through this channel and waiting for completion.
 	 * Incremented before submit_request() is called on an spdk_bdev_io.
 	 */
 	uint64_t		io_outstanding;
 
-    // zhou:
+    // zhou: README,
 	bdev_io_tailq_t		queued_resets;
-
+    // zhou: README,
 	uint32_t		flags;
 
 	struct spdk_histogram_data *histogram;
@@ -1131,9 +1134,9 @@ spdk_bdev_initialize(spdk_bdev_init_cb cb_fn, void *cb_arg)
 				"bdev_mgr");
 
 
-    // zhou: init all types backing storage, but no backing disk are created/attached.
-    //       Just make them ready to handle RPC. Then create disk RPC will trigger
-    //       disk creation.
+    // zhou: init all types backing storage module, but no backing disk are
+    //       created/attached. Just make them ready to handle RPC.
+    //       Then create disk RPC will trigger disk creation.
 	rc = spdk_bdev_modules_init();
 	g_bdev_mgr.module_init_complete = true;
 
@@ -1323,8 +1326,7 @@ spdk_bdev_finish(spdk_bdev_fini_cb cb_fn, void *cb_arg)
 // zhou: START of IO Request operation
 
 
-// zhou: README, get a empty IO request, limited by queue depth and other resource
-//       limitation.
+// zhou: get a empty IO request, there is per thread cache and global pool.
 static struct spdk_bdev_io *
 spdk_bdev_get_io(struct spdk_bdev_channel *channel)
 {
@@ -1339,7 +1341,10 @@ spdk_bdev_get_io(struct spdk_bdev_channel *channel)
 		ch->per_thread_cache_count--;
 
 	} else if (spdk_unlikely(!TAILQ_EMPTY(&ch->io_wait_queue))) {
-        // zhou: in case of already some IO blocked on "io_wait_queue".
+        // zhou: there are already some one waiting on "io_wait_queue" for
+        //       "struct spdk_bdev_io" becomes available.
+        //       In this case, should use spdk_bdev_queue_io_wait() to register callback
+        //       be notified when resource becomes available.
 		/*
 		 * Don't try to look for bdev_ios in the global pool if there are
 		 * waiters on bdev_ios - we don't want this caller to jump the line.
@@ -2090,6 +2095,7 @@ _spdk_bdev_channel_destroy_resource(struct spdk_bdev_channel *ch)
 	}
 }
 
+// zhou: README,
 /* Caller must hold bdev->internal.mutex. */
 static void
 _spdk_bdev_enable_qos(struct spdk_bdev *bdev, struct spdk_bdev_channel *ch)
@@ -2142,7 +2148,8 @@ _spdk_bdev_enable_qos(struct spdk_bdev *bdev, struct spdk_bdev_channel *ch)
 	}
 }
 
-// zhou: "Descriptors may be passed to and used from multiple threads simultaneously.
+// zhou: bdev I/O channel create callback function.
+//       "Descriptors may be passed to and used from multiple threads simultaneously.
 //       However, for each thread a separate I/O channel must be obtained by
 //       calling spdk_bdev_get_io_channel(). This will allocate the necessary
 //       per-thread resources to submit I/O requests to the bdev without taking locks."
@@ -2157,7 +2164,7 @@ spdk_bdev_channel_create(void *io_device, void *ctx_buf)
 
 	ch->bdev = bdev;
 
-    // zhou: set underlying device's I/O channel, by e.g. bdev_aio_get_io_channel(),
+    // zhou: set underlying disk's I/O channel, by e.g. bdev_aio_get_io_channel(),
 	ch->channel = bdev->fn_table->get_io_channel(bdev->ctxt);
 	if (!ch->channel) {
 		return -1;
@@ -2179,7 +2186,7 @@ spdk_bdev_channel_create(void *io_device, void *ctx_buf)
 		return -1;
 	}
 
-    // zhou: convert to "struct spdk_bdev_mgr" channel private workspace.
+    // zhou: get "g_bdev_mgr" I/O channel's private workspace.
 	mgmt_ch = spdk_io_channel_get_ctx(mgmt_io_ch);
 
 	TAILQ_FOREACH(shared_resource, &mgmt_ch->shared_resources, link) {
@@ -2197,6 +2204,7 @@ spdk_bdev_channel_create(void *io_device, void *ctx_buf)
 
     // zhou:
 	if (shared_resource == NULL) {
+
 		shared_resource = calloc(1, sizeof(*shared_resource));
 		if (shared_resource == NULL) {
 			spdk_put_io_channel(ch->channel);
@@ -2417,6 +2425,8 @@ spdk_bdev_channel_destroy(void *io_device, void *ctx_buf)
 	_spdk_bdev_channel_destroy_resource(ch);
 }
 
+// zhou: "Add alias to block device names list.
+//        Aliases can be add only to registered bdev."
 int
 spdk_bdev_alias_add(struct spdk_bdev *bdev, const char *alias)
 {
@@ -2481,9 +2491,11 @@ spdk_bdev_alias_del_all(struct spdk_bdev *bdev)
 	}
 }
 
+// zhou: get bdev I/O channel
 struct spdk_io_channel *
 spdk_bdev_get_io_channel(struct spdk_bdev_desc *desc)
 {
+    // zhou: fetch bdev underlying disk's I/O channel.
 	return spdk_get_io_channel(__bdev_to_io_dev(desc->bdev));
 }
 
@@ -2511,6 +2523,7 @@ spdk_bdev_get_block_size(const struct spdk_bdev *bdev)
 	return bdev->blocklen;
 }
 
+// zhou: bdev size in block number
 uint64_t
 spdk_bdev_get_num_blocks(const struct spdk_bdev *bdev)
 {
@@ -2840,14 +2853,15 @@ spdk_bdev_read_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
 {
 	struct spdk_bdev *bdev = desc->bdev;
 	struct spdk_bdev_io *bdev_io;
+
+    // zhou: "ch" is a bdev I/O channel
 	struct spdk_bdev_channel *channel = spdk_io_channel_get_ctx(ch);
 
 	if (!spdk_bdev_io_valid_blocks(bdev, offset_blocks, num_blocks)) {
 		return -EINVAL;
 	}
 
-    // zhou: get a empty IO request, limited by queue depth and other resource
-    //       limitation.
+    // zhou: get a empty IO request, once no resource right now, give up immediately.
 	bdev_io = spdk_bdev_get_io(channel);
 	if (!bdev_io) {
 		return -ENOMEM;
@@ -3616,6 +3630,8 @@ spdk_bdev_nvme_io_passthru_md(struct spdk_bdev_desc *desc, struct spdk_io_channe
 ////////////////////////////////////////////////////////////////////////////////
 // zhou: START of IO management
 
+// zhou: register a callback in "mgmt_ch->io_wait_queue", want to be wake up when
+//       some "struct spdk_bdev_io" is avaiable on this thread.
 int
 spdk_bdev_queue_io_wait(struct spdk_bdev *bdev, struct spdk_io_channel *ch,
 			struct spdk_bdev_io_wait_entry *entry)
@@ -4081,6 +4097,7 @@ spdk_bdev_init(struct spdk_bdev *bdev)
 	bdev->internal.qd_poller = NULL;
 	bdev->internal.qos = NULL;
 
+    // zhou: READ/WRITE boundary requirement
 	if (spdk_bdev_get_buf_align(bdev) > 1) {
 		if (bdev->split_on_optimal_io_boundary) {
 			bdev->optimal_io_boundary = spdk_min(bdev->optimal_io_boundary,
@@ -4090,6 +4107,7 @@ spdk_bdev_init(struct spdk_bdev *bdev)
 			bdev->optimal_io_boundary = SPDK_BDEV_LARGE_BUF_MAX_SIZE / bdev->blocklen;
 		}
 	}
+
 
 	TAILQ_INIT(&bdev->internal.open_descs);
 
@@ -4374,6 +4392,7 @@ spdk_bdev_open(struct spdk_bdev *bdev, bool write, spdk_bdev_remove_cb_t remove_
 				      _spdk_bdev_enable_qos_done);
 	}
 
+    // zhou: add FD to this bdev's list.
 	TAILQ_INSERT_TAIL(&bdev->internal.open_descs, desc, link);
 
 	pthread_mutex_unlock(&bdev->internal.mutex);

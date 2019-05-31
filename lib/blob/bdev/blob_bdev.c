@@ -97,7 +97,7 @@ bdev_blob_io_complete(struct spdk_bdev_io *bdev_io, bool success, void *arg)
 	spdk_bdev_free_io(bdev_io);
 }
 
-// zhou: still queue in bdev
+// zhou: still queue blob_bdev.c in bdev "mgmt_ch->io_wait_queue"
 static void
 bdev_blob_queue_io(struct spdk_bs_dev *dev, struct spdk_io_channel *channel, void *payload,
 		   int iovcnt,
@@ -147,8 +147,8 @@ bdev_blob_read(struct spdk_bs_dev *dev, struct spdk_io_channel *channel, void *p
 				   lba_count, bdev_blob_io_complete, cb_args);
 
 	if (rc == -ENOMEM) {
-        // zhou: lib bdev can't be queued also?
-        //       Queued in blobstore and wait for a memont.
+        // zhou: Bdev framework has no resource "struct spdk_bdev_io".
+        //       Need to provide
 		bdev_blob_queue_io(dev, channel, payload, 0, lba,
 				   lba_count, SPDK_BDEV_IO_TYPE_READ, cb_args);
 	} else if (rc != 0) {
@@ -309,7 +309,7 @@ spdk_bs_bdev_claim(struct spdk_bs_dev *bs_dev, struct spdk_bdev_module *module)
 	return rc;
 }
 
-// zhou:
+// zhou: create bdev I/O channel
 static struct spdk_io_channel *
 bdev_blob_create_channel(struct spdk_bs_dev *dev)
 {

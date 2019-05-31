@@ -2953,6 +2953,7 @@ iscsi_op_scsi_read(struct spdk_iscsi_conn *conn, struct spdk_iscsi_task *task)
 	return spdk_iscsi_conn_handle_queued_datain_tasks(conn);
 }
 
+// zhou:
 static int
 iscsi_op_scsi(struct spdk_iscsi_conn *conn, struct spdk_iscsi_pdu *pdu)
 {

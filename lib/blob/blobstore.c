@@ -2418,7 +2418,7 @@ _spdk_blob_get_snapshot_and_clone_entries(struct spdk_blob *blob,
 	}
 }
 
-// zhou: callback for create IO channel
+// zhou: spdk_bs_alloc_io_channel() will invoke this function.
 static int
 _spdk_bs_channel_create(void *io_device, void *ctx_buf)
 {
@@ -2444,7 +2444,7 @@ _spdk_bs_channel_create(void *io_device, void *ctx_buf)
 	channel->bs = bs;
 	channel->dev = dev;
 
-    // zhou: underlying I/O device's IO channel created by bdev_blob_create_channel().
+    // zhou: alloc bdev I/O channel
 	channel->dev_channel = dev->create_channel(dev);
 
 	if (!channel->dev_channel) {

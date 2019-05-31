@@ -77,6 +77,8 @@ struct bdev_uring {
 static int bdev_uring_init(void);
 static void bdev_uring_fini(void);
 static void uring_free_bdev(struct bdev_uring *uring);
+
+// zhou: list of disks
 static TAILQ_HEAD(, bdev_uring) g_uring_bdev_head;
 
 #define SPDK_URING_QUEUE_DEPTH 512
@@ -148,6 +150,7 @@ bdev_uring_readv(struct bdev_uring *uring, struct spdk_io_channel *ch,
 	struct io_uring_sqe *sqe;
 
 	sqe = io_uring_get_sqe(&group_ch->uring);
+
 	io_uring_prep_readv(sqe, uring->fd, iov, iovcnt, offset);
 	io_uring_sqe_set_data(sqe, uring_task);
 	uring_task->len = nbytes;
@@ -172,6 +175,7 @@ bdev_uring_writev(struct bdev_uring *uring, struct spdk_io_channel *ch,
 	sqe = io_uring_get_sqe(&group_ch->uring);
 	io_uring_prep_writev(sqe, uring->fd, iov, iovcnt, offset);
 	io_uring_sqe_set_data(sqe, uring_task);
+
 	uring_task->ch = uring_ch;
 
 	SPDK_DEBUGLOG(SPDK_LOG_URING, "write %d iovs size %lu from off: %#lx\n",
@@ -197,6 +201,7 @@ bdev_uring_destruct(void *ctx)
 	return rc;
 }
 
+// zhou:
 static int
 bdev_uring_reap(struct io_uring *ring, int max)
 {
@@ -231,6 +236,7 @@ bdev_uring_reap(struct io_uring *ring, int max)
 	return count;
 }
 
+// zhou:
 static int
 bdev_uring_group_poll(void *arg)
 {
@@ -248,7 +254,9 @@ bdev_uring_group_poll(void *arg)
 		ret = io_uring_submit(&group_ch->uring);
 		group_ch->io_pending = 0;
 		group_ch->io_inflight += to_submit;
+
 	} else if (to_complete > 0) {
+
 		/* If there are I/O in flight but none to submit, we need to
 		 * call io_uring_enter ourselves. */
 		ret = io_uring_enter(group_ch->uring.ring_fd, 0, 0,
@@ -529,7 +537,9 @@ bdev_uring_init(void)
 	struct spdk_conf_section *sp;
 	struct spdk_bdev *bdev;
 
+    // zhou: disk list
 	TAILQ_INIT(&g_uring_bdev_head);
+
 	spdk_io_device_register(&uring_if, bdev_uring_group_create_cb, bdev_uring_group_destroy_cb,
 				sizeof(struct bdev_uring_group_channel),
 				"uring_module");

@@ -258,7 +258,8 @@ struct spdk_bs_channel {
 
     // zhou:
 	struct spdk_bs_dev		*dev;
-    // zhou: !!! refer to IO channel of underlying device.
+
+    // zhou: bdev I/O channel
 	struct spdk_io_channel		*dev_channel;
 
 	TAILQ_HEAD(, spdk_bs_request_set) need_cluster_alloc;

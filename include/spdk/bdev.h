@@ -115,8 +115,10 @@ enum spdk_bdev_io_type {
 	SPDK_BDEV_IO_TYPE_NVME_IO,
 	SPDK_BDEV_IO_TYPE_NVME_IO_MD,
 
+    // zhou: overwrite with zero.
 	SPDK_BDEV_IO_TYPE_WRITE_ZEROES,
 
+    // zhou: Zero Copy
 	SPDK_BDEV_IO_TYPE_ZCOPY,
 
 	SPDK_BDEV_NUM_IO_TYPES /* Keep last */

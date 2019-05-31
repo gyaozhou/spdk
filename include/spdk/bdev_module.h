@@ -261,6 +261,7 @@ struct spdk_bdev {
 	/** Unique name for this block device. */
 	char *name;
 
+    // zhou: name aliase list.
 	/** Unique aliases for this block device. */
 	TAILQ_HEAD(spdk_bdev_aliases_list, spdk_bdev_alias) aliases;
 
@@ -274,6 +275,7 @@ struct spdk_bdev {
 	/** Size in bytes of a logical block for the backend */
 	uint32_t blocklen;
 
+    // zhou: bdev size in block number.
 	/** Number of blocks */
 	uint64_t blockcnt;
 
@@ -380,7 +382,7 @@ struct spdk_bdev {
 		/** Unregister call context */
 		void *unregister_ctx;
 
-        // zhou: FD list of this disk
+        // zhou: each time, invoke spdk_bdev_open(), add new to FD list of this disk
 		/** List of open descriptors for this block device. */
 		TAILQ_HEAD(, spdk_bdev_desc) open_descs;
 
@@ -435,6 +437,7 @@ typedef void (*spdk_bdev_io_get_buf_cb)(struct spdk_io_channel *ch, struct spdk_
 //       "Requests must be submitted on an associated I/O channel. The motivation
 //       and design of I/O channels is described in Message Passing and Concurrency."
 struct spdk_bdev_io {
+
 	/** The block device that this I/O belongs to. */
 	struct spdk_bdev *bdev;
 
@@ -518,6 +521,7 @@ struct spdk_bdev_io {
 	/** It may be used by modules to put the bdev_io into its own list. */
 	TAILQ_ENTRY(spdk_bdev_io) module_link;
 
+    // zhou: spdk_bdev_io_init()
 	/**
 	 *  Fields that are used internally by the bdev subsystem.  Bdev modules
 	 *  must not read or write to these fields.
