@@ -527,6 +527,7 @@ spdk_rpc_set_bdev_qos_limit(struct spdk_jsonrpc_request *request,
 	}
 
 	free_rpc_set_bdev_qos_limit(&req);
+
 	spdk_bdev_set_qos_rate_limits(bdev, req.limits, spdk_rpc_set_bdev_qos_limit_complete, request);
 	return;
 
@@ -536,6 +537,7 @@ exit:
 	free_rpc_set_bdev_qos_limit(&req);
 }
 
+// zhou: set QoS (IO Throttling)
 SPDK_RPC_REGISTER("set_bdev_qos_limit", spdk_rpc_set_bdev_qos_limit, SPDK_RPC_RUNTIME)
 
 ////////////////////////////////////////////////////////////////////////////////

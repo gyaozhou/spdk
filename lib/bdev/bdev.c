@@ -73,15 +73,27 @@ int __itt_init_ittlib(const char *, __itt_group_id);
 #define TRACE_BDEV_IO_START	SPDK_TPOINT_ID(TRACE_GROUP_BDEV, 0x0)
 #define TRACE_BDEV_IO_DONE	SPDK_TPOINT_ID(TRACE_GROUP_BDEV, 0x1)
 
+// zhou: QoS slice is 1ms
 #define SPDK_BDEV_QOS_TIMESLICE_IN_USEC		1000
+
 #define SPDK_BDEV_QOS_MIN_IO_PER_TIMESLICE	1
 #define SPDK_BDEV_QOS_MIN_BYTE_PER_TIMESLICE	512
+
+// zhou: limit set should be multiply of these value.
 #define SPDK_BDEV_QOS_MIN_IOS_PER_SEC		10000
 #define SPDK_BDEV_QOS_MIN_BYTES_PER_SEC		(10 * 1024 * 1024)
+
+// zhou: when used in RPC and Config file,
+//           1. NOT defined, means not provided by client;
+//           2. Zero, means unlimited
+//       when used in "internal.qos",
+//           1. NOT defined, means unlimited.
+//           2. Zero is impossible.
 #define SPDK_BDEV_QOS_LIMIT_NOT_DEFINED		UINT64_MAX
 
 #define SPDK_BDEV_POOL_ALIGNMENT 512
 
+// zhou: Limit IOPS, Throughput, Read Thp, Write Thp.
 static const char *qos_conf_type[] = {"Limit_IOPS",
 				      "Limit_BPS", "Limit_Read_BPS", "Limit_Write_BPS"
 				     };
@@ -162,6 +174,7 @@ struct spdk_bdev_qos_limit {
 	/** Maximum allowed IOs or bytes to be issued in one timeslice (e.g., 1ms). */
 	uint32_t max_per_timeslice;
 
+    // zhou:
 	/** Function to check whether to queue the IO. */
 	bool (*queue_io)(const struct spdk_bdev_qos_limit *limit, struct spdk_bdev_io *io);
 
@@ -169,10 +182,12 @@ struct spdk_bdev_qos_limit {
 	void (*update_quota)(struct spdk_bdev_qos_limit *limit, struct spdk_bdev_io *io);
 };
 
+// zhou:
 struct spdk_bdev_qos {
 	/** Types of structure of rate limits. */
 	struct spdk_bdev_qos_limit rate_limits[SPDK_BDEV_QOS_NUM_RATE_LIMIT_TYPES];
 
+    // zhou: all IO will go one I/O channel ???
 	/** The channel that all I/O are funneled through. */
 	struct spdk_bdev_channel *ch;
 
@@ -182,6 +197,7 @@ struct spdk_bdev_qos {
 	/** Queue of I/O waiting to be issued. */
 	bdev_io_tailq_t queued;
 
+    // zhou: time slice in ticks.
 	/** Size of a timeslice in tsc ticks. */
 	uint64_t timeslice_size;
 
@@ -511,6 +527,7 @@ spdk_bdev_get_by_name(const char *bdev_name)
 ////////////////////////////////////////////////////////////////////////////////
 // zhou: START of IO Request's buffer operations.
 
+// zhou: set allocated buffer to "bdev_io", not support scatter gather here.
 void
 spdk_bdev_io_set_buf(struct spdk_bdev_io *bdev_io, void *buf, size_t len)
 {
@@ -588,18 +605,22 @@ _copy_buf_to_iovs(struct iovec *iovs, int iovcnt, void *buf, size_t buf_len)
 	}
 }
 
+// zhou: README, ???
 static void
 _bdev_io_set_bounce_buf(struct spdk_bdev_io *bdev_io, void *buf, size_t len)
 {
 	/* save original iovec */
 	bdev_io->internal.orig_iovs = bdev_io->u.bdev.iovs;
 	bdev_io->internal.orig_iovcnt = bdev_io->u.bdev.iovcnt;
+
 	/* set bounce iov */
 	bdev_io->u.bdev.iovs = &bdev_io->internal.bounce_iov;
 	bdev_io->u.bdev.iovcnt = 1;
+
 	/* set bounce buffer for this operation */
 	bdev_io->u.bdev.iovs[0].iov_base = buf;
 	bdev_io->u.bdev.iovs[0].iov_len = len;
+
 	/* if this is write path, copy data from original buffer to bounce buffer */
 	if (bdev_io->type == SPDK_BDEV_IO_TYPE_WRITE) {
 		_copy_iovs_to_buf(buf, len, bdev_io->internal.orig_iovs, bdev_io->internal.orig_iovcnt);
@@ -676,7 +697,7 @@ _bdev_io_unset_bounce_buf(struct spdk_bdev_io *bdev_io)
 	spdk_bdev_io_put_buf(bdev_io);
 }
 
-// zhou: README, all kinds of driver, will fetch buffer before submit IO.
+// zhou: fetch buffer before submit IO.
 //       "cb" in parameters, will be invoked to notify driver.
 void
 spdk_bdev_io_get_buf(struct spdk_bdev_io *bdev_io, spdk_bdev_io_get_buf_cb cb, uint64_t len)
@@ -690,7 +711,9 @@ spdk_bdev_io_get_buf(struct spdk_bdev_io *bdev_io, spdk_bdev_io_get_buf_cb cb, u
 
 	assert(cb != NULL);
 
+    // zhou: "struct spdk_bdev.required_alignment"
 	alignment = spdk_bdev_get_buf_align(bdev_io->bdev);
+
 	buf_allocated = _is_buf_allocated(bdev_io->u.bdev.iovs);
 
 	if (buf_allocated &&
@@ -700,19 +723,24 @@ spdk_bdev_io_get_buf(struct spdk_bdev_io *bdev_io, spdk_bdev_io_get_buf_cb cb, u
 		return;
 	}
 
+    // zhou: > 64 KB, which is the object size in "buf_large_pool"
 	if (len + alignment > SPDK_BDEV_BUF_SIZE_WITH_MD(SPDK_BDEV_LARGE_BUF_MAX_SIZE) +
 	    SPDK_BDEV_POOL_ALIGNMENT) {
+
 		SPDK_ERRLOG("Length + alignment %" PRIu64 " is larger than allowed\n",
 			    len + alignment);
 		cb(bdev_io->internal.ch->channel, bdev_io, false);
 		return;
 	}
 
+    // zhou: start to allocate READ buffer.
+
 	mgmt_ch = bdev_io->internal.ch->shared_resource->mgmt_ch;
 
 	bdev_io->internal.buf_len = len;
 	bdev_io->internal.get_buf_cb = cb;
 
+    // zhou: <= 8 KB
 	if (len + alignment <= SPDK_BDEV_BUF_SIZE_WITH_MD(SPDK_BDEV_SMALL_BUF_MAX_SIZE) +
 	    SPDK_BDEV_POOL_ALIGNMENT) {
 		pool = g_bdev_mgr.buf_small_pool;
@@ -725,11 +753,16 @@ spdk_bdev_io_get_buf(struct spdk_bdev_io *bdev_io, spdk_bdev_io_get_buf_cb cb, u
 	buf = spdk_mempool_get(pool);
 
 	if (!buf) {
+        // zhou: pool is out of resource.
 		STAILQ_INSERT_TAIL(stailq, bdev_io, internal.buf_link);
+
 	} else {
+        // zhou: adjust start of buffer according aligment requirement.
 		aligned_buf = (void *)(((uintptr_t)buf + (alignment - 1)) & ~(alignment - 1));
 
+        // zhou: already allocate buffer, but not be used, since allocate again.
 		if (buf_allocated) {
+            // zhou: ???
 			_bdev_io_set_bounce_buf(bdev_io, aligned_buf, len);
 		} else {
 			spdk_bdev_io_set_buf(bdev_io, aligned_buf, len);
@@ -1518,6 +1551,7 @@ _spdk_bdev_qos_w_bps_update_quota(struct spdk_bdev_qos_limit *limit, struct spdk
 	return _spdk_bdev_qos_rw_bps_update_quota(limit, io);
 }
 
+// zhou: Just one of them will be used ?
 static void
 _spdk_bdev_qos_set_ops(struct spdk_bdev_qos *qos)
 {
@@ -1532,7 +1566,9 @@ _spdk_bdev_qos_set_ops(struct spdk_bdev_qos *qos)
 
 		switch (i) {
 		case SPDK_BDEV_QOS_RW_IOPS_RATE_LIMIT:
+            // zhou: Function to check whether to queue the IO
 			qos->rate_limits[i].queue_io = _spdk_bdev_qos_rw_queue_io;
+            // zhou: Function to update for the submitted IO.
 			qos->rate_limits[i].update_quota = _spdk_bdev_qos_rw_iops_update_quota;
 			break;
 		case SPDK_BDEV_QOS_RW_BPS_RATE_LIMIT:
@@ -1553,6 +1589,8 @@ _spdk_bdev_qos_set_ops(struct spdk_bdev_qos *qos)
 	}
 }
 
+// zhou: submit or queued IO depending on QoS quota. "spdk_bdev_channel_poll_qos()"
+//       is another chance to submit IO which still in queue.
 static int
 _spdk_bdev_qos_io_submit(struct spdk_bdev_channel *ch, struct spdk_bdev_qos *qos)
 {
@@ -1568,23 +1606,27 @@ _spdk_bdev_qos_io_submit(struct spdk_bdev_channel *ch, struct spdk_bdev_qos *qos
 					continue;
 				}
 
+                // zhou: no quota to send, just queue.
 				if (qos->rate_limits[i].queue_io(&qos->rate_limits[i],
 								 bdev_io) == true) {
 					return submitted_ios;
 				}
 			}
+
 			for (i = 0; i < SPDK_BDEV_QOS_NUM_RATE_LIMIT_TYPES; i++) {
 				if (!qos->rate_limits[i].update_quota) {
 					continue;
 				}
-
+                // zhou: decrease quota
 				qos->rate_limits[i].update_quota(&qos->rate_limits[i], bdev_io);
 			}
 		}
 
+        // zhou: pick up a queued IO and send out.
 		TAILQ_REMOVE(&qos->queued, bdev_io, internal.link);
 		ch->io_outstanding++;
 		shared_resource->io_outstanding++;
+
 		bdev_io->internal.in_submit_request = true;
 		bdev->fn_table->submit_request(ch->channel, bdev_io);
 		bdev_io->internal.in_submit_request = false;
@@ -1630,6 +1672,7 @@ _spdk_bdev_io_type_can_split(uint8_t type)
 	}
 }
 
+// zhou: judge the current IO Request should be split or not.
 static bool
 _spdk_bdev_io_should_split(struct spdk_bdev_io *bdev_io)
 {
@@ -1646,6 +1689,7 @@ _spdk_bdev_io_should_split(struct spdk_bdev_io *bdev_io)
 
 	start_stripe = bdev_io->u.bdev.offset_blocks;
 	end_stripe = start_stripe + bdev_io->u.bdev.num_blocks - 1;
+
 	/* Avoid expensive div operations if possible.  These spdk_u32 functions are very cheap. */
 	if (spdk_likely(spdk_u32_is_pow2(io_boundary))) {
 		start_stripe >>= spdk_u32log2(io_boundary);
@@ -1666,6 +1710,7 @@ _to_next_boundary(uint64_t offset, uint32_t boundary)
 static void
 _spdk_bdev_io_split_done(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg);
 
+// zhou: README,
 static void
 _spdk_bdev_io_split_with_payload(void *_bdev_io)
 {
@@ -1698,8 +1743,10 @@ _spdk_bdev_io_split_with_payload(void *_bdev_io)
 		to_next_boundary_bytes = to_next_boundary * blocklen;
 		iov = &bdev_io->child_iov[child_iovcnt];
 		iovcnt = 0;
+
 		while (to_next_boundary_bytes > 0 && parent_iovpos < parent_iovcnt &&
 		       child_iovcnt < BDEV_IO_NUM_CHILD_IOV) {
+
 			parent_iov = &bdev_io->u.bdev.iovs[parent_iovpos];
 			iov_len = spdk_min(to_next_boundary_bytes, parent_iov->iov_len - parent_iov_offset);
 			to_next_boundary_bytes -= iov_len;
@@ -1819,6 +1866,7 @@ _spdk_bdev_io_split(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io)
 	_spdk_bdev_io_split_with_payload(bdev_io);
 }
 
+// zhou: get buf completed for READ, then start to split IO.
 static void
 _spdk_bdev_io_split_get_buf_cb(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io,
 			       bool success)
@@ -1870,12 +1918,15 @@ _spdk_bdev_io_submit(void *ctx)
 		}
 
 	} else if (bdev_ch->flags & BDEV_CH_RESET_IN_PROGRESS) {
-		spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_FAILED);
-	} else if (bdev_ch->flags & BDEV_CH_QOS_ENABLED) {
 
+		spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_FAILED);
+
+	} else if (bdev_ch->flags & BDEV_CH_QOS_ENABLED) {
+        // zhou: will not submit immediately, but queued in QoS queue for schedule.
 		bdev_ch->io_outstanding--;
 		shared_resource->io_outstanding--;
 		TAILQ_INSERT_TAIL(&bdev->internal.qos->queued, bdev_io, internal.link);
+
 		_spdk_bdev_qos_io_submit(bdev_ch, bdev->internal.qos);
 
 	} else {
@@ -1886,11 +1937,12 @@ _spdk_bdev_io_submit(void *ctx)
 	bdev_io->internal.in_submit_request = false;
 }
 
-// zhou: README,
+// zhou: "struct spdk_bdev_io" already describe the IO Request.
 static void
 spdk_bdev_io_submit(struct spdk_bdev_io *bdev_io)
 {
 	struct spdk_bdev *bdev = bdev_io->bdev;
+
     // zhou: get thread which the specified I/O channed binded.
 	struct spdk_thread *thread = spdk_io_channel_get_thread(bdev_io->internal.ch->channel);
 
@@ -1898,7 +1950,9 @@ spdk_bdev_io_submit(struct spdk_bdev_io *bdev_io)
 	assert(bdev_io->internal.status == SPDK_BDEV_IO_STATUS_PENDING);
 
 	if (bdev->split_on_optimal_io_boundary && _spdk_bdev_io_should_split(bdev_io)) {
+
 		if (bdev_io->type == SPDK_BDEV_IO_TYPE_READ) {
+
             // zhou: prepare buffer space for read.
 			spdk_bdev_io_get_buf(bdev_io, _spdk_bdev_io_split_get_buf_cb,
 					     bdev_io->u.bdev.num_blocks * bdev_io->bdev->blocklen);
@@ -1906,6 +1960,7 @@ spdk_bdev_io_submit(struct spdk_bdev_io *bdev_io)
 			_spdk_bdev_io_split(NULL, bdev_io);
 		}
 
+        // zhou: who will submit IO ???
 		return;
 	}
 
@@ -1915,12 +1970,11 @@ spdk_bdev_io_submit(struct spdk_bdev_io *bdev_io)
 		if ((thread == bdev->internal.qos->thread) || !bdev->internal.qos->thread) {
 			_spdk_bdev_io_submit(bdev_io);
 		} else {
-            // zhou: the specified I/O channel does not belong to current thread.
+            // zhou: should be handled by QoS owner channel
 
 			bdev_io->internal.io_submit_ch = bdev_io->internal.ch;
 			bdev_io->internal.ch = bdev->internal.qos->ch;
 
-            // zhou;
 			spdk_thread_send_msg(bdev->internal.qos->thread, _spdk_bdev_io_submit, bdev_io);
 		}
 
@@ -2012,6 +2066,7 @@ spdk_bdev_dump_info_json(struct spdk_bdev *bdev, struct spdk_json_write_ctx *w)
 	return 0;
 }
 
+// zhou: used by QoS owner channel/thread only.
 static void
 spdk_bdev_qos_update_max_quota_per_timeslice(struct spdk_bdev_qos *qos)
 {
@@ -2036,6 +2091,11 @@ spdk_bdev_qos_update_max_quota_per_timeslice(struct spdk_bdev_qos *qos)
 	_spdk_bdev_qos_set_ops(qos);
 }
 
+// zhou: all IO that has not been send immediately due to quota limit in
+//       _spdk_bdev_qos_io_submit(), still has chance to be sent by this poller.
+//       Then this poller will schedule the queued IO according to slice and rate limit.
+//       By this method, all IO in queue will be submited, even if
+//       _spdk_bdev_qos_io_submit() has no chance to run.
 static int
 spdk_bdev_channel_poll_qos(void *arg)
 {
@@ -2095,7 +2155,7 @@ _spdk_bdev_channel_destroy_resource(struct spdk_bdev_channel *ch)
 	}
 }
 
-// zhou: README,
+// zhou:
 /* Caller must hold bdev->internal.mutex. */
 static void
 _spdk_bdev_enable_qos(struct spdk_bdev *bdev, struct spdk_bdev_channel *ch)
@@ -2105,6 +2165,8 @@ _spdk_bdev_enable_qos(struct spdk_bdev *bdev, struct spdk_bdev_channel *ch)
 
 	/* Rate limiting on this bdev enabled */
 	if (qos) {
+        // zhou: only the first channel will be take in charge of IO Throttling.
+        //       All channels will be set flag "BDEV_CH_QOS_ENABLED"
 		if (qos->ch == NULL) {
 			struct spdk_io_channel *io_ch;
 
@@ -2116,17 +2178,21 @@ _spdk_bdev_enable_qos(struct spdk_bdev *bdev, struct spdk_bdev_channel *ch)
 			/* Take another reference to ch */
 			io_ch = spdk_get_io_channel(__bdev_to_io_dev(bdev));
 			assert(io_ch != NULL);
-			qos->ch = ch;
 
+            // zhou: bdev channel
+			qos->ch = ch;
+            // zhou: the corresponding thread of the bdev channel.
 			qos->thread = spdk_io_channel_get_thread(io_ch);
 
 			TAILQ_INIT(&qos->queued);
 
 			for (i = 0; i < SPDK_BDEV_QOS_NUM_RATE_LIMIT_TYPES; i++) {
 				if (_spdk_bdev_qos_is_iops_rate_limit(i) == true) {
+                    // zhou: 1 IOPS
 					qos->rate_limits[i].min_per_timeslice =
 						SPDK_BDEV_QOS_MIN_IO_PER_TIMESLICE;
 				} else {
+                    // zhou: 512 Bytes, just a sector.
 					qos->rate_limits[i].min_per_timeslice =
 						SPDK_BDEV_QOS_MIN_BYTE_PER_TIMESLICE;
 				}
@@ -2135,10 +2201,16 @@ _spdk_bdev_enable_qos(struct spdk_bdev *bdev, struct spdk_bdev_channel *ch)
 					qos->rate_limits[i].limit = SPDK_BDEV_QOS_LIMIT_NOT_DEFINED;
 				}
 			}
+
 			spdk_bdev_qos_update_max_quota_per_timeslice(qos);
+
+            // zhou: convert time slice in ticks.
 			qos->timeslice_size =
 				SPDK_BDEV_QOS_TIMESLICE_IN_USEC * spdk_get_ticks_hz() / SPDK_SEC_TO_USEC;
+
 			qos->last_timeslice = spdk_get_ticks();
+
+            // zhou:
 			qos->poller = spdk_poller_register(spdk_bdev_channel_poll_qos,
 							   qos,
 							   SPDK_BDEV_QOS_TIMESLICE_IN_USEC);
@@ -3960,6 +4032,7 @@ spdk_bdev_io_get_io_channel(struct spdk_bdev_io *bdev_io)
 	return bdev_io->internal.ch->channel;
 }
 
+// zhou: set QoS according to config file.
 static void
 _spdk_bdev_qos_config_limit(struct spdk_bdev *bdev, uint64_t *limits)
 {
@@ -3996,6 +4069,7 @@ _spdk_bdev_qos_config_limit(struct spdk_bdev *bdev, uint64_t *limits)
 		}
 	}
 
+    // zhou: enable QoS
 	if (!bdev->internal.qos) {
 		bdev->internal.qos = calloc(1, sizeof(*bdev->internal.qos));
 		if (!bdev->internal.qos) {
@@ -4013,6 +4087,7 @@ _spdk_bdev_qos_config_limit(struct spdk_bdev *bdev, uint64_t *limits)
 	return;
 }
 
+// zhou: read config section "QoS"
 static void
 _spdk_bdev_qos_config(struct spdk_bdev *bdev)
 {
@@ -4028,6 +4103,7 @@ _spdk_bdev_qos_config(struct spdk_bdev *bdev)
 	}
 
 	while (j < SPDK_BDEV_QOS_NUM_RATE_LIMIT_TYPES) {
+
 		limits[j] = SPDK_BDEV_QOS_LIMIT_NOT_DEFINED;
 
 		i = 0;
@@ -4115,6 +4191,7 @@ spdk_bdev_init(struct spdk_bdev *bdev)
 
 	bdev->internal.reset_in_progress = NULL;
 
+    // zhou: set QoS
 	_spdk_bdev_qos_config(bdev);
 
     // zhou:
@@ -4660,6 +4737,7 @@ _spdk_bdev_disable_qos_done(void *cb_arg)
 	_spdk_bdev_set_qos_limit_done(ctx, 0);
 }
 
+// zhou: notify owner channel to stop QoS
 static void
 _spdk_bdev_disable_qos_msg_done(struct spdk_io_channel_iter *i, int status)
 {
@@ -4679,6 +4757,7 @@ _spdk_bdev_disable_qos_msg_done(struct spdk_io_channel_iter *i, int status)
 	}
 }
 
+// zhou: clear up QoS flag for each channel
 static void
 _spdk_bdev_disable_qos_msg(struct spdk_io_channel_iter *i)
 {
@@ -4690,6 +4769,7 @@ _spdk_bdev_disable_qos_msg(struct spdk_io_channel_iter *i)
 	spdk_for_each_channel_continue(i, 0);
 }
 
+// zhou: QoS ower thread
 static void
 _spdk_bdev_update_qos_rate_limit_msg(void *cb_arg)
 {
@@ -4709,11 +4789,13 @@ _spdk_bdev_enable_qos_msg(struct spdk_io_channel_iter *i)
 	void *io_device = spdk_io_channel_iter_get_io_device(i);
 	struct spdk_bdev *bdev = __bdev_from_io_dev(io_device);
 	struct spdk_io_channel *ch = spdk_io_channel_iter_get_channel(i);
+
 	struct spdk_bdev_channel *bdev_ch = spdk_io_channel_get_ctx(ch);
 
 	pthread_mutex_lock(&bdev->internal.mutex);
 	_spdk_bdev_enable_qos(bdev, bdev_ch);
 	pthread_mutex_unlock(&bdev->internal.mutex);
+
 	spdk_for_each_channel_continue(i, 0);
 }
 
@@ -4725,6 +4807,7 @@ _spdk_bdev_enable_qos_done(struct spdk_io_channel_iter *i, int status)
 	_spdk_bdev_set_qos_limit_done(ctx, status);
 }
 
+// zhou: set value to bdev
 static void
 _spdk_bdev_set_qos_rate_limits(struct spdk_bdev *bdev, uint64_t *limits)
 {
@@ -4734,6 +4817,7 @@ _spdk_bdev_set_qos_rate_limits(struct spdk_bdev *bdev, uint64_t *limits)
 
 	for (i = 0; i < SPDK_BDEV_QOS_NUM_RATE_LIMIT_TYPES; i++) {
 		if (limits[i] != SPDK_BDEV_QOS_LIMIT_NOT_DEFINED) {
+            // zhou: just change valued provided by client.
 			bdev->internal.qos->rate_limits[i].limit = limits[i];
 
 			if (limits[i] == 0) {
@@ -4744,6 +4828,7 @@ _spdk_bdev_set_qos_rate_limits(struct spdk_bdev *bdev, uint64_t *limits)
 	}
 }
 
+// zhou: set QoS by RPC.
 void
 spdk_bdev_set_qos_rate_limits(struct spdk_bdev *bdev, uint64_t *limits,
 			      void (*cb_fn)(void *cb_arg, int status), void *cb_arg)
@@ -4755,10 +4840,13 @@ spdk_bdev_set_qos_rate_limits(struct spdk_bdev *bdev, uint64_t *limits,
 	bool				disable_rate_limit = true;
 
 	for (i = 0; i < SPDK_BDEV_QOS_NUM_RATE_LIMIT_TYPES; i++) {
+
+        // zhou: NOT provided by client.
 		if (limits[i] == SPDK_BDEV_QOS_LIMIT_NOT_DEFINED) {
 			continue;
 		}
 
+        // zhou: QoS, some value enabled/disabled -> enabled
 		if (limits[i] > 0) {
 			disable_rate_limit = false;
 		}
@@ -4772,6 +4860,9 @@ spdk_bdev_set_qos_rate_limits(struct spdk_bdev *bdev, uint64_t *limits,
 		}
 
 		limit_set_complement = limits[i] % min_limit_per_sec;
+
+        // zhou: limit should be multiply of
+        //       SPDK_BDEV_QOS_MIN_IOS_PER_SEC/SPDK_BDEV_QOS_MIN_BYTES_PER_SEC.
 		if (limit_set_complement) {
 			SPDK_ERRLOG("Requested rate limit %" PRIu64 " is not a multiple of %" PRIu64 "\n",
 				    limits[i], min_limit_per_sec);
@@ -4779,6 +4870,11 @@ spdk_bdev_set_qos_rate_limits(struct spdk_bdev *bdev, uint64_t *limits,
 			SPDK_ERRLOG("Round up the rate limit to %" PRIu64 "\n", limits[i]);
 		}
 	}
+
+    // zhou: once "disable_rate_limit == true", means all rate values provided by client
+    //       are 0. But we need continue to check the values not provided by client this time.
+    //       If they are still valid value for rate limit, we can't disable whole rate limit
+    //       of this bdev.
 
 	ctx = calloc(1, sizeof(*ctx));
 	if (ctx == NULL) {
@@ -4791,20 +4887,29 @@ spdk_bdev_set_qos_rate_limits(struct spdk_bdev *bdev, uint64_t *limits,
 	ctx->bdev = bdev;
 
 	pthread_mutex_lock(&bdev->internal.mutex);
+    // zhou: already someone is updating QoS, give up with EAGAIN
 	if (bdev->internal.qos_mod_in_progress) {
 		pthread_mutex_unlock(&bdev->internal.mutex);
 		free(ctx);
 		cb_fn(cb_arg, -EAGAIN);
 		return;
 	}
+
+    // zhou: set flag "is updating QoS"
 	bdev->internal.qos_mod_in_progress = true;
 
+    // zhou:
 	if (disable_rate_limit == true && bdev->internal.qos) {
+
 		for (i = 0; i < SPDK_BDEV_QOS_NUM_RATE_LIMIT_TYPES; i++) {
+            // zhou: rate values not provided by client, when they are valid value,
+            //       still can't
 			if (limits[i] == SPDK_BDEV_QOS_LIMIT_NOT_DEFINED &&
 			    (bdev->internal.qos->rate_limits[i].limit > 0 &&
 			     bdev->internal.qos->rate_limits[i].limit !=
 			     SPDK_BDEV_QOS_LIMIT_NOT_DEFINED)) {
+
+                // zhou: we can't disable QoS for this bdev, since still have some limit rate.
 				disable_rate_limit = false;
 				break;
 			}
@@ -4812,8 +4917,12 @@ spdk_bdev_set_qos_rate_limits(struct spdk_bdev *bdev, uint64_t *limits,
 	}
 
 	if (disable_rate_limit == false) {
+        // zhou: we want QoS enabled
+
 		if (bdev->internal.qos == NULL) {
+            // zhou: QoS disalbed -> enabled
 			bdev->internal.qos = calloc(1, sizeof(*bdev->internal.qos));
+
 			if (!bdev->internal.qos) {
 				pthread_mutex_unlock(&bdev->internal.mutex);
 				SPDK_ERRLOG("Unable to allocate memory for QoS tracking\n");
@@ -4822,10 +4931,12 @@ spdk_bdev_set_qos_rate_limits(struct spdk_bdev *bdev, uint64_t *limits,
 				return;
 			}
 		}
+        // zhou: else, maybe just update some values.
 
 		if (bdev->internal.qos->thread == NULL) {
 			/* Enabling */
 			_spdk_bdev_set_qos_rate_limits(bdev, limits);
+
 
 			spdk_for_each_channel(__bdev_to_io_dev(bdev),
 					      _spdk_bdev_enable_qos_msg, ctx,
@@ -4834,10 +4945,15 @@ spdk_bdev_set_qos_rate_limits(struct spdk_bdev *bdev, uint64_t *limits,
 			/* Updating */
 			_spdk_bdev_set_qos_rate_limits(bdev, limits);
 
+            // zhou: just need to notify the channel/thread who take in charge of QoS.
 			spdk_thread_send_msg(bdev->internal.qos->thread,
 					     _spdk_bdev_update_qos_rate_limit_msg, ctx);
 		}
+
+
 	} else {
+        // zhou: disabling QoS
+
 		if (bdev->internal.qos != NULL) {
 			_spdk_bdev_set_qos_rate_limits(bdev, limits);
 

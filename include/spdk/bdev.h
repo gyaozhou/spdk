@@ -124,6 +124,7 @@ enum spdk_bdev_io_type {
 	SPDK_BDEV_NUM_IO_TYPES /* Keep last */
 };
 
+// zhou: SPDK's QoS == IO throttling, Just set one of them?
 /** bdev QoS rate limit type */
 enum spdk_bdev_qos_rate_limit_type {
 	/** IOPS rate limit for both read and write */

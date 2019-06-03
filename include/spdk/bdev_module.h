@@ -358,12 +358,14 @@ struct spdk_bdev {
 	 *  must not read or write to these fields.
 	 */
 	struct __bdev_internal_fields {
+        // zhou: QOS for this bdev
 		/** Quality of service parameters */
 		struct spdk_bdev_qos *qos;
 
 		/** True if the state of the QoS is being modified */
 		bool qos_mod_in_progress;
 
+        // zhou: ??? which should be protected by cross thread mutex ?
 		/** Mutex protecting claimed */
 		pthread_mutex_t mutex;
 
@@ -452,7 +454,7 @@ struct spdk_bdev_io {
 
 	union {
 		struct {
-            // zhou: "iovs" and "iovcnt" used to descibe data/space in memory.
+            // zhou: "iovs" and "iovcnt" used to describe data/space in memory.
 			/** For SG buffer cases, array of iovecs to transfer. */
 			struct iovec *iovs;
 
@@ -528,10 +530,10 @@ struct spdk_bdev_io {
 	 */
 	struct __bdev_io_internal_fields {
 
-        // zhou: lib bdev IO channel
 		/** The bdev I/O channel that this was handled on. */
 		struct spdk_bdev_channel *ch;
 
+        // zhou: when the submit I/O channel is different from handle channel???
 		/** The bdev I/O channel that this was submitted on. */
 		struct spdk_bdev_channel *io_submit_ch;
 
@@ -586,6 +588,7 @@ struct spdk_bdev_io {
 		/** requested size of the buffer associated with this I/O */
 		uint64_t buf_len;
 
+        // zhou: double buffered ???
 		/** if the request is double buffered, store original request iovs here */
 		struct iovec  bounce_iov;
 		struct iovec *orig_iovs;
@@ -597,6 +600,8 @@ struct spdk_bdev_io {
 		/** Member used for linking child I/Os together. */
 		TAILQ_ENTRY(spdk_bdev_io) link;
 
+        // zhou: failed to allocate buffer from mbuf pool, want be wait up when
+        //       available.
 		/** Entry to the list need_buf of struct spdk_bdev. */
 		STAILQ_ENTRY(spdk_bdev_io) buf_link;
 
