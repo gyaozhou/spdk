@@ -279,6 +279,15 @@ struct spdk_bdev {
 	/** Number of blocks */
 	uint64_t blockcnt;
 
+    // zhou: buffer memory should align with this value.
+    //       Just like fields in structure, in order to access efficient.
+    //       This is set by underlying disk, according some performance consideration.
+    //       But when client allocated buffer can't meet this value, we have to copy
+    //       data to a new allocated buffer.
+    //       An extra COPY has overhead also.
+    //       Align with 8 bytes is reasonable, I suppose some HBA or DMA controller will
+    //       be benefit with it.
+    //       I will mention using Memory Requirement.
 	/**
 	 * Specifies an alignment requirement for data buffers associated with an spdk_bdev_io.
 	 * 0 = no alignment requirement
@@ -287,6 +296,13 @@ struct spdk_bdev {
 	 * alignment, before the spdk_bdev_io is submitted to the bdev module.
 	 */
 	uint8_t required_alignment;
+
+
+    // zhou: split IO, in case of
+    //       1. IO size is too large, mbuf pool object can't accomodate it; OR
+    //       2. underlying disk required.
+    //          For example, for RAID, strip is used as unit distribute IO between disks.
+    //          An IO cross the strip boundary can't be handled by it, must split.
 
 	/**
 	 * Specifies whether the optimal_io_boundary is mandatory or
@@ -299,6 +315,11 @@ struct spdk_bdev {
 	 */
 	bool split_on_optimal_io_boundary;
 
+    // zhou: bdev blocks split into strips using "optimal_io_boundary".
+    //       The start and end block number of a I/O, should be located in same strip.
+    //       It means, an I/O can only READ/WRITE data within a strip.
+    //       So, this boundary is NOT alignment. "strip_size" is better.
+    //       I will mention using Block Requirement.
 	/**
 	 * Optimal I/O boundary in blocks, or 0 for no value reported.
 	 */
@@ -369,6 +390,7 @@ struct spdk_bdev {
 		/** Mutex protecting claimed */
 		pthread_mutex_t mutex;
 
+        // zhou: e.g. SPDK_BDEV_IO_STATUS_SUCCESS
 		/** The bdev status */
 		enum spdk_bdev_status status;
 
@@ -446,15 +468,23 @@ struct spdk_bdev_io {
 	/** Enumerated value representing the I/O type. */
 	uint8_t type;
 
+    // zhou: IOV resource, used to describe orignal IO buffer.
+    //       WRITE, provided by client; READ,
 	/** A single iovec element for use by this bdev_io. */
 	struct iovec iov;
 
+    // zhou: IOV resource, used to describe one splited IO.
+    //       Due to we have limit IOV resource, we have to split IO piece by piece, and
+    //       submit it. We can't split next piece until last piece submit completed.
 	/** Array of iovecs used for I/O splitting. */
 	struct iovec child_iov[BDEV_IO_NUM_CHILD_IOV];
 
+    // zhou: "spdk_bdev_io.u"
 	union {
+        // zhou: "spdk_bdev_io.u.bdev"
 		struct {
-            // zhou: "iovs" and "iovcnt" used to describe data/space in memory.
+            // zhou: Initiator Info, "iovs" and "iovcnt" used to describe data/space
+            //       in memory.
 			/** For SG buffer cases, array of iovecs to transfer. */
 			struct iovec *iovs;
 
@@ -462,10 +492,11 @@ struct spdk_bdev_io {
 			int iovcnt;
 
 
-            // zhou: "num_blocks" and "offset_blocks" used to describe data/space in disk.
+            // zhou: Target Info, "num_blocks" and "offset_blocks" used to describe LBA
+            //       in disk.
+            //       These values are original value before split.
 			/** Total size of data to be transferred. */
 			uint64_t num_blocks;
-
 			/** Starting offset (in blocks) of the bdev for this I/O. */
 			uint64_t offset_blocks;
 
@@ -473,6 +504,8 @@ struct spdk_bdev_io {
 			/** stored user callback in case we split the I/O and use a temporary callback */
 			spdk_bdev_io_completion_cb stored_user_cb;
 
+
+            // zhou:
 			/** number of blocks remaining in a split i/o */
 			uint64_t split_remaining_num_blocks;
 
@@ -496,11 +529,13 @@ struct spdk_bdev_io {
 
 		} bdev;
 
+        // zhou: "spdk_bdev_io.u.reset"
 		struct {
 			/** Channel reference held while messages for this reset are in progress. */
 			struct spdk_io_channel *ch_ref;
 		} reset;
 
+        // zhou: "spdk_bdev_io.u.nvme_passthru"
 		struct {
 			/* The NVMe command to execute */
 			struct spdk_nvme_cmd cmd;
@@ -528,6 +563,7 @@ struct spdk_bdev_io {
 	 *  Fields that are used internally by the bdev subsystem.  Bdev modules
 	 *  must not read or write to these fields.
 	 */
+    // zhou: "spdk_bdev_io.internal"
 	struct __bdev_io_internal_fields {
 
 		/** The bdev I/O channel that this was handled on. */
@@ -549,6 +585,7 @@ struct spdk_bdev_io {
 		/** Current tsc at submit time. Used to calculate latency at completion. */
 		uint64_t submit_tsc;
 
+        // zhou: "spdk_bdev_io.internal.error"
 		/** Error information from a device */
 		union {
 			/** Only valid when status is SPDK_BDEV_IO_STATUS_NVME_ERROR */
@@ -582,13 +619,19 @@ struct spdk_bdev_io {
 		/** Status for the IO */
 		int8_t status;
 
+        // zhou: start address of buffer allocated from pool, not been adjusted.
 		/** bdev allocated memory associated with this request */
 		void *buf;
 
 		/** requested size of the buffer associated with this I/O */
 		uint64_t buf_len;
 
-        // zhou: double buffered ???
+
+        // zhou: In case "u.bdev.iovs" is not meet alignment requirement.
+        //       Save it to "internal.orig_iovs", and the "bounce_iov" assign to
+        //       "u.bdev.iovs", which will be refer to buffer allocated from pool.
+
+        // zhou: IOV resource, used to describe bounce/interim memory.
 		/** if the request is double buffered, store original request iovs here */
 		struct iovec  bounce_iov;
 		struct iovec *orig_iovs;

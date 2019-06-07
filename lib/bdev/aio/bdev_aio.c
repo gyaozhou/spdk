@@ -498,6 +498,8 @@ bdev_aio_get_buf_cb(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io,
 static int _bdev_aio_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io)
 {
 	switch (bdev_io->type) {
+        // zhou: why AIO has such requirement?
+
 	/* Read and write operations must be performed on buffers aligned to
 	 * bdev->required_alignment. If user specified unaligned buffers,
 	 * get the aligned buffer from the pool by calling spdk_bdev_io_get_buf. */
@@ -742,6 +744,10 @@ create_aio_bdev(const char *name, const char *filename, uint32_t block_size)
 	}
 
 	fdisk->disk.blocklen = block_size;
+
+    // zhou: README, why ask READ/WRITE buffer keep align with this value ???
+    //       No performance gain here.
+    //       I suppose, align with 8 bytes is enough and mandatory.
 	fdisk->disk.required_alignment = spdk_u32log2(block_size);
 
 	if (disk_size % fdisk->disk.blocklen != 0) {
