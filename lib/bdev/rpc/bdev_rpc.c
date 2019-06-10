@@ -211,7 +211,6 @@ invalid:
 	free_rpc_get_bdevs_iostat(&req);
 }
 SPDK_RPC_REGISTER("get_bdevs_iostat", spdk_rpc_get_bdevs_iostat, SPDK_RPC_RUNTIME)
-
 ////////////////////////////////////////////////////////////////////////////////
 
 static void
@@ -539,7 +538,6 @@ exit:
 
 // zhou: set QoS (IO Throttling)
 SPDK_RPC_REGISTER("set_bdev_qos_limit", spdk_rpc_set_bdev_qos_limit, SPDK_RPC_RUNTIME)
-
 ////////////////////////////////////////////////////////////////////////////////
 /* SPDK_RPC_ENABLE_BDEV_HISTOGRAM */
 
@@ -607,8 +605,9 @@ invalid:
 	spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS, spdk_strerror(-rc));
 }
 
+// zhou: enable histogram
 SPDK_RPC_REGISTER("enable_bdev_histogram", spdk_rpc_enable_bdev_histogram, SPDK_RPC_RUNTIME)
-
+////////////////////////////////////////////////////////////////////////////////
 /* SPDK_RPC_GET_BDEV_HISTOGRAM */
 
 struct rpc_get_bdev_histogram_request {

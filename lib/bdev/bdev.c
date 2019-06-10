@@ -187,7 +187,7 @@ struct spdk_bdev_qos {
 	/** Types of structure of rate limits. */
 	struct spdk_bdev_qos_limit rate_limits[SPDK_BDEV_QOS_NUM_RATE_LIMIT_TYPES];
 
-    // zhou: all IO will go one I/O channel ???
+    // zhou: all IO will go one I/O channel.
 	/** The channel that all I/O are funneled through. */
 	struct spdk_bdev_channel *ch;
 
@@ -214,7 +214,7 @@ struct spdk_bdev_qos {
 //       "struct spdk_bdev_io".
 struct spdk_bdev_mgmt_channel {
 
-    // zhou: used to alloc buf for READ
+    // zhou: waiting list for such resource, used when pool is empty.
 	bdev_io_stailq_t need_buf_small;
 	bdev_io_stailq_t need_buf_large;
 
@@ -280,7 +280,11 @@ struct spdk_bdev_shared_resource {
 	 */
 	uint64_t		io_outstanding;
 
-    // zhou: queued IO due to no memory, coudl be alloc from mbuf pool
+    // zhou: queued IO due to underlying disk completed with no memory.
+    //       We should wait until some I/O compeleted success.
+    //
+    //       If retry pending I/O, should wait for outstanding I/O number less than
+    //       "nomem_threshold".
 	/*
 	 * Queue of IO awaiting retry because of a previous NOMEM status returned
 	 *  on this channel.
@@ -636,7 +640,7 @@ _bdev_io_set_bounce_buf(struct spdk_bdev_io *bdev_io, void *buf, size_t len)
 	}
 }
 
-// zhou: README,
+// zhou: release object to pool, or assign it to who in waiting list.
 static void
 spdk_bdev_io_put_buf(struct spdk_bdev_io *bdev_io)
 {
@@ -651,11 +655,13 @@ spdk_bdev_io_put_buf(struct spdk_bdev_io *bdev_io)
 
 	buf = bdev_io->internal.buf;
 	buf_len = bdev_io->internal.buf_len;
+
 	alignment = spdk_bdev_get_buf_align(bdev_io->bdev);
 	ch = bdev_io->internal.ch->shared_resource->mgmt_ch;
 
 	bdev_io->internal.buf = NULL;
 
+    // zhou: found out which pool the "bdev_io->internal.buf" belongs to.
 	if (buf_len + alignment <= SPDK_BDEV_BUF_SIZE_WITH_MD(SPDK_BDEV_SMALL_BUF_MAX_SIZE) +
 	    SPDK_BDEV_POOL_ALIGNMENT) {
 		pool = g_bdev_mgr.buf_small_pool;
@@ -665,6 +671,7 @@ spdk_bdev_io_put_buf(struct spdk_bdev_io *bdev_io)
 		stailq = &ch->need_buf_large;
 	}
 
+    // zhou: once there is someone in waiting list, reuse it immediately.
 	if (STAILQ_EMPTY(stailq)) {
 		spdk_mempool_put(pool, buf);
 	} else {
@@ -682,21 +689,31 @@ spdk_bdev_io_put_buf(struct spdk_bdev_io *bdev_io)
 		}
 
 		STAILQ_REMOVE_HEAD(stailq, internal.buf_link);
+
 		tmp->internal.buf = buf;
-        // zhou: get buffer completion.
+
+        // zhou: notify that its buffer allocation completion.
 		tmp->internal.get_buf_cb(tmp->internal.ch->channel, tmp, true);
 	}
 }
 
+// zhou: In case of READ, need copy data from bounce memory to client's memory, when
+//       IO completed success.
 static void
 _bdev_io_unset_bounce_buf(struct spdk_bdev_io *bdev_io)
 {
+    // zhou: WRITE, copy will be performed when submit IO.
+    //       READ, copy will be performed when IO completed
+
 	/* if this is read path, copy data from bounce buffer to original buffer */
 	if (bdev_io->type == SPDK_BDEV_IO_TYPE_READ &&
 	    bdev_io->internal.status == SPDK_BDEV_IO_STATUS_SUCCESS) {
+
 		_copy_buf_to_iovs(bdev_io->internal.orig_iovs, bdev_io->internal.orig_iovcnt,
 				  bdev_io->internal.bounce_iov.iov_base, bdev_io->internal.bounce_iov.iov_len);
+
 	}
+
 	/* set orignal buffer for this io */
 	bdev_io->u.bdev.iovcnt = bdev_io->internal.orig_iovcnt;
 	bdev_io->u.bdev.iovs = bdev_io->internal.orig_iovs;
@@ -805,8 +822,9 @@ spdk_bdev_io_get_buf(struct spdk_bdev_io *bdev_io, spdk_bdev_io_get_buf_cb cb, u
 // zhou: although the backing storage will be installed by RPC, but the adapter layer
 //       of each supporting backing storage will be init with library bdev.
 //
-//       For this function, will find out enough room to hold context of all supporting
-//       bakcing storage.
+//       Each "struct spdk_bdev_io" will allocated with underlying disk private work space.
+//       For this function, will find out enough room to hold private space size of all
+//       supporting bakcing storage.
 //       Then, we can allocate reserve enough space when create mempool for
 //       "struct spdk_bdev_io"
 static int
@@ -1414,6 +1432,7 @@ spdk_bdev_get_io(struct spdk_bdev_channel *channel)
 	return bdev_io;
 }
 
+// zhou: there are two kinds resource, "struct spdk_bdev_io" and Large/Small buffer.
 void
 spdk_bdev_free_io(struct spdk_bdev_io *bdev_io)
 {
@@ -1424,18 +1443,24 @@ spdk_bdev_free_io(struct spdk_bdev_io *bdev_io)
 
 	ch = bdev_io->internal.ch->shared_resource->mgmt_ch;
 
+    // zhou: this spdk_bdev_io owns a buffer allocated from pool,
 	if (bdev_io->internal.buf != NULL) {
 		spdk_bdev_io_put_buf(bdev_io);
 	}
 
+    // zhou: up to channel's "struct spdk_bdev_io" cache state.
 	if (ch->per_thread_cache_count < ch->bdev_io_cache_size) {
 		ch->per_thread_cache_count++;
+
 		STAILQ_INSERT_HEAD(&ch->per_thread_cache, bdev_io, internal.buf_link);
+
+        // zhou: someone is warting for "struct spdk_bdev_io" resource, wait them up.
 		while (ch->per_thread_cache_count > 0 && !TAILQ_EMPTY(&ch->io_wait_queue)) {
 			struct spdk_bdev_io_wait_entry *entry;
 
 			entry = TAILQ_FIRST(&ch->io_wait_queue);
 			TAILQ_REMOVE(&ch->io_wait_queue, entry, link);
+
 			entry->cb_fn(entry->cb_arg);
 		}
 	} else {
@@ -3847,6 +3872,8 @@ spdk_bdev_queue_io_wait(struct spdk_bdev *bdev, struct spdk_io_channel *ch,
 	return 0;
 }
 
+// zhou: handle pending I/O in list "shared_resource->nomem_io" when other I/O
+//       compeleted without reporting "SPDK_BDEV_IO_STATUS_NOMEM".
 static void
 _spdk_bdev_ch_retry_io(struct spdk_bdev_channel *bdev_ch)
 {
@@ -3854,6 +3881,7 @@ _spdk_bdev_ch_retry_io(struct spdk_bdev_channel *bdev_ch)
 	struct spdk_bdev_shared_resource *shared_resource = bdev_ch->shared_resource;
 	struct spdk_bdev_io *bdev_io;
 
+    // zhou: outstanding I/O decreased less than "nomem_threshold"
 	if (shared_resource->io_outstanding > shared_resource->nomem_threshold) {
 		/*
 		 * Allow some more I/O to complete before retrying the nomem_io queue.
@@ -3866,6 +3894,7 @@ _spdk_bdev_ch_retry_io(struct spdk_bdev_channel *bdev_ch)
 		return;
 	}
 
+
 	while (!TAILQ_EMPTY(&shared_resource->nomem_io)) {
 
 		bdev_io = TAILQ_FIRST(&shared_resource->nomem_io);
@@ -3873,7 +3902,9 @@ _spdk_bdev_ch_retry_io(struct spdk_bdev_channel *bdev_ch)
 
 		bdev_io->internal.ch->io_outstanding++;
 		shared_resource->io_outstanding++;
+
 		bdev_io->internal.status = SPDK_BDEV_IO_STATUS_PENDING;
+
 		bdev->fn_table->submit_request(bdev_io->internal.ch->channel, bdev_io);
 
 		if (bdev_io->internal.status == SPDK_BDEV_IO_STATUS_NOMEM) {
@@ -3882,12 +3913,14 @@ _spdk_bdev_ch_retry_io(struct spdk_bdev_channel *bdev_ch)
 	}
 }
 
+// zhou:
 static inline void
 _spdk_bdev_io_complete(void *ctx)
 {
 	struct spdk_bdev_io *bdev_io = ctx;
-	uint64_t tsc, tsc_diff;
+n	uint64_t tsc, tsc_diff;
 
+    // zhou: completion process need be deferred or by another channel.
 	if (spdk_unlikely(bdev_io->internal.in_submit_request || bdev_io->internal.io_submit_ch)) {
 		/*
 		 * Send the completion to the thread that originally submitted the I/O,
@@ -3898,6 +3931,7 @@ _spdk_bdev_io_complete(void *ctx)
 			bdev_io->internal.io_submit_ch = NULL;
 		}
 
+        // zhou: good points.
 		/*
 		 * Defer completion to avoid potential infinite recursion if the
 		 * user's completion callback issues a new I/O.
@@ -3959,7 +3993,7 @@ _spdk_bdev_io_complete(void *ctx)
 	assert(bdev_io->internal.cb != NULL);
 	assert(spdk_get_thread() == spdk_io_channel_get_thread(bdev_io->internal.ch->channel));
 
-    // zhou:
+    // zhou: invoke client I/O completion callback.
 	bdev_io->internal.cb(bdev_io, bdev_io->internal.status == SPDK_BDEV_IO_STATUS_SUCCESS,
 			     bdev_io->internal.caller_ctx);
 }
@@ -3991,7 +4025,8 @@ _spdk_bdev_unfreeze_channel(struct spdk_io_channel_iter *i)
 	spdk_for_each_channel_continue(i, 0);
 }
 
-// zhou: when bdev IO completed
+// zhou: when bdev IO completed success or failed. Always invoked by underlying disk
+//       when completed success.
 void
 spdk_bdev_io_complete(struct spdk_bdev_io *bdev_io, enum spdk_bdev_io_status status)
 {
@@ -4002,12 +4037,15 @@ spdk_bdev_io_complete(struct spdk_bdev_io *bdev_io, enum spdk_bdev_io_status sta
 	bdev_io->internal.status = status;
 
 	if (spdk_unlikely(bdev_io->type == SPDK_BDEV_IO_TYPE_RESET)) {
+
 		bool unlock_channels = false;
 
 		if (status == SPDK_BDEV_IO_STATUS_NOMEM) {
 			SPDK_ERRLOG("NOMEM returned for reset\n");
 		}
+
 		pthread_mutex_lock(&bdev->internal.mutex);
+
 		if (bdev_io == bdev->internal.reset_in_progress) {
 			bdev->internal.reset_in_progress = NULL;
 			unlock_channels = true;
@@ -4019,7 +4057,9 @@ spdk_bdev_io_complete(struct spdk_bdev_io *bdev_io, enum spdk_bdev_io_status sta
 					      bdev_io, _spdk_bdev_reset_complete);
 			return;
 		}
+
 	} else {
+
 		if (spdk_unlikely(bdev_io->internal.orig_iovcnt > 0)) {
 			_bdev_io_unset_bounce_buf(bdev_io);
 		}
@@ -4028,6 +4068,7 @@ spdk_bdev_io_complete(struct spdk_bdev_io *bdev_io, enum spdk_bdev_io_status sta
 		assert(shared_resource->io_outstanding > 0);
 
 		bdev_ch->io_outstanding--;
+
 		shared_resource->io_outstanding--;
 
 		if (spdk_unlikely(status == SPDK_BDEV_IO_STATUS_NOMEM)) {
@@ -4047,6 +4088,7 @@ spdk_bdev_io_complete(struct spdk_bdev_io *bdev_io, enum spdk_bdev_io_status sta
 			return;
 		}
 
+        // zhou: submit I/O Request immediately, keep underlying disk busy.
 		if (spdk_unlikely(!TAILQ_EMPTY(&shared_resource->nomem_io))) {
 			_spdk_bdev_ch_retry_io(bdev_ch);
 		}
@@ -5168,6 +5210,7 @@ _spdk_bdev_histogram_enable_channel(struct spdk_io_channel_iter *i)
 	spdk_for_each_channel_continue(i, status);
 }
 
+// zhou: README,
 void
 spdk_bdev_histogram_enable(struct spdk_bdev *bdev, spdk_bdev_histogram_status_cb cb_fn,
 			   void *cb_arg, bool enable)

@@ -54,6 +54,7 @@ extern "C" {
 #define SPDK_HISTOGRAM_NUM_BUCKETS(h)		(SPDK_HISTOGRAM_NUM_BUCKETS_PER_RANGE(h) * \
 						 SPDK_HISTOGRAM_NUM_BUCKET_RANGES(h))
 
+// zhou: README,
 /*
  * SPDK histograms are implemented using ranges of bucket arrays.  The most common usage
  * model is using TSC datapoints to capture an I/O latency histogram.  For this usage model,

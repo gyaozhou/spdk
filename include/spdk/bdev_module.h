@@ -378,6 +378,7 @@ struct spdk_bdev {
 	/** Fields that are used internally by the bdev subsystem.  Bdev modules
 	 *  must not read or write to these fields.
 	 */
+    // zhou: bdev.internal
 	struct __bdev_internal_fields {
         // zhou: QOS for this bdev
 		/** Quality of service parameters */
@@ -421,9 +422,11 @@ struct spdk_bdev {
 		/** period at which we poll for queue depth information */
 		uint64_t period;
 
+        // zhou: used to go around each I/O Channel to collect outsthanding I/O number.
 		/** used to aggregate queue depth while iterating across the bdev's open channels */
 		uint64_t temporary_queue_depth;
 
+        // zhou: last period outstanding colleciton.
 		/** queue depth as calculated the last time the telemetry poller checked. */
 		uint64_t measured_queue_depth;
 
@@ -436,7 +439,7 @@ struct spdk_bdev {
 		/** accumulated I/O statistics for previously deleted channels of this bdev */
 		struct spdk_bdev_io_stat stat;
 
-        // zhou: README,
+        // zhou:
 		/** histogram enabled on this bdev */
 		bool	histogram_enabled;
 		bool	histogram_in_progress;
@@ -569,19 +572,23 @@ struct spdk_bdev_io {
 		/** The bdev I/O channel that this was handled on. */
 		struct spdk_bdev_channel *ch;
 
-        // zhou: when the submit I/O channel is different from handle channel???
+        // zhou: In case of QoS, channel I/O submited will be different from QoS
+        //       owner channel. But we still want the completion be processed by
+        //       the channel which submit I/O.
 		/** The bdev I/O channel that this was submitted on. */
 		struct spdk_bdev_channel *io_submit_ch;
 
 		/** The bdev descriptor that was used when submitting this I/O. */
 		struct spdk_bdev_desc *desc;
 
+        // zhou: client function who submit I/O
 		/** User function that will be called when this completes */
 		spdk_bdev_io_completion_cb cb;
 
 		/** Context that will be passed to the completion callback */
 		void *caller_ctx;
 
+        // zhou: TSC when I/O submit.
 		/** Current tsc at submit time. Used to calculate latency at completion. */
 		uint64_t submit_tsc;
 
@@ -608,6 +615,8 @@ struct spdk_bdev_io {
 			} scsi;
 		} error;
 
+        // zhou: we don't want this I/O completion callback function be invoked,
+        //       until I am ready.
 		/**
 		 * Set to true while the bdev module submit_request function is in progress.
 		 *
