@@ -1,7 +1,12 @@
+testdir=$(readlink -f $(dirname $0))
+rootdir=$(readlink -f $testdir/../../..)
+source $rootdir/test/common/autotest_common.sh
+source $rootdir/test/vhost/common.sh
+
 dry_run=false
 no_shutdown=false
 fio_bin="fio"
-fio_jobs="$HOTPLUG_DIR/fio_jobs/"
+fio_jobs="$testdir/fio_jobs/"
 test_type=spdk_vhost_scsi
 reuse_vms=false
 vms=()
@@ -10,10 +15,11 @@ disk_split=""
 x=""
 scsi_hot_remove_test=0
 blk_hot_remove_test=0
+readonly=""
 
 
 function usage() {
-    [[ ! -z $2 ]] && ( echo "$2"; echo ""; )
+    [[ -n $2 ]] && ( echo "$2"; echo ""; )
     echo "Shortcut script for doing automated hotattach/hotdetach test"
     echo "Usage: $(basename $1) [OPTIONS]"
     echo
@@ -31,6 +37,7 @@ function usage() {
     echo "                          OS - VM os disk path (optional)"
     echo "                          DISKS - VM os test disks/devices path (virtio - optional, kernel_vhost - mandatory)"
     echo "    --scsi-hotremove-test Run scsi hotremove tests"
+    echo "    --readonly            Use readonly for fio"
     exit 0
 }
 
@@ -45,6 +52,7 @@ while getopts 'xh-:' optchar; do
             vm=*) vms+=("${OPTARG#*=}") ;;
             scsi-hotremove-test) scsi_hot_remove_test=1 ;;
             blk-hotremove-test) blk_hot_remove_test=1 ;;
+            readonly) readonly="--readonly" ;;
             *) usage $0 "Invalid argument '$OPTARG'" ;;
         esac
         ;;
@@ -56,12 +64,11 @@ while getopts 'xh-:' optchar; do
 done
 shift $(( OPTIND - 1 ))
 
-fio_job=$HOTPLUG_DIR/fio_jobs/default_integrity.job
-tmp_attach_job=$HOTPLUG_DIR/fio_jobs/fio_attach.job.tmp
-tmp_detach_job=$HOTPLUG_DIR/fio_jobs/fio_detach.job.tmp
-. $HOTPLUG_DIR/../common/common.sh
+fio_job=$testdir/fio_jobs/default_integrity.job
+tmp_attach_job=$testdir/fio_jobs/fio_attach.job.tmp
+tmp_detach_job=$testdir/fio_jobs/fio_detach.job.tmp
 
-rpc_py="$SPDK_BUILD_DIR/scripts/rpc.py -s $(get_vhost_dir)/rpc.sock"
+rpc_py="$rootdir/scripts/rpc.py -s $(get_vhost_dir 0)/rpc.sock"
 
 function print_test_fio_header() {
     notice "==============="
@@ -75,7 +82,7 @@ function print_test_fio_header() {
 }
 
 function vms_setup() {
-    for vm_conf in ${vms[@]}; do
+    for vm_conf in "${vms[@]}"; do
         IFS=',' read -ra conf <<< "$vm_conf"
         if [[ x"${conf[0]}" == x"" ]] || ! assert_number ${conf[0]}; then
             fail "invalid VM configuration syntax $vm_conf"
@@ -98,24 +105,22 @@ function vms_setup() {
 }
 
 function vm_run_with_arg() {
-    vm_run $@
-    vm_wait_for_boot 300 $@
+    vm_run "$@"
+    vm_wait_for_boot 300 "$@"
 }
 
 function vms_setup_and_run() {
     vms_setup
-    vm_run_with_arg $@
+    vm_run_with_arg "$@"
 }
 
 function vms_prepare() {
     for vm_num in $1; do
-        vm_dir=$VM_BASE_DIR/$vm_num
-
         qemu_mask_param="VM_${vm_num}_qemu_mask"
 
         host_name="VM-${vm_num}-${!qemu_mask_param}"
         notice "Setting up hostname: $host_name"
-        vm_ssh $vm_num "hostname $host_name"
+        vm_exec $vm_num "hostname $host_name"
         vm_start_fio_server --fio-bin=$fio_bin $readonly $vm_num
     done
 }
@@ -123,7 +128,7 @@ function vms_prepare() {
 function vms_reboot_all() {
     notice "Rebooting all vms "
     for vm_num in $1; do
-        vm_ssh $vm_num "reboot" || true
+        vm_exec $vm_num "reboot" || true
         while vm_os_booted $vm_num; do
              sleep 0.5
         done
@@ -154,7 +159,7 @@ function check_fio_retcode() {
 function wait_for_finish() {
     local wait_for_pid=$1
     local sequence=${2:-30}
-    for i in `seq 1 $sequence`; do
+    for i in $(seq 1 $sequence); do
         if kill -0 $wait_for_pid; then
              sleep 0.5
              continue
@@ -177,7 +182,7 @@ function reboot_all_and_prepare() {
 
 function post_test_case() {
     vm_shutdown_all
-    spdk_vhost_kill
+    vhost_kill 0
 }
 
 function on_error_exit() {
@@ -197,7 +202,8 @@ function check_disks() {
 
 function get_traddr() {
     local nvme_name=$1
-    local nvme="$( $SPDK_BUILD_DIR/scripts/gen_nvme.sh )"
+    local nvme
+    nvme="$( $rootdir/scripts/gen_nvme.sh )"
     while read -r line; do
         if [[ $line == *"TransportID"* ]] && [[ $line == *$nvme_name* ]]; then
             local word_array=($line)
@@ -211,9 +217,9 @@ function get_traddr() {
 }
 
 function delete_nvme() {
-    $rpc_py delete_nvme_controller $1
+    $rpc_py bdev_nvme_detach_controller $1
 }
 
 function add_nvme() {
-    $rpc_py construct_nvme_bdev -b $1 -t PCIe -a $2
+    $rpc_py bdev_nvme_attach_controller -b $1 -t PCIe -a $2
 }

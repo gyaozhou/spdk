@@ -83,12 +83,20 @@ nvme_ns_set_identify_data(struct spdk_nvme_ns *ns)
 		ns->flags |= SPDK_NVME_NS_DEALLOCATE_SUPPORTED;
 	}
 
+	if (ns->ctrlr->cdata.oncs.compare) {
+		ns->flags |= SPDK_NVME_NS_COMPARE_SUPPORTED;
+	}
+
 	if (ns->ctrlr->cdata.vwc.present) {
 		ns->flags |= SPDK_NVME_NS_FLUSH_SUPPORTED;
 	}
 
 	if (ns->ctrlr->cdata.oncs.write_zeroes) {
 		ns->flags |= SPDK_NVME_NS_WRITE_ZEROES_SUPPORTED;
+	}
+
+	if (ns->ctrlr->cdata.oncs.write_unc) {
+		ns->flags |= SPDK_NVME_NS_WRITE_UNCORRECTABLE_SUPPORTED;
 	}
 
 	if (nsdata->nsrescap.raw) {
@@ -240,6 +248,12 @@ bool
 spdk_nvme_ns_supports_extended_lba(struct spdk_nvme_ns *ns)
 {
 	return (ns->flags & SPDK_NVME_NS_EXTENDED_LBA_SUPPORTED) ? true : false;
+}
+
+bool
+spdk_nvme_ns_supports_compare(struct spdk_nvme_ns *ns)
+{
+	return (ns->flags & SPDK_NVME_NS_COMPARE_SUPPORTED) ? true : false;
 }
 
 uint32_t

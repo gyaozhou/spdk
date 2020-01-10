@@ -47,7 +47,7 @@ extern "C" {
  */
 struct spdk_notify_type;
 
-typedef int (*spdk_notify_get_type_cb)(const struct spdk_notify_type *type, void *ctx);
+typedef int (*spdk_notify_foreach_type_cb)(const struct spdk_notify_type *type, void *ctx);
 
 #define SPDK_NOTIFY_MAX_NAME_SIZE 128
 #define SPDK_NOTIFY_MAX_CTX_SIZE 128
@@ -65,8 +65,8 @@ struct spdk_notify_event {
  * \param ctx User context
  * \return Non zero to break iteration.
  */
-typedef int (*spdk_notify_get_event_cb)(uint64_t idx, const struct spdk_notify_event *event,
-					void *ctx);
+typedef int (*spdk_notify_foreach_event_cb)(uint64_t idx, const struct spdk_notify_event *event,
+		void *ctx);
 
 /**
  * Register \c type as new notification type.
@@ -93,7 +93,7 @@ const char *spdk_notify_type_get_name(const struct spdk_notify_type *type);
  * \param cb_fn
  * \param ctx
  */
-void spdk_notify_get_types(spdk_notify_get_type_cb cb_fn, void *ctx);
+void spdk_notify_foreach_type(spdk_notify_foreach_type_cb cb_fn, void *ctx);
 
 /**
  * Send given notification.
@@ -116,8 +116,8 @@ uint64_t spdk_notify_send(const char *type, const char *ctx);
  * \param ctx User context
  * \return Number of user callback invocations
  */
-uint64_t spdk_notify_get_events(uint64_t start_idx, uint64_t max, spdk_notify_get_event_cb cb_fn,
-				void *ctx);
+uint64_t spdk_notify_foreach_event(uint64_t start_idx, uint64_t max,
+				   spdk_notify_foreach_event_cb cb_fn, void *ctx);
 
 #ifdef __cplusplus
 }

@@ -1,11 +1,7 @@
 #!/usr/bin/env bash
 
-set -e
-
 testdir=$(readlink -f $(dirname $0))
 rootdir=$(readlink -f $testdir/../..)
-plugindir=$rootdir/examples/bdev/fio_plugin
-
 source $rootdir/test/common/autotest_common.sh
 
 declare -A suite
@@ -35,9 +31,9 @@ else
 	$rootdir/scripts/gen_ftl.sh -a $device -n nvme0 -l 0-3 -u $uuid > $FTL_BDEV_CONF
 fi
 
-for test in ${tests[@]}; do
+for test in ${tests}; do
 	timing_enter $test
-	LD_PRELOAD=$plugindir/fio_plugin /usr/src/fio/fio $testdir/config/fio/$test.fio
+	fio_bdev $testdir/config/fio/$test.fio
 	timing_exit $test
 done
 

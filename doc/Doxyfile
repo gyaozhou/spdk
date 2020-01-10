@@ -795,7 +795,6 @@ INPUT                  += \
                          misc.md \
                          driver_modules.md \
                          tools.md \
-                         experimental_tools.md \
                          performance_reports.md \
 
 # All remaining pages are listed here in alphabetical order by filename.
@@ -810,7 +809,6 @@ INPUT                  += \
                          changelog.md \
                          compression.md \
                          concurrency.md \
-                         directory_structure.md \
                          event.md \
                          ftl.md \
                          gdb_macros.md \
@@ -821,11 +819,14 @@ INPUT                  += \
                          jsonrpc_proxy.md \
                          lvol.md \
                          memory.md \
+                         notify.md \
                          nvme.md \
                          nvme-cli.md \
+                         nvme_spec.md \
                          nvmf.md \
                          nvmf_tgt_pg.md \
                          nvmf_tracing.md \
+                         overview.md \
                          peer_2_peer.md \
                          porting.md \
                          spdkcli.md \
@@ -836,6 +837,7 @@ INPUT                  += \
                          vhost.md \
                          vhost_processing.md \
                          virtio.md \
+                         vmd.md \
                          vpp_integration.md
 
 # This tag can be used to specify the character encoding of the source files

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 
 set -xe
-BASE_DIR=$(readlink -f $(dirname $0))
+
+testdir=$(readlink -f $(dirname $0))
 
 disk_name="vda"
 test_folder_name="readonly_test"
@@ -10,12 +11,12 @@ test_file_name="some_test_file"
 function error()
 {
 	echo "==========="
-	echo -e "ERROR: $@"
+	echo -e "ERROR: $*"
 	echo "==========="
 	trap - ERR
 	set +e
 	umount "$test_folder_name"
-	rm -rf "$BASE_DIR/$test_folder_name"
+	rm -rf "${testdir:?}/${test_folder_name:?}"
 	exit 1
 }
 
@@ -44,4 +45,4 @@ mount /dev/$disk_name"1" $test_folder_name
 echo "INFO: Creating a test file $test_file_name"
 truncate -s "200M" $test_folder_name/$test_file_name
 umount "$test_folder_name"
-rm -rf "$BASE_DIR/$test_folder_name"
+rm -rf "${testdir:?}/${test_folder_name:?}"

@@ -34,12 +34,14 @@
 #include "spdk/stdinc.h"
 
 #include "spdk/util.h"
+#include "spdk/queue.h"
 #include "spdk_cunit.h"
 
 #include <rte_config.h>
 #include <rte_version.h>
 #include <rte_malloc.h>
 #include <rte_eal_memconfig.h>
+#include <rte_eal.h>
 
 #if RTE_VERSION < RTE_VERSION_NUM(18, 05, 0, 0)
 

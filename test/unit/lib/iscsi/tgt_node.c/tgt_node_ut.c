@@ -102,14 +102,11 @@ spdk_scsi_dev_add_lun(struct spdk_scsi_dev *dev, const char *bdev_name, int lun_
 static void
 add_lun_test_cases(void)
 {
-	struct spdk_iscsi_tgt_node tgtnode;
+	struct spdk_iscsi_tgt_node tgtnode = {};
 	int lun_id = 0;
 	char *bdev_name = NULL;
-	struct spdk_scsi_dev scsi_dev;
+	struct spdk_scsi_dev scsi_dev = {};
 	int rc;
-
-	memset(&tgtnode, 0, sizeof(struct spdk_iscsi_tgt_node));
-	memset(&scsi_dev, 0, sizeof(struct spdk_scsi_dev));
 
 	/* case 1 */
 	tgtnode.num_active_conns = 1;
@@ -344,42 +341,38 @@ allow_ipv4_invalid(void)
 static void
 node_access_allowed(void)
 {
-	struct spdk_iscsi_tgt_node tgtnode;
-	struct spdk_iscsi_portal_grp pg;
-	struct spdk_iscsi_init_grp ig;
-	struct spdk_iscsi_conn conn;
-	struct spdk_iscsi_portal portal;
-	struct spdk_iscsi_initiator_name iname;
-	struct spdk_iscsi_initiator_netmask imask;
-	struct spdk_scsi_dev scsi_dev;
+	struct spdk_iscsi_tgt_node tgtnode = {};
+	struct spdk_iscsi_portal_grp pg = {};
+	struct spdk_iscsi_init_grp ig = {};
+	struct spdk_iscsi_conn conn = {};
+	struct spdk_iscsi_portal portal = {};
+	struct spdk_iscsi_initiator_name iname = {};
+	struct spdk_iscsi_initiator_netmask imask = {};
+	struct spdk_scsi_dev scsi_dev = {};
 	struct spdk_iscsi_pg_map *pg_map;
 	char *iqn, *addr;
 	bool result;
 
 	/* portal group initialization */
-	memset(&pg, 0, sizeof(struct spdk_iscsi_portal_grp));
 	pg.tag = 1;
 
 	/* initiator group initialization */
-	memset(&ig, 0, sizeof(struct spdk_iscsi_init_grp));
 	ig.tag = 1;
 
 	ig.ninitiators = 1;
-	iname.name = "iqn.2017-10.spdk.io:0001";
+	snprintf(iname.name, sizeof(iname.name), "iqn.2017-10.spdk.io:0001");
 	TAILQ_INIT(&ig.initiator_head);
 	TAILQ_INSERT_TAIL(&ig.initiator_head, &iname, tailq);
 
 	ig.nnetmasks = 1;
-	imask.mask = "192.168.2.0/24";
+	snprintf(imask.mask, sizeof(imask.mask), "192.168.2.0/24");
 	TAILQ_INIT(&ig.netmask_head);
 	TAILQ_INSERT_TAIL(&ig.netmask_head, &imask, tailq);
 
 	/* target initialization */
-	memset(&tgtnode, 0, sizeof(struct spdk_iscsi_tgt_node));
-	tgtnode.name = "iqn.2017-10.spdk.io:0001";
+	snprintf(tgtnode.name, sizeof(tgtnode.name), "iqn.2017-10.spdk.io:0001");
 	TAILQ_INIT(&tgtnode.pg_map_head);
 
-	memset(&scsi_dev, 0, sizeof(struct spdk_scsi_dev));
 	snprintf(scsi_dev.name, sizeof(scsi_dev.name), "iqn.2017-10.spdk.io:0001");
 	tgtnode.dev = &scsi_dev;
 
@@ -387,13 +380,11 @@ node_access_allowed(void)
 	iscsi_pg_map_add_ig_map(pg_map, &ig);
 
 	/* portal initialization */
-	memset(&portal, 0, sizeof(struct spdk_iscsi_portal));
 	portal.group = &pg;
-	portal.host = "192.168.2.0";
-	portal.port = "3260";
+	snprintf(portal.host, sizeof(portal.host), "192.168.2.0");
+	snprintf(portal.port, sizeof(portal.port), "3260");
 
 	/* input for UT */
-	memset(&conn, 0, sizeof(struct spdk_iscsi_conn));
 	conn.portal = &portal;
 
 	iqn = "iqn.2017-10.spdk.io:0001";
@@ -409,27 +400,25 @@ node_access_allowed(void)
 static void
 node_access_denied_by_empty_netmask(void)
 {
-	struct spdk_iscsi_tgt_node tgtnode;
-	struct spdk_iscsi_portal_grp pg;
-	struct spdk_iscsi_init_grp ig;
-	struct spdk_iscsi_conn conn;
-	struct spdk_iscsi_portal portal;
-	struct spdk_iscsi_initiator_name iname;
-	struct spdk_scsi_dev scsi_dev;
+	struct spdk_iscsi_tgt_node tgtnode = {};
+	struct spdk_iscsi_portal_grp pg = {};
+	struct spdk_iscsi_init_grp ig = {};
+	struct spdk_iscsi_conn conn = {};
+	struct spdk_iscsi_portal portal = {};
+	struct spdk_iscsi_initiator_name iname = {};
+	struct spdk_scsi_dev scsi_dev = {};
 	struct spdk_iscsi_pg_map *pg_map;
 	char *iqn, *addr;
 	bool result;
 
 	/* portal group initialization */
-	memset(&pg, 0, sizeof(struct spdk_iscsi_portal_grp));
 	pg.tag = 1;
 
 	/* initiator group initialization */
-	memset(&ig, 0, sizeof(struct spdk_iscsi_init_grp));
 	ig.tag = 1;
 
 	ig.ninitiators = 1;
-	iname.name = "iqn.2017-10.spdk.io:0001";
+	snprintf(iname.name, sizeof(iname.name), "iqn.2017-10.spdk.io:0001");
 	TAILQ_INIT(&ig.initiator_head);
 	TAILQ_INSERT_TAIL(&ig.initiator_head, &iname, tailq);
 
@@ -437,11 +426,9 @@ node_access_denied_by_empty_netmask(void)
 	TAILQ_INIT(&ig.netmask_head);
 
 	/* target initialization */
-	memset(&tgtnode, 0, sizeof(struct spdk_iscsi_tgt_node));
-	tgtnode.name = "iqn.2017-10.spdk.io:0001";
+	snprintf(tgtnode.name, sizeof(tgtnode.name), "iqn.2017-10.spdk.io:0001");
 	TAILQ_INIT(&tgtnode.pg_map_head);
 
-	memset(&scsi_dev, 0, sizeof(struct spdk_scsi_dev));
 	snprintf(scsi_dev.name, sizeof(scsi_dev.name), "iqn.2017-10.spdk.io:0001");
 	tgtnode.dev = &scsi_dev;
 
@@ -449,13 +436,11 @@ node_access_denied_by_empty_netmask(void)
 	iscsi_pg_map_add_ig_map(pg_map, &ig);
 
 	/* portal initialization */
-	memset(&portal, 0, sizeof(struct spdk_iscsi_portal));
 	portal.group = &pg;
-	portal.host = "192.168.2.0";
-	portal.port = "3260";
+	snprintf(portal.host, sizeof(portal.host), "192.168.2.0");
+	snprintf(portal.port, sizeof(portal.port), "3260");
 
 	/* input for UT */
-	memset(&conn, 0, sizeof(struct spdk_iscsi_conn));
 	conn.portal = &portal;
 
 	iqn = "iqn.2017-10.spdk.io:0001";
@@ -477,56 +462,47 @@ node_access_denied_by_empty_netmask(void)
 static void
 node_access_multi_initiator_groups_cases(void)
 {
-	struct spdk_iscsi_tgt_node tgtnode;
-	struct spdk_iscsi_conn conn;
-	struct spdk_iscsi_portal_grp pg;
-	struct spdk_iscsi_portal portal;
-	struct spdk_iscsi_init_grp ig1, ig2;
-	struct spdk_iscsi_initiator_name iname1, iname2;
-	struct spdk_iscsi_initiator_netmask imask1, imask2;
-	struct spdk_scsi_dev scsi_dev;
+	struct spdk_iscsi_tgt_node tgtnode = {};
+	struct spdk_iscsi_conn conn = {};
+	struct spdk_iscsi_portal_grp pg = {};
+	struct spdk_iscsi_portal portal = {};
+	struct spdk_iscsi_init_grp ig1 = {}, ig2 = {};
+	struct spdk_iscsi_initiator_name iname1 = {}, iname2 = {};
+	struct spdk_iscsi_initiator_netmask imask1 = {}, imask2 = {};
+	struct spdk_scsi_dev scsi_dev = {};
 	struct spdk_iscsi_pg_map *pg_map;
 	char *iqn, *addr;
 	bool result;
 
 	/* target initialization */
-	memset(&tgtnode, 0, sizeof(struct spdk_iscsi_tgt_node));
-	tgtnode.name = IQN1;
+	snprintf(tgtnode.name, sizeof(tgtnode.name), IQN1);
 	TAILQ_INIT(&tgtnode.pg_map_head);
 
-	memset(&scsi_dev, 0, sizeof(struct spdk_scsi_dev));
 	snprintf(scsi_dev.name, sizeof(scsi_dev.name), IQN1);
 	tgtnode.dev = &scsi_dev;
 
 	/* initiator group initialization */
-	memset(&ig1, 0, sizeof(struct spdk_iscsi_init_grp));
 	ig1.tag = 1;
 	TAILQ_INIT(&ig1.initiator_head);
 	TAILQ_INIT(&ig1.netmask_head);
 
 	ig1.ninitiators = 1;
-	iname1.name = NULL;
 	TAILQ_INSERT_TAIL(&ig1.initiator_head, &iname1, tailq);
 
 	ig1.nnetmasks = 1;
-	imask1.mask = NULL;
 	TAILQ_INSERT_TAIL(&ig1.netmask_head, &imask1, tailq);
 
-	memset(&ig2, 0, sizeof(struct spdk_iscsi_init_grp));
 	ig2.tag = 2;
 	TAILQ_INIT(&ig2.initiator_head);
 	TAILQ_INIT(&ig2.netmask_head);
 
 	ig2.ninitiators = 1;
-	iname2.name = NULL;
 	TAILQ_INSERT_TAIL(&ig2.initiator_head, &iname2, tailq);
 
 	ig2.nnetmasks = 1;
-	imask2.mask = NULL;
 	TAILQ_INSERT_TAIL(&ig2.netmask_head, &imask2, tailq);
 
 	/* portal group initialization */
-	memset(&pg, 0, sizeof(struct spdk_iscsi_portal_grp));
 	pg.tag = 1;
 
 	pg_map = iscsi_tgt_node_add_pg_map(&tgtnode, &pg);
@@ -534,13 +510,11 @@ node_access_multi_initiator_groups_cases(void)
 	iscsi_pg_map_add_ig_map(pg_map, &ig2);
 
 	/* portal initialization */
-	memset(&portal, 0, sizeof(struct spdk_iscsi_portal));
 	portal.group = &pg;
-	portal.host = IP1;
-	portal.port = "3260";
+	snprintf(portal.host, sizeof(portal.host), IP1);
+	snprintf(portal.port, sizeof(portal.port), "3260");
 
 	/* connection initialization */
-	memset(&conn, 0, sizeof(struct spdk_iscsi_conn));
 	conn.portal = &portal;
 
 	iqn = IQN1;
@@ -557,7 +531,7 @@ node_access_multi_initiator_groups_cases(void)
 	 * | denied    | -       | -         | -       | denied  |
 	 * +-------------------------------------------+---------+
 	 */
-	iname1.name = NO_IQN1;
+	snprintf(iname1.name, sizeof(iname1.name), NO_IQN1);
 
 	result = spdk_iscsi_tgt_node_access(&conn, &tgtnode, iqn, addr);
 	CU_ASSERT(result == false);
@@ -573,8 +547,8 @@ node_access_multi_initiator_groups_cases(void)
 	 * | allowed   | allowed | -         | -       | allowed |
 	 * +-------------------------------------------+---------+
 	 */
-	iname1.name = IQN1;
-	imask1.mask = IP1;
+	snprintf(iname1.name, sizeof(iname1.name), IQN1);
+	snprintf(imask1.mask, sizeof(imask1.mask), IP1);
 
 	result = spdk_iscsi_tgt_node_access(&conn, &tgtnode, iqn, addr);
 	CU_ASSERT(result == true);
@@ -590,9 +564,9 @@ node_access_multi_initiator_groups_cases(void)
 	 * | allowed   | denied  | denied   | -        | denied  |
 	 * +-------------------------------------------+---------+
 	 */
-	iname1.name = IQN1;
-	imask1.mask = IP2;
-	iname2.name = NO_IQN1;
+	snprintf(iname1.name, sizeof(iname1.name), IQN1);
+	snprintf(imask1.mask, sizeof(imask1.mask), IP2);
+	snprintf(iname2.name, sizeof(iname2.name), NO_IQN1);
 
 	result = spdk_iscsi_tgt_node_access(&conn, &tgtnode, iqn, addr);
 	CU_ASSERT(result == false);
@@ -608,10 +582,10 @@ node_access_multi_initiator_groups_cases(void)
 	 * | allowed   | denied  | allowed   | allowed | allowed |
 	 * +-------------------------------------------+---------+
 	 */
-	iname1.name = IQN1;
-	imask1.mask = IP2;
-	iname2.name = IQN1;
-	imask2.mask = IP1;
+	snprintf(iname1.name, sizeof(iname1.name), IQN1);
+	snprintf(imask1.mask, sizeof(imask1.mask), IP2);
+	snprintf(iname2.name, sizeof(iname2.name), IQN1);
+	snprintf(imask2.mask, sizeof(imask2.mask), IP1);
 
 	result = spdk_iscsi_tgt_node_access(&conn, &tgtnode, iqn, addr);
 	CU_ASSERT(result == true);
@@ -627,10 +601,10 @@ node_access_multi_initiator_groups_cases(void)
 	 * | allowed   | denied  | allowed     | denied  | denied  |
 	 * +---------------------------------------------+---------+
 	 */
-	iname1.name = IQN1;
-	imask1.mask = IP2;
-	iname2.name = IQN1;
-	imask2.mask = IP2;
+	snprintf(iname1.name, sizeof(iname1.name), IQN1);
+	snprintf(imask1.mask, sizeof(imask1.mask), IP2);
+	snprintf(iname2.name, sizeof(iname2.name), IQN1);
+	snprintf(imask2.mask, sizeof(imask2.mask), IP2);
 
 	result = spdk_iscsi_tgt_node_access(&conn, &tgtnode, iqn, addr);
 	CU_ASSERT(result == false);
@@ -646,9 +620,9 @@ node_access_multi_initiator_groups_cases(void)
 	 * | allowed   | denied  | not found   | -       | denied  |
 	 * +---------------------------------------------+---------+
 	 */
-	iname1.name = IQN1;
-	imask1.mask = IP2;
-	iname2.name = IQN2;
+	snprintf(iname1.name, sizeof(iname1.name), IQN1);
+	snprintf(imask1.mask, sizeof(imask1.mask), IP2);
+	snprintf(iname2.name, sizeof(iname2.name), IQN2);
 
 	result = spdk_iscsi_tgt_node_access(&conn, &tgtnode, iqn, addr);
 	CU_ASSERT(result == false);
@@ -664,8 +638,8 @@ node_access_multi_initiator_groups_cases(void)
 	 * | not found   | -       | denied    | -       | denied  |
 	 * +---------------------------------------------+---------+
 	 */
-	iname1.name = IQN2;
-	iname2.name = NO_IQN1;
+	snprintf(iname1.name, sizeof(iname1.name), IQN2);
+	snprintf(iname2.name, sizeof(iname2.name), NO_IQN1);
 
 	result = spdk_iscsi_tgt_node_access(&conn, &tgtnode, iqn, addr);
 	CU_ASSERT(result == false);
@@ -681,9 +655,9 @@ node_access_multi_initiator_groups_cases(void)
 	 * | not found   | -       | allowed   | allowed | allowed |
 	 * +---------------------------------------------+---------+
 	 */
-	iname1.name = IQN2;
-	iname2.name = IQN1;
-	imask2.mask = IP1;
+	snprintf(iname1.name, sizeof(iname1.name), IQN2);
+	snprintf(iname2.name, sizeof(iname2.name), IQN1);
+	snprintf(imask2.mask, sizeof(imask2.mask), IP1);
 
 	result = spdk_iscsi_tgt_node_access(&conn, &tgtnode, iqn, addr);
 	CU_ASSERT(result == true);
@@ -699,9 +673,9 @@ node_access_multi_initiator_groups_cases(void)
 	 * | not found   | -       | allowed   | denied  | denied  |
 	 * +---------------------------------------------+---------+
 	 */
-	iname1.name = IQN2;
-	iname2.name = IQN1;
-	imask2.mask = IP2;
+	snprintf(iname1.name, sizeof(iname1.name), IQN2);
+	snprintf(iname2.name, sizeof(iname2.name), IQN1);
+	snprintf(imask2.mask, sizeof(imask2.mask), IP2);
 
 	result = spdk_iscsi_tgt_node_access(&conn, &tgtnode, iqn, addr);
 	CU_ASSERT(result == false);
@@ -717,8 +691,8 @@ node_access_multi_initiator_groups_cases(void)
 	 * | not found   | -       | not found | -       | denied  |
 	 * +---------------------------------------------+---------+
 	 */
-	iname1.name = IQN2;
-	iname2.name = IQN2;
+	snprintf(iname1.name, sizeof(iname1.name), IQN2);
+	snprintf(iname2.name, sizeof(iname2.name), IQN2);
 
 	result = spdk_iscsi_tgt_node_access(&conn, &tgtnode, iqn, addr);
 	CU_ASSERT(result == false);
@@ -731,35 +705,29 @@ node_access_multi_initiator_groups_cases(void)
 static void
 allow_iscsi_name_multi_maps_case(void)
 {
-	struct spdk_iscsi_tgt_node tgtnode;
-	struct spdk_iscsi_portal_grp pg1, pg2;
-	struct spdk_iscsi_init_grp ig;
-	struct spdk_iscsi_initiator_name iname;
+	struct spdk_iscsi_tgt_node tgtnode = {};
+	struct spdk_iscsi_portal_grp pg1 = {}, pg2 = {};
+	struct spdk_iscsi_init_grp ig = {};
+	struct spdk_iscsi_initiator_name iname = {};
 	struct spdk_iscsi_pg_map *pg_map1, *pg_map2;
-	struct spdk_scsi_dev scsi_dev;
+	struct spdk_scsi_dev scsi_dev = {};
 	char *iqn;
 	bool result;
 
 	/* target initialization */
-	memset(&tgtnode, 0, sizeof(struct spdk_iscsi_tgt_node));
 	TAILQ_INIT(&tgtnode.pg_map_head);
 
-	memset(&scsi_dev, 0, sizeof(struct spdk_scsi_dev));
 	snprintf(scsi_dev.name, sizeof(scsi_dev.name), IQN1);
 	tgtnode.dev = &scsi_dev;
 
 	/* initiator group initialization */
-	memset(&ig, 0, sizeof(struct spdk_iscsi_init_grp));
 	TAILQ_INIT(&ig.initiator_head);
 
 	ig.ninitiators = 1;
-	iname.name = NULL;
 	TAILQ_INSERT_TAIL(&ig.initiator_head, &iname, tailq);
 
 	/* portal group initialization */
-	memset(&pg1, 0, sizeof(struct spdk_iscsi_portal_grp));
 	pg1.tag = 1;
-	memset(&pg2, 0, sizeof(struct spdk_iscsi_portal_grp));
 	pg2.tag = 1;
 
 	pg_map1 = iscsi_tgt_node_add_pg_map(&tgtnode, &pg1);
@@ -770,12 +738,12 @@ allow_iscsi_name_multi_maps_case(void)
 	/* test for IG1 <-> PG1, PG2 case */
 	iqn = IQN1;
 
-	iname.name = IQN1;
+	snprintf(iname.name, sizeof(iname.name), IQN1);
 
 	result = iscsi_tgt_node_allow_iscsi_name(&tgtnode, iqn);
 	CU_ASSERT(result == true);
 
-	iname.name = IQN2;
+	snprintf(iname.name, sizeof(iname.name), IQN2);
 
 	result = iscsi_tgt_node_allow_iscsi_name(&tgtnode, iqn);
 	CU_ASSERT(result == false);

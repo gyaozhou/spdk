@@ -49,11 +49,6 @@ struct spdk_bdev {
 	int x;
 };
 
-/* Unit test poller mockup */
-struct spdk_poller {
-	int y;
-};
-
 SPDK_LOG_REGISTER_COMPONENT("scsi", SPDK_LOG_SCSI)
 
 struct spdk_scsi_globals g_spdk_scsi;
@@ -110,6 +105,8 @@ DEFINE_STUB_V(spdk_scsi_dev_queue_mgmt_task,
 
 DEFINE_STUB_V(spdk_scsi_dev_delete_lun,
 	      (struct spdk_scsi_dev *dev, struct spdk_scsi_lun *lun));
+
+DEFINE_STUB(spdk_scsi_pr_check, int, (struct spdk_scsi_task *task), 0);
 
 void
 spdk_bdev_scsi_reset(struct spdk_scsi_task *task)
@@ -600,6 +597,142 @@ lun_reset_task_suspend_scsi_task(void)
 	CU_ASSERT_EQUAL(g_task_count, 0);
 }
 
+static void
+lun_check_pending_tasks_only_for_specific_initiator(void)
+{
+	struct spdk_bdev bdev = {};
+	struct spdk_scsi_lun *lun;
+	struct spdk_scsi_task task1 = {};
+	struct spdk_scsi_task task2 = {};
+	struct spdk_scsi_port initiator_port1 = {};
+	struct spdk_scsi_port initiator_port2 = {};
+	struct spdk_scsi_port initiator_port3 = {};
+
+	lun = spdk_scsi_lun_construct(&bdev, NULL, NULL);
+
+	task1.initiator_port = &initiator_port1;
+	task2.initiator_port = &initiator_port2;
+
+	TAILQ_INSERT_TAIL(&lun->tasks, &task1, scsi_link);
+	TAILQ_INSERT_TAIL(&lun->tasks, &task2, scsi_link);
+	CU_ASSERT(scsi_lun_has_outstanding_tasks(lun) == true);
+	CU_ASSERT(scsi_lun_has_pending_tasks(lun) == true);
+	CU_ASSERT(spdk_scsi_lun_has_pending_tasks(lun, NULL) == true);
+	CU_ASSERT(spdk_scsi_lun_has_pending_tasks(lun, &initiator_port1) == true);
+	CU_ASSERT(spdk_scsi_lun_has_pending_tasks(lun, &initiator_port2) == true);
+	CU_ASSERT(spdk_scsi_lun_has_pending_tasks(lun, &initiator_port3) == false);
+	TAILQ_REMOVE(&lun->tasks, &task1, scsi_link);
+	TAILQ_REMOVE(&lun->tasks, &task2, scsi_link);
+	CU_ASSERT(scsi_lun_has_pending_tasks(lun) == false);
+	CU_ASSERT(spdk_scsi_lun_has_pending_tasks(lun, NULL) == false);
+
+	TAILQ_INSERT_TAIL(&lun->pending_tasks, &task1, scsi_link);
+	TAILQ_INSERT_TAIL(&lun->pending_tasks, &task2, scsi_link);
+	CU_ASSERT(scsi_lun_has_outstanding_tasks(lun) == false);
+	CU_ASSERT(scsi_lun_has_pending_tasks(lun) == true);
+	CU_ASSERT(spdk_scsi_lun_has_pending_tasks(lun, NULL) == true);
+	CU_ASSERT(spdk_scsi_lun_has_pending_tasks(lun, &initiator_port1) == true);
+	CU_ASSERT(spdk_scsi_lun_has_pending_tasks(lun, &initiator_port2) == true);
+	CU_ASSERT(spdk_scsi_lun_has_pending_tasks(lun, &initiator_port3) == false);
+	TAILQ_REMOVE(&lun->pending_tasks, &task1, scsi_link);
+	TAILQ_REMOVE(&lun->pending_tasks, &task2, scsi_link);
+	CU_ASSERT(scsi_lun_has_pending_tasks(lun) == false);
+	CU_ASSERT(spdk_scsi_lun_has_pending_tasks(lun, NULL) == false);
+
+	TAILQ_INSERT_TAIL(&lun->mgmt_tasks, &task1, scsi_link);
+	TAILQ_INSERT_TAIL(&lun->mgmt_tasks, &task2, scsi_link);
+	CU_ASSERT(scsi_lun_has_pending_mgmt_tasks(lun) == true);
+	CU_ASSERT(spdk_scsi_lun_has_pending_mgmt_tasks(lun, NULL) == true);
+	CU_ASSERT(spdk_scsi_lun_has_pending_mgmt_tasks(lun, &initiator_port1) == true);
+	CU_ASSERT(spdk_scsi_lun_has_pending_mgmt_tasks(lun, &initiator_port2) == true);
+	CU_ASSERT(spdk_scsi_lun_has_pending_mgmt_tasks(lun, &initiator_port3) == false);
+	TAILQ_REMOVE(&lun->mgmt_tasks, &task1, scsi_link);
+	TAILQ_REMOVE(&lun->mgmt_tasks, &task2, scsi_link);
+	CU_ASSERT(scsi_lun_has_pending_mgmt_tasks(lun) == false);
+	CU_ASSERT(spdk_scsi_lun_has_pending_mgmt_tasks(lun, NULL) == false);
+
+	TAILQ_INSERT_TAIL(&lun->pending_mgmt_tasks, &task1, scsi_link);
+	TAILQ_INSERT_TAIL(&lun->pending_mgmt_tasks, &task2, scsi_link);
+	CU_ASSERT(scsi_lun_has_pending_mgmt_tasks(lun) == true);
+	CU_ASSERT(spdk_scsi_lun_has_pending_mgmt_tasks(lun, NULL) == true);
+	CU_ASSERT(spdk_scsi_lun_has_pending_mgmt_tasks(lun, &initiator_port1) == true);
+	CU_ASSERT(spdk_scsi_lun_has_pending_mgmt_tasks(lun, &initiator_port2) == true);
+	CU_ASSERT(spdk_scsi_lun_has_pending_mgmt_tasks(lun, &initiator_port3) == false);
+	TAILQ_REMOVE(&lun->pending_mgmt_tasks, &task1, scsi_link);
+	TAILQ_REMOVE(&lun->pending_mgmt_tasks, &task2, scsi_link);
+	CU_ASSERT(scsi_lun_has_pending_mgmt_tasks(lun) == false);
+	CU_ASSERT(spdk_scsi_lun_has_pending_mgmt_tasks(lun, NULL) == false);
+
+	scsi_lun_remove(lun);
+}
+
+static void
+abort_pending_mgmt_tasks_when_lun_is_removed(void)
+{
+	struct spdk_bdev bdev = {};
+	struct spdk_scsi_lun *lun;
+	struct spdk_scsi_task task1, task2, task3;
+
+	lun = spdk_scsi_lun_construct(&bdev, NULL, NULL);
+
+	/* Normal case */
+	ut_init_task(&task1);
+	ut_init_task(&task2);
+	ut_init_task(&task3);
+	task1.lun = lun;
+	task2.lun = lun;
+	task3.lun = lun;
+	task1.function = SPDK_SCSI_TASK_FUNC_LUN_RESET;
+	task2.function = SPDK_SCSI_TASK_FUNC_LUN_RESET;
+	task3.function = SPDK_SCSI_TASK_FUNC_LUN_RESET;
+
+	CU_ASSERT(g_task_count == 3);
+
+	spdk_scsi_lun_append_mgmt_task(lun, &task1);
+	spdk_scsi_lun_append_mgmt_task(lun, &task2);
+	spdk_scsi_lun_append_mgmt_task(lun, &task3);
+
+	CU_ASSERT(!TAILQ_EMPTY(&lun->pending_mgmt_tasks));
+
+	spdk_scsi_lun_execute_mgmt_task(lun);
+
+	CU_ASSERT(TAILQ_EMPTY(&lun->pending_mgmt_tasks));
+	CU_ASSERT(TAILQ_EMPTY(&lun->mgmt_tasks));
+	CU_ASSERT(g_task_count == 0);
+	CU_ASSERT(task1.response == SPDK_SCSI_TASK_MGMT_RESP_SUCCESS);
+	CU_ASSERT(task2.response == SPDK_SCSI_TASK_MGMT_RESP_SUCCESS);
+	CU_ASSERT(task3.response == SPDK_SCSI_TASK_MGMT_RESP_SUCCESS);
+
+	/* LUN hotplug case */
+	ut_init_task(&task1);
+	ut_init_task(&task2);
+	ut_init_task(&task3);
+	task1.function = SPDK_SCSI_TASK_FUNC_LUN_RESET;
+	task2.function = SPDK_SCSI_TASK_FUNC_LUN_RESET;
+	task3.function = SPDK_SCSI_TASK_FUNC_LUN_RESET;
+
+	CU_ASSERT(g_task_count == 3);
+
+	spdk_scsi_lun_append_mgmt_task(lun, &task1);
+	spdk_scsi_lun_append_mgmt_task(lun, &task2);
+	spdk_scsi_lun_append_mgmt_task(lun, &task3);
+
+	CU_ASSERT(!TAILQ_EMPTY(&lun->pending_mgmt_tasks));
+
+	lun->removed = true;
+
+	spdk_scsi_lun_execute_mgmt_task(lun);
+
+	CU_ASSERT(TAILQ_EMPTY(&lun->pending_mgmt_tasks));
+	CU_ASSERT(TAILQ_EMPTY(&lun->mgmt_tasks));
+	CU_ASSERT(g_task_count == 0);
+	CU_ASSERT(task1.response == SPDK_SCSI_TASK_MGMT_RESP_INVALID_LUN);
+	CU_ASSERT(task2.response == SPDK_SCSI_TASK_MGMT_RESP_INVALID_LUN);
+	CU_ASSERT(task3.response == SPDK_SCSI_TASK_MGMT_RESP_INVALID_LUN);
+
+	scsi_lun_remove(lun);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -642,6 +775,10 @@ main(int argc, char **argv)
 			       lun_reset_task_wait_scsi_task_complete) == NULL
 		|| CU_add_test(suite, "reset task suspend subsequent scsi task",
 			       lun_reset_task_suspend_scsi_task) == NULL
+		|| CU_add_test(suite, "check pending tasks only for specific initiator",
+			       lun_check_pending_tasks_only_for_specific_initiator) == NULL
+		|| CU_add_test(suite, "abort_pending_mgmt_tasks_when_lun_is_removed",
+			       abort_pending_mgmt_tasks_when_lun_is_removed) == NULL
 	) {
 		CU_cleanup_registry();
 		return CU_get_error();

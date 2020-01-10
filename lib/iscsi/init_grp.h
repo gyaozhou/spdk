@@ -36,14 +36,16 @@
 #define SPDK_INIT_GRP_H
 
 #include "spdk/conf.h"
+#include "iscsi/iscsi.h"
+#include "iscsi/conn.h"
 
 struct spdk_iscsi_initiator_name {
-	char *name;
+	char name[MAX_INITIATOR_NAME + 1];
 	TAILQ_ENTRY(spdk_iscsi_initiator_name) tailq;
 };
 
 struct spdk_iscsi_initiator_netmask {
-	char *mask;
+	char mask[MAX_INITIATOR_ADDR + 1];
 	TAILQ_ENTRY(spdk_iscsi_initiator_netmask) tailq;
 };
 

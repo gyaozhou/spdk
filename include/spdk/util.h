@@ -1,8 +1,8 @@
 /*-
  *   BSD LICENSE
  *
- *   Copyright (c) Intel Corporation.
- *   All rights reserved.
+ *   Copyright (c) Intel Corporation. All rights reserved.
+ *   Copyright (c) 2019 Mellanox Technologies LTD. All rights reserved.
  *
  *   Redistribution and use in source and binary forms, with or without
  *   modification, are permitted provided that the following conditions
@@ -44,6 +44,8 @@
 extern "C" {
 #endif
 
+#define SPDK_CACHE_LINE_SIZE 64
+
 #define spdk_min(a,b) (((a)<(b))?(a):(b))
 #define spdk_max(a,b) (((a)>(b))?(a):(b))
 
@@ -54,15 +56,10 @@ extern "C" {
 #define SPDK_SEC_TO_USEC 1000000ULL
 #define SPDK_SEC_TO_NSEC 1000000000ULL
 
-static inline uint32_t
-spdk_u32log2(uint32_t x)
-{
-	if (x == 0) {
-		/* log(0) is undefined */
-		return 0;
-	}
-	return 31u - __builtin_clz(x);
-}
+/* Ceiling division of unsigned integers */
+#define SPDK_CEIL_DIV(x,y) (((x)+(y)-1)/(y))
+
+uint32_t spdk_u32log2(uint32_t x);
 
 static inline uint32_t
 spdk_align32pow2(uint32_t x)
@@ -70,20 +67,12 @@ spdk_align32pow2(uint32_t x)
 	return 1u << (1 + spdk_u32log2(x - 1));
 }
 
-static inline uint64_t
-spdk_u64log2(uint64_t x)
-{
-	if (x == 0) {
-		/* log(0) is undefined */
-		return 0;
-	}
-	return 63u - __builtin_clzl(x);
-}
+uint64_t spdk_u64log2(uint64_t x);
 
 static inline uint64_t
 spdk_align64pow2(uint64_t x)
 {
-	return 1u << (1 + spdk_u64log2(x - 1));
+	return 1ULL << (1 + spdk_u64log2(x - 1));
 }
 
 /**
@@ -104,6 +93,30 @@ spdk_divide_round_up(uint64_t num, uint64_t divisor)
 {
 	return (num + divisor - 1) / divisor;
 }
+
+/**
+ * Copy the data described by the source iovec to the destination iovec.
+ *
+ * \return The number of bytes copied.
+ */
+size_t spdk_iovcpy(struct iovec *siov, size_t siovcnt, struct iovec *diov, size_t diovcnt);
+
+
+/**
+ * Scan build is really pessimistic and assumes that mempool functions can
+ * dequeue NULL buffers even if they return success. This is obviously a false
+ * possitive, but the mempool dequeue can be done in a DPDK inline function that
+ * we can't decorate with usual assert(buf != NULL). Instead, we'll
+ * preinitialize the dequeued buffer array with some dummy objects.
+ */
+#define SPDK_CLANG_ANALYZER_PREINIT_PTR_ARRAY(arr, arr_size, buf_size) \
+	do { \
+		static char dummy_buf[buf_size]; \
+		int i; \
+		for (i = 0; i < arr_size; i++) { \
+			arr[i] = (void *)dummy_buf; \
+		} \
+	} while (0)
 
 #ifdef __cplusplus
 }

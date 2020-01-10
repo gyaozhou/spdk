@@ -40,6 +40,8 @@
 
 #include "spdk/uuid.h"
 
+#define REDUCE_MAX_IOVECS	17
+
 /**
  * Describes the parameters of an spdk_reduce_vol.
  */
@@ -230,4 +232,22 @@ void spdk_reduce_vol_writev(struct spdk_reduce_vol *vol,
 			    struct iovec *iov, int iovcnt, uint64_t offset, uint64_t length,
 			    spdk_reduce_vol_op_complete cb_fn, void *cb_arg);
 
+/**
+ * Get the params structure for a libreduce compressed volume.
+ *
+ * This function will populate the given params structure for a given volume.
+ *
+ * \param vol Previously loaded or initialized compressed volume.
+ * \return params structure for the compressed volume.
+ */
+const struct spdk_reduce_vol_params *spdk_reduce_vol_get_params(struct spdk_reduce_vol *vol);
+
+/**
+ * Dump out key information for a libreduce compressed volume and its PMEM.
+ *
+ * This function will print key information for a given volume its PMEM.
+ *
+ * \param vol Previously loaded or initialized compressed volume.
+ */
+void spdk_reduce_vol_print_info(struct spdk_reduce_vol *vol);
 #endif /* SPDK_REDUCE_H_ */

@@ -43,6 +43,7 @@
 #include "iscsi/portal_grp.h"
 #include "iscsi/conn.h"
 #include "iscsi/task.h"
+#include "iscsi/tgt_node.h"
 
 #include "spdk_internal/event.h"
 #include "spdk_internal/log.h"
@@ -300,12 +301,8 @@ void spdk_put_pdu(struct spdk_iscsi_pdu *pdu)
 		return;
 	}
 
+	assert(pdu->ref > 0);
 	pdu->ref--;
-
-	if (pdu->ref < 0) {
-		SPDK_ERRLOG("Negative PDU refcount: %p\n", pdu);
-		pdu->ref = 0;
-	}
 
 	if (pdu->ref == 0) {
 		if (pdu->mobj) {
@@ -407,7 +404,6 @@ iscsi_opts_init(struct spdk_iscsi_opts *opts)
 
 	opts->authfile = NULL;
 	opts->nodebase = NULL;
-	opts->min_connections_per_core = 0;
 }
 
 struct spdk_iscsi_opts *
@@ -481,7 +477,6 @@ spdk_iscsi_opts_copy(struct spdk_iscsi_opts *src)
 	dst->require_chap = src->require_chap;
 	dst->mutual_chap = src->mutual_chap;
 	dst->chap_group = src->chap_group;
-	dst->min_connections_per_core = 0;
 
 	return dst;
 }
@@ -501,7 +496,6 @@ iscsi_read_config_file_params(struct spdk_conf_section *sp,
 	int ErrorRecoveryLevel;
 	int timeout;
 	int nopininterval;
-	int min_conn_per_core = 0;
 	const char *ag_tag;
 	int ag_tag_i;
 	int i;
@@ -630,10 +624,6 @@ iscsi_read_config_file_params(struct spdk_conf_section *sp,
 				opts->chap_group = ag_tag_i;
 			}
 		}
-	}
-	min_conn_per_core = spdk_conf_section_get_intval(sp, "MinConnectionsPerCore");
-	if (min_conn_per_core >= 0) {
-		SPDK_WARNLOG("MinConnectionsPerCore is deprecated and will be ignored.\n");
 	}
 
 	return 0;
@@ -790,10 +780,6 @@ iscsi_set_global_params(struct spdk_iscsi_opts *opts)
 	g_spdk_iscsi.require_chap = opts->require_chap;
 	g_spdk_iscsi.mutual_chap = opts->mutual_chap;
 	g_spdk_iscsi.chap_group = opts->chap_group;
-
-	if (opts->min_connections_per_core) {
-		SPDK_WARNLOG("iSCSI option 'min_connections_per_core' has been deprecated and will be ignored.\n");
-	}
 
 	iscsi_log_globals();
 
@@ -1200,7 +1186,7 @@ iscsi_poll_group_poll(void *ctx)
 		}
 	}
 
-	return -1;
+	return rc;
 }
 
 static int
@@ -1217,31 +1203,27 @@ iscsi_poll_group_handle_nop(void *ctx)
 }
 
 // zhou: register callback function to poll received messages.
-static void
-iscsi_poll_group_create(void *ctx)
+static int
+iscsi_poll_group_create(void *io_device, void *ctx_buf)
 {
-	struct spdk_iscsi_poll_group *pg;
-
-	assert(g_spdk_iscsi.poll_group != NULL);
-	pg = &g_spdk_iscsi.poll_group[spdk_env_get_current_core()];
-	pg->core = spdk_env_get_current_core();
+	struct spdk_iscsi_poll_group *pg = ctx_buf;
 
 	STAILQ_INIT(&pg->connections);
-	pg->sock_group = spdk_sock_group_create();
+	pg->sock_group = spdk_sock_group_create(NULL);
 	assert(pg->sock_group != NULL);
 
 	pg->poller = spdk_poller_register(iscsi_poll_group_poll, pg, 0);
 	/* set the period to 1 sec */
 	pg->nop_poller = spdk_poller_register(iscsi_poll_group_handle_nop, pg, 1000000);
+
+	return 0;
 }
 
 static void
-iscsi_poll_group_destroy(void *ctx)
+iscsi_poll_group_destroy(void *io_device, void *ctx_buf)
 {
-	struct spdk_iscsi_poll_group *pg;
+	struct spdk_iscsi_poll_group *pg = ctx_buf;
 
-	assert(g_spdk_iscsi.poll_group != NULL);
-	pg = &g_spdk_iscsi.poll_group[spdk_env_get_current_core()];
 	assert(pg->poller != NULL);
 	assert(pg->sock_group != NULL);
 
@@ -1252,21 +1234,28 @@ iscsi_poll_group_destroy(void *ctx)
 
 // zhou: register socket handler to event framework.
 static void
+_iscsi_init_thread(void *ctx)
+{
+	struct spdk_io_channel *ch;
+	struct spdk_iscsi_poll_group *pg;
+
+	ch = spdk_get_io_channel(&g_spdk_iscsi);
+	pg = spdk_io_channel_get_ctx(ch);
+
+	pthread_mutex_lock(&g_spdk_iscsi.mutex);
+	TAILQ_INSERT_TAIL(&g_spdk_iscsi.poll_group_head, pg, link);
+	pthread_mutex_unlock(&g_spdk_iscsi.mutex);
+}
+
+static void
 initialize_iscsi_poll_group(spdk_msg_fn cpl)
 {
-	size_t g_num_poll_groups = spdk_env_get_last_core() + 1;
-
-	g_spdk_iscsi.poll_group = calloc(g_num_poll_groups, sizeof(struct spdk_iscsi_poll_group));
-
-	if (!g_spdk_iscsi.poll_group) {
-		SPDK_ERRLOG("Failed to allocated iscsi poll group\n");
-		iscsi_init_complete(-1);
-		return;
-	}
+	spdk_io_device_register(&g_spdk_iscsi, iscsi_poll_group_create, iscsi_poll_group_destroy,
+				sizeof(struct spdk_iscsi_poll_group), "iscsi_tgt");
 
     // zhou: send fibre to each threads. Fibre will execute "iscsi_create_poll_group()"
 	/* Send a message to each thread and create a poll group */
-	spdk_for_each_thread(iscsi_poll_group_create, NULL, cpl);
+	spdk_for_each_thread(_iscsi_init_thread, NULL, cpl);
 }
 
 // zhou: run in each threads, to parse Portal Group, Initiator Group, Target Nodes.
@@ -1342,6 +1331,7 @@ iscsi_parse_globals(void)
 	if (rc != 0) {
 		SPDK_ERRLOG("spdk_initialize_all_pools() failed\n");
 		free(g_spdk_iscsi.session);
+		g_spdk_iscsi.session = NULL;
 		return -1;
 	}
 
@@ -1350,6 +1340,7 @@ iscsi_parse_globals(void)
 	if (rc < 0) {
 		SPDK_ERRLOG("spdk_initialize_iscsi_conns() failed\n");
 		free(g_spdk_iscsi.session);
+		g_spdk_iscsi.session = NULL;
 		return rc;
 	}
 
@@ -1397,31 +1388,53 @@ spdk_iscsi_fini(spdk_iscsi_fini_cb cb_fn, void *cb_arg)
 }
 
 static void
-iscsi_fini_done(void *arg)
+iscsi_fini_done(void *io_device)
 {
-	iscsi_check_pools();
-	iscsi_free_pools();
-
-	spdk_iscsi_shutdown_tgt_nodes();
-	spdk_iscsi_init_grps_destroy();
-	spdk_iscsi_portal_grps_destroy();
-	iscsi_auth_groups_destroy();
 	free(g_spdk_iscsi.authfile);
 	free(g_spdk_iscsi.nodebase);
-	free(g_spdk_iscsi.poll_group);
 
 	pthread_mutex_destroy(&g_spdk_iscsi.mutex);
 	g_fini_cb_fn(g_fini_cb_arg);
 }
 
+static void
+_iscsi_fini_dev_unreg(struct spdk_io_channel_iter *i, int status)
+{
+	iscsi_check_pools();
+	iscsi_free_pools();
+
+	assert(TAILQ_EMPTY(&g_spdk_iscsi.poll_group_head));
+
+	spdk_iscsi_shutdown_tgt_nodes();
+	spdk_iscsi_init_grps_destroy();
+	spdk_iscsi_portal_grps_destroy();
+	iscsi_auth_groups_destroy();
+
+	spdk_io_device_unregister(&g_spdk_iscsi, iscsi_fini_done);
+}
+
+static void
+_iscsi_fini_thread(struct spdk_io_channel_iter *i)
+{
+	struct spdk_io_channel *ch;
+	struct spdk_iscsi_poll_group *pg;
+
+	ch = spdk_io_channel_iter_get_channel(i);
+	pg = spdk_io_channel_get_ctx(ch);
+
+	pthread_mutex_lock(&g_spdk_iscsi.mutex);
+	TAILQ_REMOVE(&g_spdk_iscsi.poll_group_head, pg, link);
+	pthread_mutex_unlock(&g_spdk_iscsi.mutex);
+
+	spdk_put_io_channel(ch);
+
+	spdk_for_each_channel_continue(i, 0);
+}
+
 void
 spdk_shutdown_iscsi_conns_done(void)
 {
-	if (g_spdk_iscsi.poll_group) {
-		spdk_for_each_thread(iscsi_poll_group_destroy, NULL, iscsi_fini_done);
-	} else {
-		iscsi_fini_done(NULL);
-	}
+	spdk_for_each_channel(&g_spdk_iscsi, _iscsi_fini_thread, NULL, _iscsi_fini_dev_unreg);
 }
 
 // zhou: be asked to parse config file.
@@ -1510,7 +1523,7 @@ iscsi_auth_group_config_json(struct spdk_iscsi_auth_group *group,
 {
 	spdk_json_write_object_begin(w);
 
-	spdk_json_write_named_string(w, "method", "add_iscsi_auth_group");
+	spdk_json_write_named_string(w, "method", "iscsi_create_auth_group");
 
 	spdk_json_write_name(w, "params");
 	iscsi_auth_group_info_json(group, w);
@@ -1543,7 +1556,7 @@ iscsi_opts_config_json(struct spdk_json_write_ctx *w)
 {
 	spdk_json_write_object_begin(w);
 
-	spdk_json_write_named_string(w, "method", "set_iscsi_options");
+	spdk_json_write_named_string(w, "method", "iscsi_set_options");
 
 	spdk_json_write_name(w, "params");
 	spdk_iscsi_opts_info_json(w);

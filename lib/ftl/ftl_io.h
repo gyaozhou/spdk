@@ -45,31 +45,36 @@ struct spdk_ftl_dev;
 struct ftl_rwb_batch;
 struct ftl_band;
 struct ftl_io;
-struct ftl_md;
 
-typedef int (*ftl_md_pack_fn)(struct spdk_ftl_dev *, struct ftl_md *, void *);
+typedef int (*ftl_md_pack_fn)(struct ftl_band *);
+typedef void (*ftl_io_fn)(struct ftl_io *, void *, int);
 
 /* IO flags */
 enum ftl_io_flags {
 	/* Indicates whether IO is already initialized */
 	FTL_IO_INITIALIZED	= (1 << 0),
-	/* Keep the IO when done with the request */
-	FTL_IO_KEEP_ALIVE	= (1 << 1),
 	/* Internal based IO (defrag, metadata etc.) */
-	FTL_IO_INTERNAL		= (1 << 2),
+	FTL_IO_INTERNAL		= (1 << 1),
 	/* Indicates that the IO should not go through if there's */
 	/* already another one scheduled to the same LBA */
-	FTL_IO_WEAK		= (1 << 3),
+	FTL_IO_WEAK		= (1 << 2),
 	/* Indicates that the IO is used for padding */
-	FTL_IO_PAD		= (1 << 4),
+	FTL_IO_PAD		= (1 << 3),
 	/* The IO operates on metadata */
-	FTL_IO_MD		= (1 << 5),
+	FTL_IO_MD		= (1 << 4),
 	/* Using PPA instead of LBA */
-	FTL_IO_PPA_MODE		= (1 << 6),
+	FTL_IO_PPA_MODE		= (1 << 5),
 	/* Indicates that IO contains noncontiguous LBAs */
-	FTL_IO_VECTOR_LBA	= (1 << 7),
+	FTL_IO_VECTOR_LBA	= (1 << 6),
 	/* Indicates that IO is being retried */
-	FTL_IO_RETRY		= (1 << 8),
+	FTL_IO_RETRY		= (1 << 7),
+	/* The IO is directed to non-volatile cache */
+	FTL_IO_CACHE		= (1 << 8),
+	/* Indicates that PPA should be taken from IO struct, */
+	/* not assigned by wptr, only works if wptr is also in direct mode */
+	FTL_IO_DIRECT_ACCESS	= (1 << 9),
+	/* Bypass the non-volatile cache */
+	FTL_IO_BYPASS_CACHE	= (1 << 10),
 };
 
 enum ftl_io_type {
@@ -96,17 +101,14 @@ struct ftl_io_init_opts {
 	/* IO type */
 	enum ftl_io_type			type;
 
-	/* Number of split requests */
-	size_t                                  iov_cnt;
-
 	/* RWB entry */
 	struct ftl_rwb_batch			*rwb_batch;
 
 	/* Band to which the IO is directed */
 	struct ftl_band				*band;
 
-	/* Request size */
-	size_t                                  req_size;
+	/* Number of logical blocks */
+	size_t                                  lbk_cnt;
 
 	/* Data */
 	void                                    *data;
@@ -114,24 +116,22 @@ struct ftl_io_init_opts {
 	/* Metadata */
 	void                                    *md;
 
-	/* Callback */
-	spdk_ftl_fn				fn;
-};
-
-struct ftl_cb {
-	/* Callback function */
-	spdk_ftl_fn				fn;
+	/* Callback's function */
+	ftl_io_fn				cb_fn;
 
 	/* Callback's context */
-	void					*ctx;
+	void					*cb_ctx;
 };
 
 struct ftl_io_channel {
+	/* Device */
+	struct spdk_ftl_dev			*dev;
 	/* IO pool element size */
 	size_t					elem_size;
-
 	/* IO pool */
 	struct spdk_mempool			*io_pool;
+	/* Persistent cache IO channel */
+	struct spdk_io_channel			*cache_ioch;
 };
 
 /* General IO descriptor */
@@ -144,11 +144,11 @@ struct ftl_io {
 
 	union {
 		/* LBA table */
-		uint64_t			*lbas;
+		uint64_t			*vector;
 
 		/* First LBA */
-		uint64_t			lba;
-	};
+		uint64_t			single;
+	} lba;
 
 	/* First PPA */
 	struct ftl_ppa				ppa;
@@ -159,13 +159,8 @@ struct ftl_io {
 	/* Number of lbks */
 	size_t					lbk_cnt;
 
-	union {
-		/* IO vector table */
-		struct iovec			*iovs;
-
-		/* Single iovec */
-		struct iovec			iov;
-	};
+#define FTL_IO_MAX_IOVEC 64
+	struct iovec				iov[FTL_IO_MAX_IOVEC];
 
 	/* Metadata */
 	void					*md;
@@ -191,8 +186,14 @@ struct ftl_io {
 	/* Number of split requests */
 	size_t					req_cnt;
 
-	/* Completion callback */
-	struct ftl_cb				cb;
+	/* Callback's function */
+	ftl_io_fn				cb_fn;
+
+	/* Callback's context */
+	void					*cb_ctx;
+
+	/* User callback function */
+	spdk_ftl_fn				user_fn;
 
 	/* Flags */
 	int					flags;
@@ -223,17 +224,14 @@ struct ftl_md_io {
 	/* Parent IO structure */
 	struct ftl_io				io;
 
-	/* Destination metadata pointer */
-	struct ftl_md				*md;
-
-	/* Metadata's buffer */
-	void					*buf;
-
 	/* Serialization/deserialization callback */
 	ftl_md_pack_fn				pack_fn;
 
-	/* User's callback */
-	struct ftl_cb				cb;
+	/* Callback's function */
+	ftl_io_fn				cb_fn;
+
+	/* Callback's context */
+	void					*cb_ctx;
 };
 
 static inline bool
@@ -261,28 +259,29 @@ struct ftl_io *ftl_io_alloc_child(struct ftl_io *parent);
 void ftl_io_fail(struct ftl_io *io, int status);
 void ftl_io_free(struct ftl_io *io);
 struct ftl_io *ftl_io_init_internal(const struct ftl_io_init_opts *opts);
-void ftl_io_reinit(struct ftl_io *io, spdk_ftl_fn cb,
+void ftl_io_reinit(struct ftl_io *io, ftl_io_fn cb,
 		   void *ctx, int flags, int type);
 void ftl_io_clear(struct ftl_io *io);
 void ftl_io_inc_req(struct ftl_io *io);
 void ftl_io_dec_req(struct ftl_io *io);
 struct iovec *ftl_io_iovec(struct ftl_io *io);
-uint64_t ftl_io_current_lba(struct ftl_io *io);
+uint64_t ftl_io_current_lba(const struct ftl_io *io);
+uint64_t ftl_io_get_lba(const struct ftl_io *io, size_t offset);
 void ftl_io_advance(struct ftl_io *io, size_t lbk_cnt);
 size_t ftl_iovec_num_lbks(struct iovec *iov, size_t iov_cnt);
 void *ftl_io_iovec_addr(struct ftl_io *io);
 size_t ftl_io_iovec_len_left(struct ftl_io *io);
-int ftl_io_init_iovec(struct ftl_io *io, void *buf,
-		      size_t iov_cnt, size_t req_size);
-struct ftl_io *ftl_io_init_internal(const struct ftl_io_init_opts *opts);
 struct ftl_io *ftl_io_rwb_init(struct spdk_ftl_dev *dev, struct ftl_band *band,
-			       struct ftl_rwb_batch *entry, spdk_ftl_fn cb);
-struct ftl_io *ftl_io_erase_init(struct ftl_band *band, size_t lbk_cnt, spdk_ftl_fn cb);
-void ftl_io_user_init(struct spdk_ftl_dev *dev, struct ftl_io *io, uint64_t lba, size_t lbk_cnt,
-		      struct iovec *iov, size_t iov_cnt,
-		      spdk_ftl_fn fn, void *cb_arg, int type);
+			       struct ftl_rwb_batch *entry, ftl_io_fn cb);
+struct ftl_io *ftl_io_erase_init(struct ftl_band *band, size_t lbk_cnt, ftl_io_fn cb);
+struct ftl_io *ftl_io_user_init(struct spdk_io_channel *ioch, uint64_t lba, size_t lbk_cnt,
+				struct iovec *iov, size_t iov_cnt, spdk_ftl_fn cb_fn,
+				void *cb_arg, int type);
 void *ftl_io_get_md(const struct ftl_io *io);
 void ftl_io_complete(struct ftl_io *io);
+void ftl_io_shrink_iovec(struct ftl_io *io, size_t lbk_cnt);
 void ftl_io_process_error(struct ftl_io *io, const struct spdk_nvme_cpl *status);
+void ftl_io_reset(struct ftl_io *io);
+void ftl_io_call_foreach_child(struct ftl_io *io, int (*callback)(struct ftl_io *));
 
 #endif /* FTL_IO_H */

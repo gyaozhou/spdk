@@ -180,33 +180,35 @@ nvme_transport_ctrlr_delete_io_qpair(struct spdk_nvme_ctrlr *ctrlr, struct spdk_
 }
 
 int
-nvme_transport_ctrlr_reinit_io_qpair(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_qpair *qpair)
+nvme_transport_ctrlr_connect_qpair(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_qpair *qpair)
 {
-	NVME_TRANSPORT_CALL(ctrlr->trid.trtype, ctrlr_reinit_io_qpair, (ctrlr, qpair));
+	nvme_qpair_set_state(qpair, NVME_QPAIR_CONNECTING);
+	NVME_TRANSPORT_CALL(ctrlr->trid.trtype, ctrlr_connect_qpair, (ctrlr, qpair));
 }
 
-int
-nvme_transport_qpair_enable(struct spdk_nvme_qpair *qpair)
+volatile struct spdk_nvme_registers *
+nvme_transport_ctrlr_get_registers(struct spdk_nvme_ctrlr *ctrlr)
 {
-	NVME_TRANSPORT_CALL(qpair->trtype, qpair_enable, (qpair));
+	NVME_TRANSPORT_CALL(ctrlr->trid.trtype, ctrlr_get_registers, (ctrlr));
 }
 
-int
-nvme_transport_qpair_disable(struct spdk_nvme_qpair *qpair)
+void
+nvme_transport_ctrlr_disconnect_qpair(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_qpair *qpair)
 {
-	NVME_TRANSPORT_CALL(qpair->trtype, qpair_disable, (qpair));
+	NVME_TRANSPORT_CALL(ctrlr->trid.trtype, ctrlr_disconnect_qpair, (ctrlr, qpair));
+}
+
+void
+nvme_transport_qpair_abort_reqs(struct spdk_nvme_qpair *qpair, uint32_t dnr)
+{
+	assert(dnr <= 1);
+	NVME_TRANSPORT_CALL(qpair->trtype, qpair_abort_reqs, (qpair, dnr));
 }
 
 int
 nvme_transport_qpair_reset(struct spdk_nvme_qpair *qpair)
 {
 	NVME_TRANSPORT_CALL(qpair->trtype, qpair_reset, (qpair));
-}
-
-int
-nvme_transport_qpair_fail(struct spdk_nvme_qpair *qpair)
-{
-	NVME_TRANSPORT_CALL(qpair->trtype, qpair_fail, (qpair));
 }
 
 int
@@ -219,4 +221,10 @@ int32_t
 nvme_transport_qpair_process_completions(struct spdk_nvme_qpair *qpair, uint32_t max_completions)
 {
 	NVME_TRANSPORT_CALL(qpair->trtype, qpair_process_completions, (qpair, max_completions));
+}
+
+void
+nvme_transport_admin_qpair_abort_aers(struct spdk_nvme_qpair *qpair)
+{
+	NVME_TRANSPORT_CALL(qpair->trtype, admin_qpair_abort_aers, (qpair));
 }

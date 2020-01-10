@@ -41,6 +41,7 @@
 #include "spdk/thread.h"
 #include "spdk/util.h"
 #include "spdk_internal/log.h"
+#include "spdk/likely.h"
 #include "spdk/queue.h"
 #include "spdk/ftl.h"
 #include "spdk/bdev.h"
@@ -51,13 +52,14 @@
 
 struct spdk_ftl_dev;
 struct ftl_band;
-struct ftl_chunk;
+struct ftl_zone;
 struct ftl_io;
 struct ftl_restore;
 struct ftl_wptr;
 struct ftl_flush;
 struct ftl_reloc;
 struct ftl_anm_event;
+struct ftl_band_flush;
 
 struct ftl_stats {
 	/* Number of writes scheduled directly by the user */
@@ -88,6 +90,8 @@ struct ftl_thread {
 	/* Thread on which the poller is running */
 	struct spdk_thread			*thread;
 
+	/* IO channel */
+	struct spdk_io_channel			*ioch;
 	/* Poller */
 	struct spdk_poller			*poller;
 	/* Poller's function */
@@ -103,6 +107,43 @@ struct ftl_global_md {
 	uint64_t				num_lbas;
 };
 
+struct ftl_nv_cache {
+	/* Write buffer cache bdev */
+	struct spdk_bdev_desc			*bdev_desc;
+	/* Write pointer */
+	uint64_t				current_addr;
+	/* Number of available blocks left */
+	uint64_t				num_available;
+	/* Maximum number of blocks */
+	uint64_t				num_data_blocks;
+	/*
+	 * Phase of the current cycle of writes. Each time whole cache area is filled, the phase is
+	 * advanced. Current phase is saved in every IO's metadata, as well as in the header saved
+	 * in the first sector. By looking at the phase of each block, it's possible to find the
+	 * oldest block and replay the order of the writes when recovering the data from the cache.
+	 */
+	unsigned int				phase;
+	/* Indicates that the data can be written to the cache */
+	bool					ready;
+	/* Metadata pool */
+	struct spdk_mempool			*md_pool;
+	/* DMA buffer for writing the header */
+	void					*dma_buf;
+	/* Cache lock */
+	pthread_spinlock_t			lock;
+};
+
+struct ftl_init_context {
+	/* User's callback */
+	spdk_ftl_init_fn			cb_fn;
+	/* Callback's argument */
+	void					*cb_arg;
+	/* Thread to call the callback on */
+	struct spdk_thread			*thread;
+	/* Poller to check if the device has been destroyed/initialized */
+	struct spdk_poller			*poller;
+};
+
 struct spdk_ftl_dev {
 	/* Device instance */
 	struct spdk_uuid			uuid;
@@ -116,20 +157,12 @@ struct spdk_ftl_dev {
 	/* Indicates the device is about to be stopped */
 	int					halt;
 
-	/* Init callback */
-	spdk_ftl_init_fn			init_cb;
-	/* Init callback's context */
-	void					*init_arg;
-
-	/* Halt callback */
-	spdk_ftl_fn				halt_cb;
-	/* Halt callback's context */
-	void					*halt_arg;
-	/* Halt poller, checks if the device has been halted */
-	struct spdk_poller			*halt_poller;
-
-	/* IO channel */
-	struct spdk_io_channel			*ioch;
+	/* Status to return for halt completion callback */
+	int					halt_complete_status;
+	/* Initializaton context */
+	struct ftl_init_context			init_ctx;
+	/* Destruction context */
+	struct ftl_init_context			fini_ctx;
 
 	/* NVMe controller */
 	struct spdk_nvme_ctrlr			*ctrlr;
@@ -137,11 +170,15 @@ struct spdk_ftl_dev {
 	struct spdk_nvme_ns			*ns;
 	/* NVMe transport ID */
 	struct spdk_nvme_transport_id		trid;
-	/* Write buffer cache */
-	struct spdk_bdev_desc			*cache_bdev_desc;
+
+	/* Non-volatile write buffer cache */
+	struct ftl_nv_cache			nv_cache;
 
 	/* LBA map memory pool */
 	struct spdk_mempool			*lba_pool;
+
+	/* LBA map requests pool */
+	struct spdk_mempool			*lba_request_pool;
 
 	/* Statistics */
 	struct ftl_stats			stats;
@@ -156,8 +193,6 @@ struct spdk_ftl_dev {
 
 	/* Array of bands */
 	struct ftl_band				*bands;
-	/* Band being curently defraged */
-	struct ftl_band				*df_band;
 	/* Number of operational bands */
 	size_t					num_bands;
 	/* Next write band */
@@ -186,6 +221,8 @@ struct spdk_ftl_dev {
 
 	/* Flush list */
 	LIST_HEAD(, ftl_flush)			flush_list;
+	/* List of band flush requests */
+	LIST_HEAD(, ftl_band_flush)		band_flush_list;
 
 	/* Device specific md buffer */
 	struct ftl_global_md			global_md;
@@ -217,13 +254,28 @@ struct spdk_ftl_dev {
 	STAILQ_ENTRY(spdk_ftl_dev)		stailq;
 };
 
+struct ftl_nv_cache_header {
+	/* Version of the header */
+	uint32_t				version;
+	/* UUID of the FTL device */
+	struct spdk_uuid			uuid;
+	/* Size of the non-volatile cache (in blocks) */
+	uint64_t				size;
+	/* Contains the next address to be written after clean shutdown, invalid LBA otherwise */
+	uint64_t				current_addr;
+	/* Current phase */
+	uint8_t					phase;
+	/* Checksum of the header, needs to be last element */
+	uint32_t				checksum;
+} __attribute__((packed));
+
 typedef void (*ftl_restore_fn)(struct spdk_ftl_dev *, struct ftl_restore *, int);
 
 void	ftl_apply_limits(struct spdk_ftl_dev *dev);
-int	ftl_io_read(struct ftl_io *io);
-int	ftl_io_write(struct ftl_io *io);
+void	ftl_io_read(struct ftl_io *io);
+void	ftl_io_write(struct ftl_io *io);
 int	ftl_io_erase(struct ftl_io *io);
-int	ftl_io_flush(struct ftl_io *io);
+int	ftl_flush_rwb(struct spdk_ftl_dev *dev, spdk_ftl_fn cb_fn, void *cb_arg);
 int	ftl_current_limit(const struct spdk_ftl_dev *dev);
 int	ftl_invalidate_addr(struct spdk_ftl_dev *dev, struct ftl_ppa ppa);
 int	ftl_task_core(void *ctx);
@@ -236,6 +288,20 @@ size_t	ftl_lba_map_num_lbks(const struct spdk_ftl_dev *dev);
 size_t	ftl_head_md_num_lbks(const struct spdk_ftl_dev *dev);
 int	ftl_restore_md(struct spdk_ftl_dev *dev, ftl_restore_fn cb);
 int	ftl_restore_device(struct ftl_restore *restore, ftl_restore_fn cb);
+void	ftl_restore_nv_cache(struct ftl_restore *restore, ftl_restore_fn cb);
+int	ftl_band_set_direct_access(struct ftl_band *band, bool access);
+int	ftl_retrieve_chunk_info(struct spdk_ftl_dev *dev, struct ftl_ppa ppa,
+				struct spdk_ocssd_chunk_information_entry *info,
+				unsigned int num_entries);
+bool	ftl_ppa_is_written(struct ftl_band *band, struct ftl_ppa ppa);
+int	ftl_flush_active_bands(struct spdk_ftl_dev *dev, spdk_ftl_fn cb_fn, void *cb_arg);
+int	ftl_nv_cache_write_header(struct ftl_nv_cache *nv_cache, bool shutdown,
+				  spdk_bdev_io_completion_cb cb_fn, void *cb_arg);
+int	ftl_nv_cache_scrub(struct ftl_nv_cache *nv_cache, spdk_bdev_io_completion_cb cb_fn,
+			   void *cb_arg);
+
+struct spdk_io_channel *
+ftl_get_io_channel(const struct spdk_ftl_dev *dev);
 
 #define ftl_to_ppa(addr) \
 	(struct ftl_ppa) { .ppa = (uint64_t)(addr) }
@@ -288,10 +354,17 @@ ftl_ppa_cached(struct ftl_ppa ppa)
 static inline uint64_t
 ftl_ppa_addr_pack(const struct spdk_ftl_dev *dev, struct ftl_ppa ppa)
 {
-	return (ppa.lbk << dev->ppaf.lbk_offset) |
-	       (ppa.chk << dev->ppaf.chk_offset) |
-	       (ppa.pu  << dev->ppaf.pu_offset) |
-	       (ppa.grp << dev->ppaf.grp_offset);
+	uint64_t lbk, chk, pu, grp;
+
+	lbk = ppa.lbk;
+	chk = ppa.chk;
+	pu = ppa.pu;
+	grp = ppa.grp;
+
+	return (lbk << dev->ppaf.lbk_offset) |
+	       (chk << dev->ppaf.chk_offset) |
+	       (pu  << dev->ppaf.pu_offset) |
+	       (grp << dev->ppaf.grp_offset);
 }
 
 static inline struct ftl_ppa
@@ -411,7 +484,7 @@ ftl_dev_num_bands(const struct spdk_ftl_dev *dev)
 }
 
 static inline size_t
-ftl_dev_lbks_in_chunk(const struct spdk_ftl_dev *dev)
+ftl_dev_lbks_in_zone(const struct spdk_ftl_dev *dev)
 {
 	return dev->geo.clba;
 }
@@ -425,13 +498,67 @@ ftl_dev_num_punits(const struct spdk_ftl_dev *dev)
 static inline uint64_t
 ftl_num_band_lbks(const struct spdk_ftl_dev *dev)
 {
-	return ftl_dev_num_punits(dev) * ftl_dev_lbks_in_chunk(dev);
+	return ftl_dev_num_punits(dev) * ftl_dev_lbks_in_zone(dev);
 }
 
 static inline size_t
 ftl_vld_map_size(const struct spdk_ftl_dev *dev)
 {
 	return (size_t)spdk_divide_round_up(ftl_num_band_lbks(dev), CHAR_BIT);
+}
+
+static inline bool
+ftl_dev_has_nv_cache(const struct spdk_ftl_dev *dev)
+{
+	return dev->nv_cache.bdev_desc != NULL;
+}
+
+#define FTL_NV_CACHE_HEADER_VERSION	(1)
+#define FTL_NV_CACHE_DATA_OFFSET	(1)
+#define FTL_NV_CACHE_PHASE_OFFSET	(62)
+#define FTL_NV_CACHE_PHASE_COUNT	(4)
+#define FTL_NV_CACHE_PHASE_MASK		(3ULL << FTL_NV_CACHE_PHASE_OFFSET)
+#define FTL_NV_CACHE_LBA_INVALID	(FTL_LBA_INVALID & ~FTL_NV_CACHE_PHASE_MASK)
+
+static inline bool
+ftl_nv_cache_phase_is_valid(unsigned int phase)
+{
+	return phase > 0 && phase <= 3;
+}
+
+static inline unsigned int
+ftl_nv_cache_next_phase(unsigned int current)
+{
+	static const unsigned int phases[] = { 0, 2, 3, 1 };
+	assert(ftl_nv_cache_phase_is_valid(current));
+	return phases[current];
+}
+
+static inline unsigned int
+ftl_nv_cache_prev_phase(unsigned int current)
+{
+	static const unsigned int phases[] = { 0, 3, 1, 2 };
+	assert(ftl_nv_cache_phase_is_valid(current));
+	return phases[current];
+}
+
+static inline uint64_t
+ftl_nv_cache_pack_lba(uint64_t lba, unsigned int phase)
+{
+	assert(ftl_nv_cache_phase_is_valid(phase));
+	return (lba & ~FTL_NV_CACHE_PHASE_MASK) | ((uint64_t)phase << FTL_NV_CACHE_PHASE_OFFSET);
+}
+
+static inline void
+ftl_nv_cache_unpack_lba(uint64_t in_lba, uint64_t *out_lba, unsigned int *phase)
+{
+	*out_lba = in_lba & ~FTL_NV_CACHE_PHASE_MASK;
+	*phase = (in_lba & FTL_NV_CACHE_PHASE_MASK) >> FTL_NV_CACHE_PHASE_OFFSET;
+
+	/* If the phase is invalid the block wasn't written yet, so treat the LBA as invalid too */
+	if (!ftl_nv_cache_phase_is_valid(*phase) || *out_lba == FTL_NV_CACHE_LBA_INVALID) {
+		*out_lba = FTL_LBA_INVALID;
+	}
 }
 
 #endif /* FTL_CORE_H */

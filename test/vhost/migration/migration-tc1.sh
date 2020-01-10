@@ -5,11 +5,11 @@ function migration_tc1_clean_vhost_config()
 
 	notice "Removing vhost devices & controllers via RPC ..."
 	# Delete bdev first to remove all LUNs and SCSI targets
-	$rpc delete_malloc_bdev Malloc0
+	$rpc bdev_malloc_delete Malloc0
 
 	# Delete controllers
-	$rpc remove_vhost_controller $incoming_vm_ctrlr
-	$rpc remove_vhost_controller $target_vm_ctrlr
+	$rpc vhost_delete_controller $incoming_vm_ctrlr
+	$rpc vhost_delete_controller $target_vm_ctrlr
 
 	unset -v incoming_vm target_vm incoming_vm_ctrlr target_vm_ctrlr rpc
 }
@@ -21,19 +21,19 @@ function migration_tc1_configure_vhost()
 	target_vm=1
 	incoming_vm_ctrlr=naa.Malloc0.$incoming_vm
 	target_vm_ctrlr=naa.Malloc0.$target_vm
-	rpc="$SPDK_BUILD_DIR/scripts/rpc.py -s $(get_vhost_dir)/rpc.sock"
+	rpc="$rootdir/scripts/rpc.py -s $(get_vhost_dir 0)/rpc.sock"
 
 	trap 'migration_tc1_error_handler; error_exit "${FUNCNAME}" "${LINENO}"' INT ERR EXIT
 
 	# Construct shared Malloc Bdev
-	$rpc construct_malloc_bdev -b Malloc0 128 4096
+	$rpc bdev_malloc_create -b Malloc0 128 4096
 
 	# And two controllers - one for each VM. Both are using the same Malloc Bdev as LUN 0
-	$rpc construct_vhost_scsi_controller $incoming_vm_ctrlr
-	$rpc add_vhost_scsi_lun $incoming_vm_ctrlr 0 Malloc0
+	$rpc vhost_create_scsi_controller $incoming_vm_ctrlr
+	$rpc vhost_scsi_controller_add_target $incoming_vm_ctrlr 0 Malloc0
 
-	$rpc construct_vhost_scsi_controller $target_vm_ctrlr
-	$rpc add_vhost_scsi_lun $target_vm_ctrlr 0 Malloc0
+	$rpc vhost_create_scsi_controller $target_vm_ctrlr
+	$rpc vhost_scsi_controller_add_target $target_vm_ctrlr 0 Malloc0
 }
 
 function migration_tc1_error_handler()
@@ -54,10 +54,10 @@ function migration_tc1()
 	# Use 2 VMs:
 	# incoming VM - the one we want to migrate
 	# targe VM - the one which will accept migration
-	local job_file="$MIGRATION_DIR/migration-tc1.job"
+	local job_file="$testdir/migration-tc1.job"
 
 	# Run vhost
-	spdk_vhost_run
+	vhost_run 0
 	migration_tc1_configure_vhost
 
 	notice "Setting up VMs"
@@ -81,7 +81,7 @@ function migration_tc1()
 
 	# Check if fio is still running before migration
 	if ! is_fio_running $incoming_vm; then
-		vm_ssh $incoming_vm "cat /root/$(basename ${job_file}).out"
+		vm_exec $incoming_vm "cat /root/$(basename ${job_file}).out"
 		error "FIO is not running before migration: process crashed or finished too early"
 	fi
 
@@ -90,7 +90,7 @@ function migration_tc1()
 
 	# Check if fio is still running after migration
 	if ! is_fio_running $target_vm; then
-		vm_ssh $target_vm "cat /root/$(basename ${job_file}).out"
+		vm_exec $target_vm "cat /root/$(basename ${job_file}).out"
 		error "FIO is not running after migration: process crashed or finished too early"
 	fi
 
@@ -105,7 +105,7 @@ function migration_tc1()
 	done
 
 	notice "Fio result is:"
-	vm_ssh $target_vm "cat /root/$(basename ${job_file}).out"
+	vm_exec $target_vm "cat /root/$(basename ${job_file}).out"
 
 	notice "Migration DONE"
 
@@ -115,9 +115,7 @@ function migration_tc1()
 	migration_tc1_clean_vhost_config
 
 	notice "killing vhost app"
-	spdk_vhost_kill
+	vhost_kill 0
 
 	notice "Migration TC1 SUCCESS"
 }
-
-migration_tc1

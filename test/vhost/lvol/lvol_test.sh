@@ -1,15 +1,12 @@
 #!/usr/bin/env bash
-set -e
 
-rootdir=$(readlink -f $(dirname $0))/../../..
-source "$rootdir/scripts/common.sh"
+testdir=$(readlink -f $(dirname $0))
+rootdir=$(readlink -f $testdir/../../..)
+source $rootdir/test/common/autotest_common.sh
+source $rootdir/test/vhost/common.sh
+source $rootdir/scripts/common.sh
 
-LVOL_TEST_DIR=$(readlink -f $(dirname $0))
-[[ -z "$TEST_DIR" ]] && TEST_DIR="$(cd $LVOL_TEST_DIR/../../../../ && pwd)"
-[[ -z "$COMMON_DIR" ]] && COMMON_DIR="$(cd $LVOL_TEST_DIR/../common && pwd)"
-
-. $COMMON_DIR/common.sh
-rpc_py="$SPDK_BUILD_DIR/scripts/rpc.py -s $(get_vhost_dir)/rpc.sock"
+rpc_py="$rootdir/scripts/rpc.py -s $(get_vhost_dir 0)/rpc.sock"
 
 vm_count=1
 max_disks=""
@@ -20,7 +17,7 @@ distribute_cores=false
 
 function usage()
 {
-    [[ ! -z $2 ]] && ( echo "$2"; echo ""; )
+    [[ -n $2 ]] && ( echo "$2"; echo ""; )
     echo "Shortcut script for doing automated test"
     echo "Usage: $(basename $1) [OPTIONS]"
     echo
@@ -54,25 +51,25 @@ function clean_lvol_cfg()
 {
     notice "Removing nested lvol bdevs"
     for lvol_bdev in "${nest_lvol_bdevs[@]}"; do
-        $rpc_py destroy_lvol_bdev $lvol_bdev
+        $rpc_py bdev_lvol_delete $lvol_bdev
         notice "nested lvol bdev $lvol_bdev removed"
     done
 
     notice "Removing nested lvol stores"
     for lvol_store in "${nest_lvol_stores[@]}"; do
-        $rpc_py destroy_lvol_store -u $lvol_store
+        $rpc_py bdev_lvol_delete_lvstore -u $lvol_store
         notice "nested lvol store $lvol_store removed"
     done
 
     notice "Removing lvol bdevs"
     for lvol_bdev in "${lvol_bdevs[@]}"; do
-        $rpc_py destroy_lvol_bdev $lvol_bdev
+        $rpc_py bdev_lvol_delete $lvol_bdev
         notice "lvol bdev $lvol_bdev removed"
     done
 
     notice "Removing lvol stores"
     for lvol_store in "${lvol_stores[@]}"; do
-        $rpc_py destroy_lvol_store -u $lvol_store
+        $rpc_py bdev_lvol_delete_lvstore -u $lvol_store
         notice "lvol store $lvol_store removed"
     done
 }
@@ -100,6 +97,8 @@ while getopts 'xh-:' optchar; do
     esac
 done
 
+vhosttestinit
+
 notice "Get NVMe disks:"
 nvmes=($(iter_pci_class_code 01 08 02))
 
@@ -113,7 +112,7 @@ fi
 
 if $distribute_cores; then
     # FIXME: this need to be handled entirely in common.sh
-    source $LVOL_TEST_DIR/autotest.config
+    source $testdir/autotest.config
 fi
 
 trap 'error_exit "${FUNCNAME}" "${LINENO}"' SIGTERM SIGABRT ERR
@@ -121,7 +120,7 @@ trap 'error_exit "${FUNCNAME}" "${LINENO}"' SIGTERM SIGABRT ERR
 vm_kill_all
 
 notice "running SPDK vhost"
-spdk_vhost_run
+vhost_run 0
 notice "..."
 
 trap 'clean_lvol_cfg; error_exit "${FUNCNAME}" "${LINENO}"' SIGTERM SIGABRT ERR
@@ -133,11 +132,11 @@ nest_lvol_bdevs=()
 used_vms=""
 
 # On each NVMe create one lvol store
-for (( i=0; i<$max_disks; i++ ));do
+for (( i=0; i<max_disks; i++ ));do
 
     # Create base lvol store on NVMe
     notice "Creating lvol store on device Nvme${i}n1"
-    ls_guid=$($rpc_py construct_lvol_store Nvme${i}n1 lvs_$i -c 4194304)
+    ls_guid=$($rpc_py bdev_lvol_create_lvstore Nvme${i}n1 lvs_$i -c 4194304)
     lvol_stores+=("$ls_guid")
 
     if $nested_lvol; then
@@ -145,38 +144,38 @@ for (( i=0; i<$max_disks; i++ ));do
         size=$((free_mb / (vm_count+1) ))
 
         notice "Creating lvol bdev on lvol store: $ls_guid"
-        lb_name=$($rpc_py construct_lvol_bdev -u $ls_guid lbd_nest $size $thin)
+        lb_name=$($rpc_py bdev_lvol_create -u $ls_guid lbd_nest $size $thin)
 
         notice "Creating nested lvol store on lvol bdev: $lb_name"
-        nest_ls_guid=$($rpc_py construct_lvol_store $lb_name lvs_n_$i -c 4194304)
+        nest_ls_guid=$($rpc_py bdev_lvol_create_lvstore $lb_name lvs_n_$i -c 4194304)
         nest_lvol_stores+=("$nest_ls_guid")
 
-        for (( j=0; j<$vm_count; j++)); do
+        for (( j=0; j<vm_count; j++)); do
             notice "Creating nested lvol bdev for VM $i on lvol store $nest_ls_guid"
             free_mb=$(get_lvs_free_mb "$nest_ls_guid")
             nest_size=$((free_mb / (vm_count-j) ))
-            lb_name=$($rpc_py construct_lvol_bdev -u $nest_ls_guid lbd_vm_$j $nest_size $thin)
+            lb_name=$($rpc_py bdev_lvol_create -u $nest_ls_guid lbd_vm_$j $nest_size $thin)
             nest_lvol_bdevs+=("$lb_name")
         done
     fi
 
     # Create base lvol bdevs
-    for (( j=0; j<$vm_count; j++)); do
+    for (( j=0; j<vm_count; j++)); do
         notice "Creating lvol bdev for VM $i on lvol store $ls_guid"
         free_mb=$(get_lvs_free_mb "$ls_guid")
         size=$((free_mb / (vm_count-j) ))
-        lb_name=$($rpc_py construct_lvol_bdev -u $ls_guid lbd_vm_$j $size $thin)
+        lb_name=$($rpc_py bdev_lvol_create -u $ls_guid lbd_vm_$j $size $thin)
         lvol_bdevs+=("$lb_name")
     done
 done
 
-bdev_info=$($rpc_py get_bdevs)
+bdev_info=$($rpc_py bdev_get_bdevs)
 notice "Configuration after initial set-up:"
-$rpc_py get_lvol_stores
+$rpc_py bdev_lvol_get_lvstores
 echo "$bdev_info"
 
 # Set up VMs
-for (( i=0; i<$vm_count; i++)); do
+for (( i=0; i<vm_count; i++)); do
     vm="vm_$i"
 
     # Get all lvol bdevs associated with this VM number
@@ -188,7 +187,7 @@ for (( i=0; i<$vm_count; i++)); do
     if [[ $i%2 -ne 0 ]] && [[ $multi_os ]]; then
         setup_cmd+=" --os=/home/sys_sgsw/spdk_vhost_CentOS_vm_image.qcow2"
     else
-        setup_cmd+=" --os=/home/sys_sgsw/vhost_vm_image.qcow2"
+        setup_cmd+=" --os=$VM_IMAGE"
     fi
 
     # Create single SCSI controller or multiple BLK controllers for this VM
@@ -198,15 +197,15 @@ for (( i=0; i<$vm_count; i++)); do
     fi
 
     if [[ "$ctrl_type" == "spdk_vhost_scsi" ]]; then
-        $rpc_py construct_vhost_scsi_controller naa.0.$i $mask_arg
+        $rpc_py vhost_create_scsi_controller naa.0.$i $mask_arg
         for (( j=0; j<${#bdevs[@]}; j++)); do
-            $rpc_py add_vhost_scsi_lun naa.0.$i $j ${bdevs[$j]}
+            $rpc_py vhost_scsi_controller_add_target naa.0.$i $j ${bdevs[$j]}
         done
         setup_cmd+=" --disks=0"
     elif [[ "$ctrl_type" == "spdk_vhost_blk" ]]; then
         disk=""
         for (( j=0; j<${#bdevs[@]}; j++)); do
-            $rpc_py construct_vhost_blk_controller naa.$j.$i ${bdevs[$j]} $mask_arg
+            $rpc_py vhost_create_blk_controller naa.$j.$i ${bdevs[$j]} $mask_arg
             disk+="${j}:"
         done
         disk="${disk::-1}"
@@ -217,7 +216,7 @@ for (( i=0; i<$vm_count; i++)); do
     used_vms+=" $i"
 done
 
-$rpc_py get_vhost_controllers
+$rpc_py vhost_get_controllers
 
 # Run VMs
 vm_run $used_vms
@@ -227,11 +226,10 @@ vm_wait_for_boot 300 $used_vms
 
 fio_disks=""
 for vm_num in $used_vms; do
-    vm_dir=$VM_BASE_DIR/$vm_num
     qemu_mask_param="VM_${vm_num}_qemu_mask"
 
     host_name="VM-$vm_num-${!qemu_mask_param}"
-    vm_ssh $vm_num "hostname $host_name"
+    vm_exec $vm_num "hostname $host_name"
     vm_start_fio_server $fio_bin $vm_num
 
     if [[ "$ctrl_type" == "spdk_vhost_scsi" ]]; then
@@ -249,7 +247,7 @@ else
     job_file="default_integrity.job"
 fi
 # Run FIO traffic
-run_fio $fio_bin --job-file=$COMMON_DIR/fio_jobs/$job_file --out="$TEST_DIR/fio_results" $fio_disks
+run_fio $fio_bin --job-file=$rootdir/test/vhost/common/fio_jobs/$job_file --out="$VHOST_DIR/fio_results" $fio_disks
 
 notice "Shutting down virtual machines..."
 vm_shutdown_all
@@ -257,20 +255,20 @@ sleep 2
 
 notice "Cleaning up vhost - remove LUNs, controllers, lvol bdevs and lvol stores"
 if [[ "$ctrl_type" == "spdk_vhost_scsi" ]]; then
-    for (( i=0; i<$vm_count; i++)); do
+    for (( i=0; i<vm_count; i++)); do
         notice "Removing devices from vhost SCSI controller naa.0.$i"
         for (( j=0; j<${#bdevs[@]}; j++)); do
-            $rpc_py remove_vhost_scsi_target naa.0.$i $j
+            $rpc_py vhost_scsi_controller_remove_target naa.0.$i $j
             notice "Removed device $j"
         done
         notice "Removing vhost SCSI controller naa.0.$i"
-        $rpc_py remove_vhost_controller naa.0.$i
+        $rpc_py vhost_delete_controller naa.0.$i
     done
 elif [[ "$ctrl_type" == "spdk_vhost_blk" ]]; then
-    for (( i=0; i<$vm_count; i++)); do
+    for (( i=0; i<vm_count; i++)); do
         for (( j=0; j<${#bdevs[@]}; j++)); do
             notice "Removing vhost BLK controller naa.$j.$i"
-            $rpc_py remove_vhost_controller naa.$j.$i
+            $rpc_py vhost_delete_controller naa.$j.$i
             notice "Removed naa.$j.$i"
         done
     done
@@ -278,9 +276,11 @@ fi
 
 clean_lvol_cfg
 
-$rpc_py get_lvol_stores
-$rpc_py get_bdevs
-$rpc_py get_vhost_controllers
+$rpc_py bdev_lvol_get_lvstores
+$rpc_py bdev_get_bdevs
+$rpc_py vhost_get_controllers
 
 notice "Shutting down SPDK vhost app..."
-spdk_vhost_kill
+vhost_kill 0
+
+vhosttestfini

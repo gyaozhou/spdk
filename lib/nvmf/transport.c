@@ -2,7 +2,7 @@
  *   BSD LICENSE
  *
  *   Copyright (c) Intel Corporation. All rights reserved.
- *   Copyright (c) 2018 Mellanox Technologies LTD. All rights reserved.
+ *   Copyright (c) 2018-2019 Mellanox Technologies LTD. All rights reserved.
  *
  *   Redistribution and use in source and binary forms, with or without
  *   modification, are permitted provided that the following conditions
@@ -47,6 +47,9 @@ static const struct spdk_nvmf_transport_ops *const g_transport_ops[] = {
 	&spdk_nvmf_transport_rdma,
 #endif
 	&spdk_nvmf_transport_tcp,
+#ifdef SPDK_CONFIG_FC
+	&spdk_nvmf_transport_fc,
+#endif
 };
 
 #define NUM_TRANSPORTS (SPDK_COUNTOF(g_transport_ops))
@@ -87,7 +90,7 @@ spdk_nvmf_transport_create(enum spdk_nvme_transport_type type,
 
 	ops = spdk_nvmf_get_transport_ops(type);
 	if (!ops) {
-		SPDK_ERRLOG("Transport type %s unavailable.\n",
+		SPDK_ERRLOG("Transport type '%s' unavailable.\n",
 			    spdk_nvme_transport_id_trtype_str(type));
 		return NULL;
 	}
@@ -168,9 +171,9 @@ spdk_nvmf_transport_stop_listen(struct spdk_nvmf_transport *transport,
 }
 
 void
-spdk_nvmf_transport_accept(struct spdk_nvmf_transport *transport, new_qpair_fn cb_fn)
+spdk_nvmf_transport_accept(struct spdk_nvmf_transport *transport, new_qpair_fn cb_fn, void *cb_arg)
 {
-	transport->ops->accept(transport, cb_fn);
+	transport->ops->accept(transport, cb_fn, cb_arg);
 }
 
 void
@@ -193,6 +196,7 @@ spdk_nvmf_transport_poll_group_create(struct spdk_nvmf_transport *transport)
 	}
 	group->transport = transport;
 
+	STAILQ_INIT(&group->pending_buf_queue);
 	STAILQ_INIT(&group->buf_cache);
 
 	if (transport->opts.buf_cache_size) {
@@ -211,10 +215,25 @@ spdk_nvmf_transport_poll_group_create(struct spdk_nvmf_transport *transport)
 	return group;
 }
 
+struct spdk_nvmf_transport_poll_group *
+spdk_nvmf_transport_get_optimal_poll_group(struct spdk_nvmf_transport *transport,
+		struct spdk_nvmf_qpair *qpair)
+{
+	if (transport->ops->get_optimal_poll_group) {
+		return transport->ops->get_optimal_poll_group(qpair);
+	} else {
+		return NULL;
+	}
+}
+
 void
 spdk_nvmf_transport_poll_group_destroy(struct spdk_nvmf_transport_poll_group *group)
 {
 	struct spdk_nvmf_transport_pg_cache_buf *buf, *tmp;
+
+	if (!STAILQ_EMPTY(&group->pending_buf_queue)) {
+		SPDK_ERRLOG("Pending I/O list wasn't empty on poll group destruction\n");
+	}
 
 	STAILQ_FOREACH_SAFE(buf, &group->buf_cache, link, tmp) {
 		STAILQ_REMOVE(&group->buf_cache, buf, spdk_nvmf_transport_pg_cache_buf, link);
@@ -323,4 +342,151 @@ spdk_nvmf_transport_qpair_set_sqsize(struct spdk_nvmf_qpair *qpair)
 	}
 
 	return 0;
+}
+
+int
+spdk_nvmf_transport_poll_group_get_stat(struct spdk_nvmf_tgt *tgt,
+					struct spdk_nvmf_transport *transport,
+					struct spdk_nvmf_transport_poll_group_stat **stat)
+{
+	if (transport->ops->poll_group_get_stat) {
+		return transport->ops->poll_group_get_stat(tgt, stat);
+	} else {
+		return -ENOTSUP;
+	}
+}
+
+void
+spdk_nvmf_transport_poll_group_free_stat(struct spdk_nvmf_transport *transport,
+		struct spdk_nvmf_transport_poll_group_stat *stat)
+{
+	if (transport->ops->poll_group_free_stat) {
+		transport->ops->poll_group_free_stat(stat);
+	}
+}
+
+void
+spdk_nvmf_request_free_buffers(struct spdk_nvmf_request *req,
+			       struct spdk_nvmf_transport_poll_group *group,
+			       struct spdk_nvmf_transport *transport)
+{
+	uint32_t i;
+
+	for (i = 0; i < req->iovcnt; i++) {
+		if (group->buf_cache_count < group->buf_cache_size) {
+			STAILQ_INSERT_HEAD(&group->buf_cache,
+					   (struct spdk_nvmf_transport_pg_cache_buf *)req->buffers[i],
+					   link);
+			group->buf_cache_count++;
+		} else {
+			spdk_mempool_put(transport->data_buf_pool, req->buffers[i]);
+		}
+		req->iov[i].iov_base = NULL;
+		req->buffers[i] = NULL;
+		req->iov[i].iov_len = 0;
+	}
+	req->data_from_pool = false;
+}
+
+static inline int
+nvmf_request_set_buffer(struct spdk_nvmf_request *req, void *buf, uint32_t length,
+			uint32_t io_unit_size)
+{
+	req->buffers[req->iovcnt] = buf;
+	req->iov[req->iovcnt].iov_base = (void *)((uintptr_t)(buf + NVMF_DATA_BUFFER_MASK) &
+					 ~NVMF_DATA_BUFFER_MASK);
+	req->iov[req->iovcnt].iov_len  = spdk_min(length, io_unit_size);
+	length -= req->iov[req->iovcnt].iov_len;
+	req->iovcnt++;
+
+	return length;
+}
+
+static int
+nvmf_request_get_buffers(struct spdk_nvmf_request *req,
+			 struct spdk_nvmf_transport_poll_group *group,
+			 struct spdk_nvmf_transport *transport,
+			 uint32_t length)
+{
+	uint32_t io_unit_size = transport->opts.io_unit_size;
+	uint32_t num_buffers;
+	uint32_t i = 0, j;
+	void *buffer, *buffers[NVMF_REQ_MAX_BUFFERS];
+
+	/* If the number of buffers is too large, then we know the I/O is larger than allowed.
+	 *  Fail it.
+	 */
+	num_buffers = SPDK_CEIL_DIV(length, io_unit_size);
+	if (num_buffers + req->iovcnt > NVMF_REQ_MAX_BUFFERS) {
+		return -EINVAL;
+	}
+
+	while (i < num_buffers) {
+		if (!(STAILQ_EMPTY(&group->buf_cache))) {
+			group->buf_cache_count--;
+			buffer = STAILQ_FIRST(&group->buf_cache);
+			STAILQ_REMOVE_HEAD(&group->buf_cache, link);
+			assert(buffer != NULL);
+
+			length = nvmf_request_set_buffer(req, buffer, length, io_unit_size);
+			i++;
+		} else {
+			if (spdk_mempool_get_bulk(transport->data_buf_pool, buffers,
+						  num_buffers - i)) {
+				return -ENOMEM;
+			}
+			for (j = 0; j < num_buffers - i; j++) {
+				length = nvmf_request_set_buffer(req, buffers[j], length, io_unit_size);
+			}
+			i += num_buffers - i;
+		}
+	}
+
+	assert(length == 0);
+
+	req->data_from_pool = true;
+	return 0;
+}
+
+int
+spdk_nvmf_request_get_buffers(struct spdk_nvmf_request *req,
+			      struct spdk_nvmf_transport_poll_group *group,
+			      struct spdk_nvmf_transport *transport,
+			      uint32_t length)
+{
+	int rc;
+
+	req->iovcnt = 0;
+
+	rc = nvmf_request_get_buffers(req, group, transport, length);
+	if (rc == -ENOMEM) {
+		spdk_nvmf_request_free_buffers(req, group, transport);
+	}
+
+	return rc;
+}
+
+int
+spdk_nvmf_request_get_buffers_multi(struct spdk_nvmf_request *req,
+				    struct spdk_nvmf_transport_poll_group *group,
+				    struct spdk_nvmf_transport *transport,
+				    uint32_t *lengths, uint32_t num_lengths)
+{
+	int rc = 0;
+	uint32_t i;
+
+	req->iovcnt = 0;
+
+	for (i = 0; i < num_lengths; i++) {
+		rc = nvmf_request_get_buffers(req, group, transport, lengths[i]);
+		if (rc != 0) {
+			goto err_exit;
+		}
+	}
+
+	return 0;
+
+err_exit:
+	spdk_nvmf_request_free_buffers(req, group, transport);
+	return rc;
 }

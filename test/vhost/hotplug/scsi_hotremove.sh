@@ -21,12 +21,13 @@ function prepare_fio_cmd_tc1() {
     run_fio="$fio_bin --eta=never "
     for vm_num in $1; do
         cp $fio_job $tmp_detach_job
-        vm_dir=$VM_BASE_DIR/$vm_num
         vm_check_scsi_location $vm_num
         for disk in $SCSI_DISK; do
-            echo "[nvme-host$disk]" >> $tmp_detach_job
-            echo "filename=/dev/$disk" >> $tmp_detach_job
-            echo "size=100%" >> $tmp_detach_job
+		cat <<- EOL >> $tmp_detach_job
+		[nvme-host$disk]
+		filename=/dev/$disk
+		size=100%
+		EOL
         done
         vm_scp "$vm_num" $tmp_detach_job 127.0.0.1:/root/default_integrity_2discs.job
         run_fio+="--client=127.0.0.1,$(vm_fio_socket $vm_num) --remote-config /root/default_integrity_2discs.job "
@@ -52,10 +53,10 @@ function scsi_hotremove_tc1() {
 function scsi_hotremove_tc2() {
     echo "Scsi hotremove test case 2"
     # 1. Attach split NVMe bdevs to scsi controller.
-    $rpc_py add_vhost_scsi_lun naa.Nvme0n1p0.0 0 HotInNvme0n1p0
-    $rpc_py add_vhost_scsi_lun naa.Nvme0n1p1.0 0 Mallocp0
-    $rpc_py add_vhost_scsi_lun naa.Nvme0n1p2.1 0 HotInNvme0n1p1
-    $rpc_py add_vhost_scsi_lun naa.Nvme0n1p3.1 0 Mallocp1
+    $rpc_py vhost_scsi_controller_add_target naa.Nvme0n1p0.0 0 HotInNvme0n1p0
+    $rpc_py vhost_scsi_controller_add_target naa.Nvme0n1p1.0 0 Mallocp0
+    $rpc_py vhost_scsi_controller_add_target naa.Nvme0n1p2.1 0 HotInNvme0n1p1
+    $rpc_py vhost_scsi_controller_add_target naa.Nvme0n1p3.1 0 Mallocp1
 
     # 2. Run two VMs, attached to scsi controllers.
     vms_setup
@@ -102,7 +103,7 @@ function scsi_hotremove_tc2() {
 function scsi_hotremove_tc3() {
     echo "Scsi hotremove test case 3"
     # 1. Attach added NVMe bdev to scsi controller.
-    $rpc_py add_vhost_scsi_lun naa.Nvme0n1p0.0 0 HotInNvme1n1p0
+    $rpc_py vhost_scsi_controller_add_target naa.Nvme0n1p0.0 0 HotInNvme1n1p0
     # 2. Run two VM, attached to scsi controllers.
     vm_run_with_arg 0 1
     vms_prepare "0 1"
@@ -143,8 +144,8 @@ function scsi_hotremove_tc3() {
 function scsi_hotremove_tc4() {
     echo "Scsi hotremove test case 4"
     # 1. Attach NVMe bdevs to scsi controllers.
-    $rpc_py add_vhost_scsi_lun naa.Nvme0n1p0.0 0 HotInNvme2n1p0
-    $rpc_py add_vhost_scsi_lun naa.Nvme0n1p2.1 0 HotInNvme2n1p1
+    $rpc_py vhost_scsi_controller_add_target naa.Nvme0n1p0.0 0 HotInNvme2n1p0
+    $rpc_py vhost_scsi_controller_add_target naa.Nvme0n1p2.1 0 HotInNvme2n1p1
     # 2. Run two VMs, attach to scsi controller.
     vm_run_with_arg 0 1
     vms_prepare "0 1"
@@ -206,22 +207,22 @@ function scsi_hotremove_tc4() {
     vm_shutdown_all
     add_nvme "HotInNvme3" "$traddr"
     sleep 1
-    $rpc_py remove_vhost_scsi_target naa.Nvme0n1p1.0 0
-    $rpc_py remove_vhost_scsi_target naa.Nvme0n1p3.1 0
+    $rpc_py vhost_scsi_controller_remove_target naa.Nvme0n1p1.0 0
+    $rpc_py vhost_scsi_controller_remove_target naa.Nvme0n1p3.1 0
 }
 
 function pre_scsi_hotremove_test_case() {
-    $rpc_py construct_vhost_scsi_controller naa.Nvme0n1p0.0
-    $rpc_py construct_vhost_scsi_controller naa.Nvme0n1p1.0
-    $rpc_py construct_vhost_scsi_controller naa.Nvme0n1p2.1
-    $rpc_py construct_vhost_scsi_controller naa.Nvme0n1p3.1
+    $rpc_py vhost_create_scsi_controller naa.Nvme0n1p0.0
+    $rpc_py vhost_create_scsi_controller naa.Nvme0n1p1.0
+    $rpc_py vhost_create_scsi_controller naa.Nvme0n1p2.1
+    $rpc_py vhost_create_scsi_controller naa.Nvme0n1p3.1
 }
 
 function post_scsi_hotremove_test_case() {
-    $rpc_py remove_vhost_controller naa.Nvme0n1p0.0
-    $rpc_py remove_vhost_controller naa.Nvme0n1p1.0
-    $rpc_py remove_vhost_controller naa.Nvme0n1p2.1
-    $rpc_py remove_vhost_controller naa.Nvme0n1p3.1
+    $rpc_py vhost_delete_controller naa.Nvme0n1p0.0
+    $rpc_py vhost_delete_controller naa.Nvme0n1p1.0
+    $rpc_py vhost_delete_controller naa.Nvme0n1p2.1
+    $rpc_py vhost_delete_controller naa.Nvme0n1p3.1
 }
 
 pre_scsi_hotremove_test_case

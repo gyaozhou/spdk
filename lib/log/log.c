@@ -50,16 +50,24 @@ static const char *const spdk_level_names[] = {
 
 #define MAX_TMPBUF 1024
 
+static logfunc *g_log = NULL;
+
 void
-spdk_log_open(void)
+spdk_log_open(logfunc *logf)
 {
-	openlog("spdk", LOG_PID, LOG_LOCAL7);
+	if (logf) {
+		g_log = logf;
+	} else {
+		openlog("spdk", LOG_PID, LOG_LOCAL7);
+	}
 }
 
 void
 spdk_log_close(void)
 {
-	closelog();
+	if (!g_log) {
+		closelog();
+	}
 }
 
 #ifdef SPDK_LOG_BACKTRACE_LVL
@@ -107,6 +115,17 @@ spdk_log(enum spdk_log_level level, const char *file, const int line, const char
 	int severity = LOG_INFO;
 	char buf[MAX_TMPBUF];
 	va_list ap;
+
+	if (g_log) {
+		va_start(ap, format);
+		g_log(level, file, line, func, format, ap);
+		va_end(ap);
+		return;
+	}
+
+	if (level > g_spdk_log_print_level && level > g_spdk_log_level) {
+		return;
+	}
 
 	switch (level) {
 	case SPDK_LOG_ERROR:
@@ -174,6 +193,11 @@ fdump(FILE *fp, const char *label, const uint8_t *buf, size_t len)
 		buf16[idx % 16] = isprint(buf[idx]) ? buf[idx] : '.';
 	}
 	for (; idx % 16 != 0; idx++) {
+		if (idx == 8) {
+			total += snprintf(tmpbuf + total, sizeof tmpbuf - total,
+					  " ");
+		}
+
 		total += snprintf(tmpbuf + total, sizeof tmpbuf - total, "   ");
 		buf16[idx % 16] = ' ';
 	}

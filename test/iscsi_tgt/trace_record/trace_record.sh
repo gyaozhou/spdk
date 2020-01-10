@@ -5,6 +5,10 @@ rootdir=$(readlink -f $testdir/../../..)
 source $rootdir/test/common/autotest_common.sh
 source $rootdir/test/iscsi_tgt/common.sh
 
+# $1 = "iso" - triggers isolation mode (setting up required environment).
+# $2 = test type posix or vpp. defaults to posix.
+iscsitestinit $1 $2
+
 TRACE_TMP_FOLDER=./tmp-trace
 TRACE_RECORD_OUTPUT=${TRACE_TMP_FOLDER}/record.trace
 TRACE_RECORD_NOTICE_LOG=${TRACE_TMP_FOLDER}/record.notice
@@ -24,8 +28,6 @@ if [ -z "$INITIATOR_IP" ]; then
 	exit 1
 fi
 
-timing_enter trace_record
-
 NUM_TRACE_ENTRIES=4096
 MALLOC_BDEV_SIZE=64
 MALLOC_BLOCK_SIZE=4096
@@ -40,7 +42,7 @@ $ISCSI_APP -m 0xf --num-trace-entries $NUM_TRACE_ENTRIES --tpoint-group-mask 0xf
 iscsi_pid=$!
 echo "Process pid: $iscsi_pid"
 
-trap "killprocess $iscsi_pid; exit 1" SIGINT SIGTERM EXIT
+trap 'killprocess $iscsi_pid; iscsitestfini $1 $2; exit 1' SIGINT SIGTERM EXIT
 
 waitforlisten $iscsi_pid
 
@@ -48,39 +50,45 @@ echo "iscsi_tgt is listening. Running tests..."
 
 timing_exit start_iscsi_tgt
 
-$rpc_py add_portal_group $PORTAL_TAG $TARGET_IP:$ISCSI_PORT
-$rpc_py add_initiator_group $INITIATOR_TAG $INITIATOR_NAME $NETMASK
-
-echo "Create bdevs and target nodes"
-CONNECTION_NUMBER=15
-for i in $(seq 0 $CONNECTION_NUMBER); do
-	malloc_bdev="$($rpc_py construct_malloc_bdev $MALLOC_BDEV_SIZE $MALLOC_BLOCK_SIZE)"
-	$rpc_py construct_target_node Target$i Target${i}_alias "${malloc_bdev}:0" $PORTAL_TAG:$INITIATOR_TAG 256 -d
-done
-
-sleep 1
-
-iscsiadm -m discovery -t sendtargets -p $TARGET_IP:$ISCSI_PORT
-iscsiadm -m node --login -p $TARGET_IP:$ISCSI_PORT
-
 mkdir -p ${TRACE_TMP_FOLDER}
 ./app/trace_record/spdk_trace_record -s iscsi -p ${iscsi_pid} -f ${TRACE_RECORD_OUTPUT} -q 1>${TRACE_RECORD_NOTICE_LOG} &
 record_pid=$!
 echo "Trace record pid: $record_pid"
 
-trap "iscsicleanup; killprocess $iscsi_pid; killprocess $record_pid; delete_tmp_files; exit 1" SIGINT SIGTERM EXIT
+RPCS=
+RPCS+="iscsi_create_portal_group $PORTAL_TAG $TARGET_IP:$ISCSI_PORT\n"
+RPCS+="iscsi_create_initiator_group $INITIATOR_TAG $INITIATOR_NAME $NETMASK\n"
+
+echo "Create bdevs and target nodes"
+CONNECTION_NUMBER=15
+for i in $(seq 0 $CONNECTION_NUMBER); do
+	RPCS+="bdev_malloc_create $MALLOC_BDEV_SIZE $MALLOC_BLOCK_SIZE -b Malloc$i\n"
+	RPCS+="iscsi_create_target_node Target$i Target${i}_alias "Malloc$i:0" $PORTAL_TAG:$INITIATOR_TAG 256 -d\n"
+done
+echo -e $RPCS | $rpc_py
+
+sleep 1
+
+iscsiadm -m discovery -t sendtargets -p $TARGET_IP:$ISCSI_PORT
+iscsiadm -m node --login -p $TARGET_IP:$ISCSI_PORT
+waitforiscsidevices $(( CONNECTION_NUMBER + 1 ))
+
+trap 'iscsicleanup; killprocess $iscsi_pid; killprocess $record_pid; delete_tmp_files; iscsitestfini $1 $2; exit 1' SIGINT SIGTERM EXIT
 
 echo "Running FIO"
-$fio_py iscsi 131072 32 randrw 1 1
+$fio_py -p iscsi -i 131072 -d 32 -t randrw -r 1
 
 iscsicleanup
+
+RPCS=
 # Delete Malloc blockdevs and targets
 for i in $(seq 0 $CONNECTION_NUMBER); do
-	$rpc_py delete_target_node iqn.2016-06.io.spdk:Target${i}
-	$rpc_py delete_malloc_bdev Malloc${i}
+	RPCS+="iscsi_delete_target_node iqn.2016-06.io.spdk:Target$i\n"
+	RPCS+="bdev_malloc_delete Malloc$i\n"
 done
+echo -e $RPCS | $rpc_py
 
-trap "delete_tmp_files; exit 1" SIGINT SIGTERM EXIT
+trap 'delete_tmp_files; iscsitestfini $1 $2; exit 1' SIGINT SIGTERM EXIT
 
 killprocess $iscsi_pid
 killprocess $record_pid
@@ -124,4 +132,4 @@ fi
 done
 
 trap - SIGINT SIGTERM EXIT
-timing_exit trace_record
+iscsitestfini $1 $2

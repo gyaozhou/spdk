@@ -1,8 +1,8 @@
 /*-
  *   BSD LICENSE
  *
- *   Copyright (c) Intel Corporation.
- *   All rights reserved.
+ *   Copyright (c) Intel Corporation. All rights reserved.
+ *   Copyright (c) 2019 Mellanox Technologies LTD. All rights reserved.
  *
  *   Redistribution and use in source and binary forms, with or without
  *   modification, are permitted provided that the following conditions
@@ -32,6 +32,7 @@
  */
 
 #include "spdk/stdinc.h"
+#include "spdk/version.h"
 
 #include "spdk_internal/event.h"
 
@@ -43,8 +44,6 @@
 #include "spdk/string.h"
 #include "spdk/rpc.h"
 #include "spdk/util.h"
-
-#include "json_config.h"
 
 #define SPDK_APP_DEFAULT_LOG_LEVEL		SPDK_LOG_NOTICE
 #define SPDK_APP_DEFAULT_LOG_PRINT_LEVEL	SPDK_LOG_INFO
@@ -110,6 +109,8 @@ static const struct option g_cmdline_options[] = {
 	{"mem-size",			required_argument,	NULL, MEM_SIZE_OPT_IDX},
 #define NO_PCI_OPT_IDX		'u'
 	{"no-pci",			no_argument,		NULL, NO_PCI_OPT_IDX},
+#define VERSION_OPT_IDX		'v'
+	{"version",			no_argument,		NULL, VERSION_OPT_IDX},
 #define PCI_BLACKLIST_OPT_IDX	'B'
 	{"pci-blacklist",		required_argument,	NULL, PCI_BLACKLIST_OPT_IDX},
 #define LOGFLAG_OPT_IDX	'L'
@@ -123,7 +124,7 @@ static const struct option g_cmdline_options[] = {
 #define WAIT_FOR_RPC_OPT_IDX	258
 	{"wait-for-rpc",		no_argument,		NULL, WAIT_FOR_RPC_OPT_IDX},
 #define HUGE_DIR_OPT_IDX	259
-	{"huge-dir",			no_argument,		NULL, HUGE_DIR_OPT_IDX},
+	{"huge-dir",			required_argument,	NULL, HUGE_DIR_OPT_IDX},
 #define NUM_TRACE_ENTRIES_OPT_IDX	260
 	{"num-trace-entries",		required_argument,	NULL, NUM_TRACE_ENTRIES_OPT_IDX},
 #define MAX_REACTOR_DELAY_OPT_IDX	261
@@ -348,8 +349,6 @@ spdk_app_setup_signal_handlers(struct spdk_app_opts *opts)
 static void
 spdk_app_start_application(void)
 {
-	spdk_rpc_set_state(SPDK_RPC_RUNTIME);
-
 	assert(spdk_get_thread() == g_app_thread);
 
 	g_start_fn(g_start_arg);
@@ -357,10 +356,16 @@ spdk_app_start_application(void)
 
 // zhou: init RPC server, and may start APP.
 static void
-spdk_app_start_rpc(void *arg1)
+spdk_app_start_rpc(int rc, void *arg1)
 {
+	if (rc) {
+		spdk_app_stop(rc);
+		return;
+	}
+
 	spdk_rpc_initialize(g_spdk_app.rpc_addr);
 	if (!g_delay_subsystem_init) {
+		spdk_rpc_set_state(SPDK_RPC_RUNTIME);
 		spdk_app_start_application();
 	}
 }
@@ -591,7 +596,7 @@ spdk_app_start(struct spdk_app_opts *opts, spdk_msg_fn start_fn,
 	struct spdk_conf	*config = NULL;
 	int			rc;
 	char			*tty;
-	struct spdk_cpuset	*tmp_cpumask;
+	struct spdk_cpuset	tmp_cpumask = {};
 
 	if (!opts) {
 		SPDK_ERRLOG("opts should not be NULL\n");
@@ -631,13 +636,22 @@ spdk_app_start(struct spdk_app_opts *opts, spdk_msg_fn start_fn,
     // zhou: parse config file in "struct spdk_config"
 	config = spdk_app_setup_conf(opts->config_file);
 	if (config == NULL) {
-		goto app_start_setup_conf_err;
+		return 1;
 	}
 
     // zhou: update CLI options according to config file.
 	if (spdk_app_read_config_file_global_params(opts) < 0) {
-		goto app_start_setup_conf_err;
+		spdk_conf_free(config);
+		return 1;
 	}
+
+	memset(&g_spdk_app, 0, sizeof(g_spdk_app));
+	g_spdk_app.config = config;
+	g_spdk_app.json_config_file = opts->json_config_file;
+	g_spdk_app.rpc_addr = opts->rpc_addr;
+	g_spdk_app.shm_id = opts->shm_id;
+	g_spdk_app.shutdown_cb = opts->shutdown_cb;
+	g_spdk_app.rc = 0;
 
 	spdk_log_set_level(SPDK_APP_DEFAULT_LOG_LEVEL);
 	spdk_log_set_backtrace_level(SPDK_APP_DEFAULT_BACKTRACE_LOG_LEVEL);
@@ -645,10 +659,10 @@ spdk_app_start(struct spdk_app_opts *opts, spdk_msg_fn start_fn,
 
     // zhou: env == DPDK
 	if (spdk_app_setup_env(opts) < 0) {
-		goto app_start_setup_conf_err;
+		return 1;
 	}
 
-	spdk_log_open();
+	spdk_log_open(opts->log);
 	SPDK_NOTICELOG("Total cores available: %d\n", spdk_env_get_core_count());
 
 	/*
@@ -658,25 +672,17 @@ spdk_app_start(struct spdk_app_opts *opts, spdk_msg_fn start_fn,
 	 */
 	if ((rc = spdk_reactors_init()) != 0) {
 		SPDK_ERRLOG("Reactor Initilization failed: rc = %d\n", rc);
-		goto app_start_log_close_err;
+		return 1;
 	}
 
-	tmp_cpumask = spdk_cpuset_alloc();
-	if (tmp_cpumask == NULL) {
-		SPDK_ERRLOG("spdk_cpuset_alloc() failed\n");
-		goto app_start_log_close_err;
-	}
-
-	spdk_cpuset_zero(tmp_cpumask);
-	spdk_cpuset_set_cpu(tmp_cpumask, spdk_env_get_current_core(), true);
+	spdk_cpuset_set_cpu(&tmp_cpumask, spdk_env_get_current_core(), true);
 
 	/* Now that the reactors have been initialized, we can create an
 	 * initialization thread. */
-	g_app_thread = spdk_thread_create("app_thread", tmp_cpumask);
-	spdk_cpuset_free(tmp_cpumask);
+	g_app_thread = spdk_thread_create("app_thread", &tmp_cpumask);
 	if (!g_app_thread) {
 		SPDK_ERRLOG("Unable to create an spdk_thread for initialization\n");
-		goto app_start_log_close_err;
+		return 1;
 	}
 
 	/*
@@ -687,20 +693,12 @@ spdk_app_start(struct spdk_app_opts *opts, spdk_msg_fn start_fn,
 	 * in spdk_app_setup_signal_handlers().
 	 */
 	if (spdk_app_setup_trace(opts) != 0) {
-		goto app_start_log_close_err;
+		return 1;
 	}
 
 	if ((rc = spdk_app_setup_signal_handlers(opts)) != 0) {
-		goto app_start_trace_cleanup_err;
+		return 1;
 	}
-
-	memset(&g_spdk_app, 0, sizeof(g_spdk_app));
-	g_spdk_app.config = config;
-	g_spdk_app.json_config_file = opts->json_config_file;
-	g_spdk_app.rpc_addr = opts->rpc_addr;
-	g_spdk_app.shm_id = opts->shm_id;
-	g_spdk_app.shutdown_cb = opts->shutdown_cb;
-	g_spdk_app.rc = 0;
 
 	g_delay_subsystem_init = opts->delay_subsystem_init;
 	g_start_fn = start_fn;
@@ -714,15 +712,6 @@ spdk_app_start(struct spdk_app_opts *opts, spdk_msg_fn start_fn,
 	spdk_reactors_start();
 
 	return g_spdk_app.rc;
-
-app_start_trace_cleanup_err:
-	spdk_trace_cleanup();
-
-app_start_log_close_err:
-	spdk_log_close();
-
-app_start_setup_conf_err:
-	return 1;
 }
 
 void
@@ -792,6 +781,7 @@ usage(void (*app_usage)(void))
 	printf(" -B, --pci-blacklist <bdf>\n");
 	printf("                           pci addr to blacklist (can be used more than once)\n");
 	printf(" -R, --huge-unlink         unlink huge files after initialization\n");
+	printf(" -v, --version             print SPDK version\n");
 	printf(" -W, --pci-whitelist <bdf>\n");
 	printf("                           pci addr to whitelist (-B and -W cannot be used at the same time)\n");
 	printf("      --huge-dir <path>    use a specific hugetlbfs mount to reserve memory from\n");
@@ -1029,6 +1019,10 @@ spdk_app_parse_args(int argc, char **argv, struct spdk_app_opts *opts,
 			fprintf(stderr,
 				"Deprecation warning: The maximum allowed latency parameter is no longer supported.\n");
 			break;
+		case VERSION_OPT_IDX:
+			printf(SPDK_VERSION_STRING"\n");
+			retval = SPDK_APP_PARSE_ARGS_HELP;
+			goto out;
 		case '?':
 			/*
 			 * In the event getopt() above detects an option
@@ -1092,39 +1086,44 @@ spdk_app_usage(void)
 ////////////////////////////////////////////////////////////////////////////////
 // zhou: RPC "start_subsystem_init" handler
 static void
-spdk_rpc_start_subsystem_init_cpl(void *arg1)
+spdk_rpc_framework_start_init_cpl(int rc, void *arg1)
 {
 	struct spdk_jsonrpc_request *request = arg1;
 	struct spdk_json_write_ctx *w;
 
 	assert(spdk_get_thread() == g_app_thread);
 
+	if (rc) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						 "framework_initialization failed");
+		return;
+	}
+
+	spdk_rpc_set_state(SPDK_RPC_RUNTIME);
+
     // zhou: start APP.
 	spdk_app_start_application();
 
 	w = spdk_jsonrpc_begin_result(request);
-	if (w == NULL) {
-		return;
-	}
-
 	spdk_json_write_bool(w, true);
 	spdk_jsonrpc_end_result(request, w);
 }
 
 static void
-spdk_rpc_start_subsystem_init(struct spdk_jsonrpc_request *request,
+spdk_rpc_framework_start_init(struct spdk_jsonrpc_request *request,
 			      const struct spdk_json_val *params)
 {
 	if (params != NULL) {
 		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
-						 "start_subsystem_init requires no parameters");
+						 "framework_start_init requires no parameters");
 		return;
 	}
 
-	spdk_subsystem_init(spdk_rpc_start_subsystem_init_cpl, request);
+	spdk_subsystem_init(spdk_rpc_framework_start_init_cpl, request);
 }
 
-SPDK_RPC_REGISTER("start_subsystem_init", spdk_rpc_start_subsystem_init, SPDK_RPC_STARTUP)
+SPDK_RPC_REGISTER("framework_start_init", spdk_rpc_framework_start_init, SPDK_RPC_STARTUP)
+SPDK_RPC_REGISTER_ALIAS_DEPRECATED(framework_start_init, start_subsystem_init)
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -1141,10 +1140,8 @@ spdk_rpc_subsystem_init_poller_ctx(void *ctx)
 
 	if (spdk_rpc_get_state() == SPDK_RPC_RUNTIME) {
 		w = spdk_jsonrpc_begin_result(poller_ctx->request);
-		if (w != NULL) {
-			spdk_json_write_bool(w, true);
-			spdk_jsonrpc_end_result(poller_ctx->request, w);
-		}
+		spdk_json_write_bool(w, true);
+		spdk_jsonrpc_end_result(poller_ctx->request, w);
 		spdk_poller_unregister(&poller_ctx->init_poller);
 		free(poller_ctx);
 	}
@@ -1153,7 +1150,7 @@ spdk_rpc_subsystem_init_poller_ctx(void *ctx)
 }
 
 static void
-spdk_rpc_wait_subsystem_init(struct spdk_jsonrpc_request *request,
+spdk_rpc_framework_wait_init(struct spdk_jsonrpc_request *request,
 			     const struct spdk_json_val *params)
 {
 	struct spdk_json_write_ctx *w;
@@ -1161,9 +1158,6 @@ spdk_rpc_wait_subsystem_init(struct spdk_jsonrpc_request *request,
 
 	if (spdk_rpc_get_state() == SPDK_RPC_RUNTIME) {
 		w = spdk_jsonrpc_begin_result(request);
-		if (w == NULL) {
-			return;
-		}
 		spdk_json_write_bool(w, true);
 		spdk_jsonrpc_end_result(request, w);
 	} else {
@@ -1177,7 +1171,9 @@ spdk_rpc_wait_subsystem_init(struct spdk_jsonrpc_request *request,
 		ctx->init_poller = spdk_poller_register(spdk_rpc_subsystem_init_poller_ctx, ctx, 0);
 	}
 }
-SPDK_RPC_REGISTER("wait_subsystem_init", spdk_rpc_wait_subsystem_init,
+SPDK_RPC_REGISTER("framework_wait_init", spdk_rpc_framework_wait_init,
 		  SPDK_RPC_STARTUP | SPDK_RPC_RUNTIME)
+
+SPDK_RPC_REGISTER_ALIAS_DEPRECATED(framework_wait_init, wait_subsystem_init)
 
 ////////////////////////////////////////////////////////////////////////////////

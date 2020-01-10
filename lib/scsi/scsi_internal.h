@@ -60,21 +60,41 @@ struct spdk_scsi_port {
 	char			name[SPDK_SCSI_PORT_MAX_NAME_LENGTH];
 };
 
+/* Registrant with I_T nextus */
+struct spdk_scsi_pr_registrant {
+	uint64_t				rkey;
+	uint16_t				relative_target_port_id;
+	uint16_t				transport_id_len;
+	char					transport_id[SPDK_SCSI_MAX_TRANSPORT_ID_LENGTH];
+	char					initiator_port_name[SPDK_SCSI_PORT_MAX_NAME_LENGTH];
+	char					target_port_name[SPDK_SCSI_PORT_MAX_NAME_LENGTH];
+	struct spdk_scsi_port			*initiator_port;
+	struct spdk_scsi_port			*target_port;
+	TAILQ_ENTRY(spdk_scsi_pr_registrant)	link;
+};
+
+/* Reservation with LU_SCOPE */
+struct spdk_scsi_pr_reservation {
+	struct spdk_scsi_pr_registrant		*holder;
+	enum spdk_scsi_pr_type_code		rtype;
+	uint64_t				crkey;
+};
+
 struct spdk_scsi_dev {
-	int				id;
-	int				is_allocated;
-	bool				removed;
-	spdk_scsi_dev_destruct_cb_t	remove_cb;
-	void				*remove_ctx;
+	int					id;
+	int					is_allocated;
+	bool					removed;
+	spdk_scsi_dev_destruct_cb_t		remove_cb;
+	void					*remove_ctx;
 
-	char				name[SPDK_SCSI_DEV_MAX_NAME + 1];
+	char					name[SPDK_SCSI_DEV_MAX_NAME + 1];
 
-	struct spdk_scsi_lun		*lun[SPDK_SCSI_DEV_MAX_LUN];
+	struct spdk_scsi_lun			*lun[SPDK_SCSI_DEV_MAX_LUN];
 
-	int				num_ports;
-	struct spdk_scsi_port		port[SPDK_SCSI_DEV_MAX_PORTS];
+	int					num_ports;
+	struct spdk_scsi_port			port[SPDK_SCSI_DEV_MAX_PORTS];
 
-	uint8_t				protocol_id;
+	uint8_t					protocol_id;
 };
 
 struct spdk_scsi_lun_desc {
@@ -97,6 +117,9 @@ struct spdk_scsi_lun {
 	/** Descriptor for opened block device. */
 	struct spdk_bdev_desc *bdev_desc;
 
+	/** The thread which opens this LUN. */
+	struct spdk_thread *thread;
+
 	/** I/O channel for the bdev associated with this LUN. */
 	struct spdk_io_channel *io_channel;
 
@@ -114,6 +137,13 @@ struct spdk_scsi_lun {
 
 	/** Argument for hotremove_cb */
 	void *hotremove_ctx;
+
+	/** Registrant head for I_T nexus */
+	TAILQ_HEAD(, spdk_scsi_pr_registrant) reg_head;
+	/** Persistent Reservation Generation */
+	uint32_t pr_generation;
+	/** Reservation for the LUN */
+	struct spdk_scsi_pr_reservation reservation;
 
 	/** List of open descriptors for this LUN. */
 	TAILQ_HEAD(, spdk_scsi_lun_desc) open_descs;
@@ -155,10 +185,12 @@ void spdk_scsi_lun_append_task(struct spdk_scsi_lun *lun, struct spdk_scsi_task 
 void spdk_scsi_lun_execute_tasks(struct spdk_scsi_lun *lun);
 void spdk_scsi_lun_append_mgmt_task(struct spdk_scsi_lun *lun, struct spdk_scsi_task *task);
 void spdk_scsi_lun_execute_mgmt_task(struct spdk_scsi_lun *lun);
-bool spdk_scsi_lun_has_pending_mgmt_tasks(const struct spdk_scsi_lun *lun);
+bool spdk_scsi_lun_has_pending_mgmt_tasks(const struct spdk_scsi_lun *lun,
+		const struct spdk_scsi_port *initiator_port);
 void spdk_scsi_lun_complete_task(struct spdk_scsi_lun *lun, struct spdk_scsi_task *task);
 void spdk_scsi_lun_complete_reset_task(struct spdk_scsi_lun *lun, struct spdk_scsi_task *task);
-bool spdk_scsi_lun_has_pending_tasks(const struct spdk_scsi_lun *lun);
+bool spdk_scsi_lun_has_pending_tasks(const struct spdk_scsi_lun *lun,
+				     const struct spdk_scsi_port *initiator_port);
 int _spdk_scsi_lun_allocate_io_channel(struct spdk_scsi_lun *lun);
 void _spdk_scsi_lun_free_io_channel(struct spdk_scsi_lun *lun);
 
@@ -171,8 +203,12 @@ void spdk_scsi_port_destruct(struct spdk_scsi_port *port);
 int spdk_bdev_scsi_execute(struct spdk_scsi_task *task);
 void spdk_bdev_scsi_reset(struct spdk_scsi_task *task);
 
-bool spdk_scsi_bdev_get_dif_ctx(struct spdk_bdev *bdev, uint8_t *cdb, uint32_t offset,
+bool spdk_scsi_bdev_get_dif_ctx(struct spdk_bdev *bdev, struct spdk_scsi_task *task,
 				struct spdk_dif_ctx *dif_ctx);
+
+int spdk_scsi_pr_out(struct spdk_scsi_task *task, uint8_t *cdb, uint8_t *data, uint16_t data_len);
+int spdk_scsi_pr_in(struct spdk_scsi_task *task, uint8_t *cdb, uint8_t *data, uint16_t data_len);
+int spdk_scsi_pr_check(struct spdk_scsi_task *task);
 
 struct spdk_scsi_globals {
 	pthread_mutex_t mutex;

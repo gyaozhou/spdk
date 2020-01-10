@@ -47,7 +47,7 @@ fi
 
 AUTOTEST_DRIVER_PATH=$($READLINK -f ${BASH_SOURCE%/*})
 SPDK_AUTOTEST_LOCAL_PATH=$PWD
-TIMESTAMP=`date +"%Y%m%d%H%M%S"`
+TIMESTAMP=$(date +"%Y%m%d%H%M%S")
 BUILD_NAME="build-${TIMESTAMP}"
 
 # The command line help
@@ -83,6 +83,11 @@ while getopts "d:qhn" opt; do
 		;;
 		h)  display_help >&2
 			exit 0
+		;;
+		*) echo "Invalid option"
+			echo ""
+			display_help >&2
+			exit 1
 		;;
 	esac
 done

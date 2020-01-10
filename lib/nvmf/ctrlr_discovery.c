@@ -48,8 +48,8 @@
 #include "spdk/bdev_module.h"
 #include "spdk_internal/log.h"
 
-static void
-nvmf_update_discovery_log(struct spdk_nvmf_tgt *tgt)
+static struct spdk_nvmf_discovery_log_page *
+nvmf_generate_discovery_log(struct spdk_nvmf_tgt *tgt, const char *hostnqn, size_t *log_page_size)
 {
 	uint64_t numrec = 0;
 	struct spdk_nvmf_subsystem *subsystem;
@@ -66,7 +66,7 @@ nvmf_update_discovery_log(struct spdk_nvmf_tgt *tgt)
 	disc_log = calloc(1, cur_size);
 	if (disc_log == NULL) {
 		SPDK_ERRLOG("Discovery log page memory allocation error\n");
-		return;
+		return NULL;
 	}
 
 	for (sid = 0; sid < tgt->max_subsystems; sid++) {
@@ -78,6 +78,10 @@ nvmf_update_discovery_log(struct spdk_nvmf_tgt *tgt)
 		}
 
 		if (subsystem->subtype == SPDK_NVMF_SUBTYPE_DISCOVERY) {
+			continue;
+		}
+
+		if (!spdk_nvmf_subsystem_host_allowed(subsystem, hostnqn)) {
 			continue;
 		}
 
@@ -110,38 +114,35 @@ nvmf_update_discovery_log(struct spdk_nvmf_tgt *tgt)
 
 	disc_log->numrec = numrec;
 	disc_log->genctr = tgt->discovery_genctr;
+	*log_page_size = cur_size;
 
-	free(tgt->discovery_log_page);
-
-	tgt->discovery_log_page = disc_log;
-	tgt->discovery_log_page_size = cur_size;
+	return disc_log;
 }
 
 void
-spdk_nvmf_get_discovery_log_page(struct spdk_nvmf_tgt *tgt, struct iovec *iov,
+spdk_nvmf_get_discovery_log_page(struct spdk_nvmf_tgt *tgt, const char *hostnqn, struct iovec *iov,
 				 uint32_t iovcnt, uint64_t offset, uint32_t length)
 {
 	size_t copy_len = 0;
 	size_t zero_len = 0;
 	struct iovec *tmp;
+	size_t log_page_size = 0;
+	struct spdk_nvmf_discovery_log_page *discovery_log_page;
 
-	if (tgt->discovery_log_page == NULL ||
-	    tgt->discovery_log_page->genctr != tgt->discovery_genctr) {
-		nvmf_update_discovery_log(tgt);
-	}
+	discovery_log_page = nvmf_generate_discovery_log(tgt, hostnqn, &log_page_size);
 
 	/* Copy the valid part of the discovery log page, if any */
-	if (tgt->discovery_log_page) {
+	if (discovery_log_page) {
 		for (tmp = iov; tmp < iov + iovcnt; tmp++) {
 			copy_len = spdk_min(tmp->iov_len, length);
-			copy_len = spdk_min(tgt->discovery_log_page_size - offset, copy_len);
+			copy_len = spdk_min(log_page_size - offset, copy_len);
 
-			memcpy(tmp->iov_base, (char *)tgt->discovery_log_page + offset, copy_len);
+			memcpy(tmp->iov_base, (char *)discovery_log_page + offset, copy_len);
 
 			offset += copy_len;
 			length -= copy_len;
 			zero_len = tmp->iov_len - copy_len;
-			if (tgt->discovery_log_page_size <= offset || length == 0) {
+			if (log_page_size <= offset || length == 0) {
 				break;
 			}
 		}
@@ -153,5 +154,7 @@ spdk_nvmf_get_discovery_log_page(struct spdk_nvmf_tgt *tgt, struct iovec *iov,
 		for (++tmp; tmp < iov + iovcnt; tmp++) {
 			memset((char *)tmp->iov_base, 0, tmp->iov_len);
 		}
+
+		free(discovery_log_page);
 	}
 }

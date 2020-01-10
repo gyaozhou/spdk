@@ -57,14 +57,14 @@ struct ftl_anm_event {
 	/* Start PPA */
 	struct ftl_ppa			ppa;
 
-	/* ANM range */
-	enum ftl_anm_range		range;
+	/* Number of logical blocks */
+	size_t				num_lbks;
 };
 
 int	ftl_anm_init(struct spdk_thread *thread, spdk_ftl_fn cb, void *cb_arg);
 int	ftl_anm_free(spdk_ftl_fn cb, void *cb_arg);
 int	ftl_anm_register_device(struct spdk_ftl_dev *dev, ftl_anm_fn fn);
-void	ftl_anm_unregister_device(struct spdk_ftl_dev *dev);
+int	ftl_anm_unregister_device(struct spdk_ftl_dev *dev, spdk_ftl_fn cb);
 void	ftl_anm_event_complete(struct ftl_anm_event *event);
 
 #endif /* FTL_ANM_H */

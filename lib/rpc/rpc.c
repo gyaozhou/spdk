@@ -1,8 +1,8 @@
 /*-
  *   BSD LICENSE
  *
- *   Copyright (c) Intel Corporation.
- *   All rights reserved.
+ *   Copyright (c) Intel Corporation. All rights reserved.
+ *   Copyright (c) 2019 Mellanox Technologies LTD. All rights reserved.
  *
  *   Redistribution and use in source and binary forms, with or without
  *   modification, are permitted provided that the following conditions
@@ -51,6 +51,7 @@ static int g_rpc_lock_fd = -1;
 
 static struct spdk_jsonrpc_server *g_jsonrpc_server = NULL;
 static uint32_t g_rpc_state;
+static bool g_rpcs_correct = true;
 
 struct spdk_rpc_method {
 	const char *name;
@@ -156,13 +157,21 @@ spdk_rpc_listen(const char *listen_addr)
 			return -1;
 		}
 
-		snprintf(g_rpc_lock_path, sizeof(g_rpc_lock_path), "%s.lock",
-			 g_rpc_listen_addr_unix.sun_path);
+		rc = snprintf(g_rpc_lock_path, sizeof(g_rpc_lock_path), "%s.lock",
+			      g_rpc_listen_addr_unix.sun_path);
+		if (rc < 0 || (size_t)rc >= sizeof(g_rpc_lock_path)) {
+			SPDK_ERRLOG("RPC lock path too long\n");
+			g_rpc_listen_addr_unix.sun_path[0] = '\0';
+			g_rpc_lock_path[0] = '\0';
+			return -1;
+		}
 
 		g_rpc_lock_fd = open(g_rpc_lock_path, O_RDONLY | O_CREAT, 0600);
 		if (g_rpc_lock_fd == -1) {
 			SPDK_ERRLOG("Cannot open lock file %s: %s\n",
 				    g_rpc_lock_path, spdk_strerror(errno));
+			g_rpc_listen_addr_unix.sun_path[0] = '\0';
+			g_rpc_lock_path[0] = '\0';
 			return -1;
 		}
 
@@ -170,6 +179,8 @@ spdk_rpc_listen(const char *listen_addr)
 		if (rc != 0) {
 			SPDK_ERRLOG("RPC Unix domain socket path %s in use. Specify another.\n",
 				    g_rpc_listen_addr_unix.sun_path);
+			g_rpc_listen_addr_unix.sun_path[0] = '\0';
+			g_rpc_lock_path[0] = '\0';
 			return -1;
 		}
 
@@ -252,7 +263,8 @@ spdk_rpc_register_method(const char *method, spdk_rpc_method_handler func, uint3
 
 	m = _get_rpc_method_raw(method);
 	if (m != NULL) {
-		SPDK_ERRLOG("duplicate RPC %s registered - ignoring...\n", method);
+		SPDK_ERRLOG("duplicate RPC %s registered...\n", method);
+		g_rpcs_correct = false;
 		return;
 	}
 
@@ -278,11 +290,13 @@ spdk_rpc_register_alias_deprecated(const char *method, const char *alias)
 	if (base == NULL) {
 		SPDK_ERRLOG("cannot create alias %s - method %s does not exist\n",
 			    alias, method);
+		g_rpcs_correct = false;
 		return;
 	}
 
 	if (base->is_alias_of != NULL) {
 		SPDK_ERRLOG("cannot create alias %s of alias %s\n", alias, method);
+		g_rpcs_correct = false;
 		return;
 	}
 
@@ -294,9 +308,16 @@ spdk_rpc_register_alias_deprecated(const char *method, const char *alias)
 
 	m->is_alias_of = base;
 	m->is_deprecated = true;
+	m->state_mask = base->state_mask;
 
 	/* TODO: use a hash table or sorted list */
 	SLIST_INSERT_HEAD(&g_rpc_methods, m, slist);
+}
+
+bool
+spdk_rpc_verify_methods(void)
+{
+	return g_rpcs_correct;
 }
 
 int
@@ -326,6 +347,7 @@ spdk_rpc_close(void)
 		if (g_rpc_listen_addr_unix.sun_path[0]) {
 			/* Delete the Unix socket file */
 			unlink(g_rpc_listen_addr_unix.sun_path);
+			g_rpc_listen_addr_unix.sun_path[0] = '\0';
 		}
 
 		spdk_jsonrpc_server_shutdown(g_jsonrpc_server);
@@ -343,25 +365,26 @@ spdk_rpc_close(void)
 	}
 }
 
-struct rpc_get_rpc_methods {
+struct rpc_get_methods {
 	bool current;
+	bool include_aliases;
 };
 
-static const struct spdk_json_object_decoder rpc_get_rpc_methods_decoders[] = {
-	{"current", offsetof(struct rpc_get_rpc_methods, current), spdk_json_decode_bool, true},
+static const struct spdk_json_object_decoder rpc_get_methods_decoders[] = {
+	{"current", offsetof(struct rpc_get_methods, current), spdk_json_decode_bool, true},
+	{"include_aliases", offsetof(struct rpc_get_methods, include_aliases), spdk_json_decode_bool, true},
 };
 
 static void
-spdk_rpc_get_rpc_methods(struct spdk_jsonrpc_request *request,
-			 const struct spdk_json_val *params)
+spdk_rpc_get_methods(struct spdk_jsonrpc_request *request, const struct spdk_json_val *params)
 {
-	struct rpc_get_rpc_methods req = {};
+	struct rpc_get_methods req = {};
 	struct spdk_json_write_ctx *w;
 	struct spdk_rpc_method *m;
 
 	if (params != NULL) {
-		if (spdk_json_decode_object(params, rpc_get_rpc_methods_decoders,
-					    SPDK_COUNTOF(rpc_get_rpc_methods_decoders), &req)) {
+		if (spdk_json_decode_object(params, rpc_get_methods_decoders,
+					    SPDK_COUNTOF(rpc_get_methods_decoders), &req)) {
 			SPDK_ERRLOG("spdk_json_decode_object failed\n");
 			spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
 							 "Invalid parameters");
@@ -370,12 +393,11 @@ spdk_rpc_get_rpc_methods(struct spdk_jsonrpc_request *request,
 	}
 
 	w = spdk_jsonrpc_begin_result(request);
-	if (w == NULL) {
-		return;
-	}
-
 	spdk_json_write_array_begin(w);
 	SLIST_FOREACH(m, &g_rpc_methods, slist) {
+		if (m->is_alias_of != NULL && !req.include_aliases) {
+			continue;
+		}
 		if (req.current && ((m->state_mask & g_rpc_state) != g_rpc_state)) {
 			continue;
 		}
@@ -384,39 +406,37 @@ spdk_rpc_get_rpc_methods(struct spdk_jsonrpc_request *request,
 	spdk_json_write_array_end(w);
 	spdk_jsonrpc_end_result(request, w);
 }
-SPDK_RPC_REGISTER("get_rpc_methods", spdk_rpc_get_rpc_methods, SPDK_RPC_STARTUP | SPDK_RPC_RUNTIME)
+SPDK_RPC_REGISTER("rpc_get_methods", spdk_rpc_get_methods, SPDK_RPC_STARTUP | SPDK_RPC_RUNTIME)
+SPDK_RPC_REGISTER_ALIAS_DEPRECATED(rpc_get_methods, get_rpc_methods)
 
 static void
-spdk_rpc_get_version(struct spdk_jsonrpc_request *request, const struct spdk_json_val *params)
+spdk_rpc_spdk_get_version(struct spdk_jsonrpc_request *request, const struct spdk_json_val *params)
 {
 	struct spdk_json_write_ctx *w;
 
 	if (params != NULL) {
 		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
-						 "get_spdk_version method requires no parameters");
-	}
-
-	w = spdk_jsonrpc_begin_result(request);
-	if (w == NULL) {
+						 "spdk_get_version method requires no parameters");
 		return;
 	}
 
+	w = spdk_jsonrpc_begin_result(request);
 	spdk_json_write_object_begin(w);
 
 	spdk_json_write_named_string_fmt(w, "version", "%s", SPDK_VERSION_STRING);
-
 	spdk_json_write_named_object_begin(w, "fields");
 	spdk_json_write_named_uint32(w, "major", SPDK_VERSION_MAJOR);
 	spdk_json_write_named_uint32(w, "minor", SPDK_VERSION_MINOR);
-
 	spdk_json_write_named_uint32(w, "patch", SPDK_VERSION_PATCH);
-
 	spdk_json_write_named_string_fmt(w, "suffix", "%s", SPDK_VERSION_SUFFIX);
-
+#ifdef SPDK_GIT_COMMIT
+	spdk_json_write_named_string_fmt(w, "commit", "%s", SPDK_GIT_COMMIT_STRING);
+#endif
 	spdk_json_write_object_end(w);
 
 	spdk_json_write_object_end(w);
-
 	spdk_jsonrpc_end_result(request, w);
 }
-SPDK_RPC_REGISTER("get_spdk_version", spdk_rpc_get_version, SPDK_RPC_STARTUP | SPDK_RPC_RUNTIME)
+SPDK_RPC_REGISTER("spdk_get_version", spdk_rpc_spdk_get_version,
+		  SPDK_RPC_STARTUP | SPDK_RPC_RUNTIME)
+SPDK_RPC_REGISTER_ALIAS_DEPRECATED(spdk_get_version, get_spdk_version)

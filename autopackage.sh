@@ -2,6 +2,14 @@
 
 set -xe
 
+# If the configuration of tests is not provided, no tests will be carried out.
+if [[ ! -f $1 ]]; then
+	echo "ERROR: SPDK test configuration not specified"
+	exit 1
+fi
+
+source "$1"
+
 rootdir=$(readlink -f $(dirname $0))
 source "$rootdir/test/common/autotest_common.sh"
 
@@ -13,14 +21,14 @@ cd $rootdir
 timing_enter porcelain_check
 $MAKE clean
 
-if [ `git status --porcelain --ignore-submodules | wc -l` -ne 0 ]; then
+if [ $(git status --porcelain --ignore-submodules | wc -l) -ne 0 ]; then
 	echo make clean left the following files:
 	git status --porcelain --ignore-submodules
 	exit 1
 fi
 timing_exit porcelain_check
 
-if [ $RUN_NIGHTLY -eq 0 ]; then
+if [[ $SPDK_BUILD_PACKAGE -eq 0 && $RUN_NIGHTLY -eq 0 ]]; then
 	timing_finish
 	exit 0
 fi
@@ -47,30 +55,22 @@ echo "tmpdir=$tmpdir"
 tar -C "$tmpdir" -xf $spdk_tarball
 
 if [ -z "$WITH_DPDK_DIR" ]; then
-	cd dpdk
-	git archive HEAD^{tree} --prefix=dpdk/ -o ../${dpdk_tarball}
-	cd ..
+	(cd dpdk && git archive HEAD^{tree} --prefix=dpdk/ -o ../${dpdk_tarball})
 	tar -C "$tmpdir/${spdk_pv}" -xf $dpdk_tarball
 fi
 
 if [ -d "intel-ipsec-mb" ]; then
-	cd intel-ipsec-mb
-	git archive HEAD^{tree} --prefix=intel-ipsec-mb/ -o ../${ipsec_tarball}
-	cd ..
+	(cd intel-ipsec-mb && git archive HEAD^{tree} --prefix=intel-ipsec-mb/ -o ../${ipsec_tarball})
 	tar -C "$tmpdir/${spdk_pv}" -xf $ipsec_tarball
 fi
 
 if [ -d "isa-l" ]; then
-	cd isa-l
-	git archive HEAD^{tree} --prefix=isa-l/ -o ../${isal_tarball}
-	cd ..
+	(cd isa-l && git archive HEAD^{tree} --prefix=isa-l/ -o ../${isal_tarball})
 	tar -C "$tmpdir/${spdk_pv}" -xf $isal_tarball
 fi
 
 if [ -d "ocf" ]; then
-	cd ocf
-	git archive HEAD^{tree} --prefix=ocf/ -o ../${ocf_tarball}
-	cd ..
+	(cd ocf && git archive HEAD^{tree} --prefix=ocf/ -o ../${ocf_tarball})
 	tar -C "$tmpdir/${spdk_pv}" -xf $ocf_tarball
 fi
 

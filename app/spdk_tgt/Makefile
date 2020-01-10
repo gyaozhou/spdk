@@ -50,15 +50,29 @@ endif
 endif
 endif
 
-SPDK_LIB_LIST += event_bdev event_copy event_iscsi event_net event_scsi event_nvmf event
+SPDK_LIB_LIST += event_bdev event_copy event_iscsi event_net event_scsi event_nvmf event_vmd event
 SPDK_LIB_LIST += nvmf trace log conf thread util bdev iscsi scsi copy rpc jsonrpc json
-SPDK_LIB_LIST += app_rpc log_rpc trace_rpc bdev_rpc net sock notify
+SPDK_LIB_LIST += app_rpc log_rpc bdev_rpc net sock notify
+
+ifeq ($(SPDK_ROOT_DIR)/lib/env_dpdk,$(CONFIG_ENV))
+SPDK_LIB_LIST += env_dpdk_rpc
+endif
 
 ifeq ($(OS),Linux)
 SPDK_LIB_LIST += event_nbd nbd
+endif
+
+ifeq ($(CONFIG_FC),y)
+ifneq ($(strip $(CONFIG_FC_PATH)),)
+SYS_LIBS += -L$(CONFIG_FC_PATH)
+endif
+SYS_LIBS += -lufc
 endif
 
 include $(SPDK_ROOT_DIR)/mk/spdk.app.mk
 
 install: $(APP)
 	$(INSTALL_APP)
+
+uninstall:
+	$(UNINSTALL_APP)

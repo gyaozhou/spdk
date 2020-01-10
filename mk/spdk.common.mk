@@ -3,6 +3,7 @@
 #
 #  Copyright (c) Intel Corporation.
 #  Copyright (c) 2017, IBM Corporation.
+#  Copyright (c) 2019, Mellanox Corporation.
 #  All rights reserved.
 #
 #  Redistribution and use in source and binary forms, with or without
@@ -32,10 +33,8 @@
 #  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
 
-ifneq ($(MAKECMDGOALS),clean)
 ifeq ($(wildcard $(SPDK_ROOT_DIR)/mk/config.mk),)
-$(error mk/config.mk: file not found. Please run configure before 'make $(filter-out clean,$(MAKECMDGOALS))')
-endif
+$(error mk/config.mk: file not found. Please run configure before make)
 endif
 
 include $(SPDK_ROOT_DIR)/mk/config.mk
@@ -71,18 +70,22 @@ ifneq ($(filter freebsd%,$(TARGET_TRIPLET_WORDS)),)
 OS = FreeBSD
 endif
 
+TARGET_ARCHITECTURE ?= $(CONFIG_ARCH)
 TARGET_MACHINE := $(firstword $(TARGET_TRIPLET_WORDS))
 
 COMMON_CFLAGS = -g $(C_OPT) -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -Wmissing-declarations -fno-strict-aliasing -I$(SPDK_ROOT_DIR)/include
 
 ifneq ($(filter powerpc%,$(TARGET_MACHINE)),)
-COMMON_CFLAGS += -mcpu=native
-endif
-ifeq ($(TARGET_MACHINE),x86_64)
-COMMON_CFLAGS += -march=native
-endif
-ifeq ($(TARGET_MACHINE),aarch64)
+COMMON_CFLAGS += -mcpu=$(TARGET_ARCHITECTURE)
+else ifeq ($(TARGET_MACHINE),aarch64)
+ifeq ($(TARGET_ARCHITECTURE),native)
 COMMON_CFLAGS += -march=armv8-a+crc
+else
+COMMON_CFLAGS += -march=$(TARGET_ARCHITECTURE)
+endif
+COMMON_CFLAGS += -DPAGE_SIZE=$(shell getconf PAGESIZE)
+else
+COMMON_CFLAGS += -march=$(TARGET_ARCHITECTURE)
 endif
 
 ifeq ($(CONFIG_WERROR), y)
@@ -133,10 +136,6 @@ endif
 ifeq ($(OS),FreeBSD)
 SYS_LIBS += -L/usr/local/lib
 COMMON_CFLAGS += -I/usr/local/include
-# Default to lld on FreeBSD
-ifeq ($(origin LD),default)
-LD = ld.lld
-endif
 endif
 
 # Attach only if PMDK lib specified with configure
@@ -213,17 +212,26 @@ COMMON_CFLAGS += -fsanitize=thread
 LDFLAGS += -fsanitize=thread
 endif
 
+SPDK_GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null)
+ifneq (, $(SPDK_GIT_COMMIT))
+COMMON_CFLAGS += -DSPDK_GIT_COMMIT=$(SPDK_GIT_COMMIT)
+endif
+
 COMMON_CFLAGS += -pthread
 LDFLAGS += -pthread
 
 CFLAGS   += $(COMMON_CFLAGS) -Wno-pointer-sign -Wstrict-prototypes -Wold-style-definition -std=gnu99
-CXXFLAGS += $(COMMON_CFLAGS) -std=c++0x
+CXXFLAGS += $(COMMON_CFLAGS)
 
 SYS_LIBS += -lrt
 SYS_LIBS += -luuid
 SYS_LIBS += -lcrypto
 ifeq ($(CONFIG_LOG_BACKTRACE),y)
 SYS_LIBS += -lunwind
+endif
+
+ifeq ($(CONFIG_NVME_CUSE),y)
+SYS_LIBS += -lfuse3
 endif
 
 MAKEFLAGS += --no-print-directory
@@ -290,6 +298,12 @@ INSTALL_LIB=\
 	install -d -m 755 "$(DESTDIR)$(libdir)"; \
 	install -m 644 "$(LIB)" "$(DESTDIR)$(libdir)/"
 
+# Uninstall a library
+UNINSTALL_LIB=\
+	$(Q)echo "  UNINSTALL $(DESTDIR)$(libdir)/$(notdir $(LIB))";\
+	rm -f "$(DESTDIR)$(libdir)/$(notdir $(LIB))"; \
+	if [ -d "$(DESTDIR)$(libdir)" ] && [ $$(ls -A "$(DESTDIR)$(libdir)" | wc -l) -eq 0 ]; then rm -rf "$(DESTDIR)$(libdir)"; fi
+
 ifeq ($(OS),FreeBSD)
 INSTALL_REL_SYMLINK := install -l rs
 else
@@ -311,22 +325,50 @@ INSTALL_SHARED_LIB=\
 	install -m $$perm_mode "$(SHARED_REALNAME_LIB)" "$(DESTDIR)$(libdir)/"; \
 	$(call spdk_install_lib_symlink,$(notdir $(SHARED_REALNAME_LIB)),$(notdir $(SHARED_LINKED_LIB)));
 
+# Uninstall an shared library
+UNINSTALL_SHARED_LIB=\
+	$(Q)echo "  UNINSTALL $(DESTDIR)$(libdir)/$(notdir $(SHARED_LINKED_LIB))"; \
+	rm -f "$(DESTDIR)$(libdir)/$(notdir $(SHARED_LINKED_LIB))"; \
+	rm -f "$(DESTDIR)$(libdir)/$(notdir $(SHARED_REALNAME_LIB))"; \
+	if [ -d "$(DESTDIR)$(libdir)" ] && [ $$(ls -A "$(DESTDIR)$(libdir)" | wc -l) -eq 0 ]; then rm -rf "$(DESTDIR)$(libdir)"; fi
+
+
 # Install an app binary
 INSTALL_APP=\
 	$(Q)echo "  INSTALL $(DESTDIR)$(bindir)/$(APP)"; \
 	install -d -m 755 "$(DESTDIR)$(bindir)"; \
 	install -m 755 "$(APP)" "$(DESTDIR)$(bindir)/"
 
+# Uninstall an app binary
+UNINSTALL_APP=\
+        $(Q)echo "  UNINSTALL $(DESTDIR)$(bindir)/$(notdir $(APP))"; \
+	rm -f "$(DESTDIR)$(bindir)/$(notdir $(APP))"; \
+	if [ -d "$(DESTDIR)$(bindir)" ] && [ $$(ls -A "$(DESTDIR)$(bindir)" | wc -l) -eq 0 ]; then rm -rf "$(DESTDIR)$(bindir)"; fi
+
 INSTALL_EXAMPLE=\
 	$(Q)echo "  INSTALL $(DESTDIR)$(bindir)/spdk_$(strip $(subst /,_,$(subst $(SPDK_ROOT_DIR)/examples/, ,$(CURDIR))))"; \
 	install -d -m 755 "$(DESTDIR)$(bindir)"; \
 	install -m 755 "$(APP)" "$(DESTDIR)$(bindir)/spdk_$(strip $(subst /,_,$(subst $(SPDK_ROOT_DIR)/examples/, ,$(CURDIR))))"
 
+# Uninstall an example binary
+UNINSTALL_EXAMPLE=\
+	$(Q)echo "  UNINSTALL $(DESTDIR)$(bindir)/spdk_$(strip $(subst /,_,$(subst $(SPDK_ROOT_DIR)/examples/, ,$(CURDIR))))"; \
+	rm -f "$(DESTDIR)$(bindir)/spdk_$(strip $(subst /,_,$(subst $(SPDK_ROOT_DIR)/examples/, ,$(CURDIR))))"; \
+	if [ -d "$(DESTDIR)$(bindir)" ] && [ $$(ls -A "$(DESTDIR)$(bindir)" | wc -l) -eq 0 ]; then rm -rf "$(DESTDIR)$(bindir)"; fi
+
 # Install a header
 INSTALL_HEADER=\
 	$(Q)echo "  INSTALL $@"; \
 	install -d -m 755 "$(DESTDIR)$(includedir)/$(dir $(patsubst $(DESTDIR)$(includedir)/%,%,$@))"; \
-	install -m 644 "$(patsubst $(DESTDIR)$(includedir)/%,%,$@)" "$(DESTDIR)$(includedir)/$(dir $(patsubst $(DESTDIR)$(includedir)/%,%,$@))/"
+	install -m 644 "$(patsubst $(DESTDIR)$(includedir)/%,%,$@)" "$(DESTDIR)$(includedir)/$(dir $(patsubst $(DESTDIR)$(includedir)/%,%,$@))";
+
+# Uninstall a header
+UNINSTALL_HEADER=\
+	$(Q)echo "  UNINSTALL $@"; \
+	rm -rf "$(DESTDIR)$(includedir)/$(dir $(patsubst $(DESTDIR)$(includedir)/%,%,$@))$(notdir $@)"; \
+	if [ -d "$(DESTDIR)$(includedir)/$(dir $(patsubst $(DESTDIR)$(includedir)/%,%,$@))" ] \
+	&& [ $$(ls -A "$(DESTDIR)$(includedir)/$(dir $(patsubst $(DESTDIR)$(includedir)/%,%,$@))" | wc -l) -eq 0 ]; \
+	then rm -rf "$(DESTDIR)$(includedir)/$(dir $(patsubst $(DESTDIR)$(includedir)/%,%,$@))"; fi
 
 %.o: %.c %.d $(MAKEFILE_LIST)
 	$(COMPILE_C)

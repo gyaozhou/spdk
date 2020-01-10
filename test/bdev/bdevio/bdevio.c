@@ -39,6 +39,9 @@
 #include "spdk/log.h"
 #include "spdk/thread.h"
 #include "spdk/event.h"
+#include "spdk/rpc.h"
+#include "spdk/util.h"
+#include "spdk/string.h"
 
 #include "CUnit/Basic.h"
 
@@ -49,9 +52,11 @@
 pthread_mutex_t g_test_mutex;
 pthread_cond_t g_test_cond;
 
-static uint32_t g_lcore_id_init;
-static uint32_t g_lcore_id_ut;
-static uint32_t g_lcore_id_io;
+static struct spdk_thread *g_thread_init;
+static struct spdk_thread *g_thread_ut;
+static struct spdk_thread *g_thread_io;
+static bool g_wait_for_tests = false;
+static int g_num_failures = 0;
 
 struct io_target {
 	struct spdk_bdev	*bdev;
@@ -70,15 +75,14 @@ struct bdevio_request {
 };
 
 struct io_target *g_io_targets = NULL;
+struct io_target *g_current_io_target = NULL;
+static void rpc_perform_tests_cb(unsigned num_failures, struct spdk_jsonrpc_request *request);
 
 static void
-execute_spdk_function(spdk_event_fn fn, void *arg1, void *arg2)
+execute_spdk_function(spdk_msg_fn fn, void *arg)
 {
-	struct spdk_event *event;
-
-	event = spdk_event_allocate(g_lcore_id_io, fn, arg1, arg2);
 	pthread_mutex_lock(&g_test_mutex);
-	spdk_event_call(event);
+	spdk_thread_send_msg(g_thread_io, fn, arg);
 	pthread_cond_wait(&g_test_cond, &g_test_mutex);
 	pthread_mutex_unlock(&g_test_mutex);
 }
@@ -92,9 +96,9 @@ wake_ut_thread(void)
 }
 
 static void
-__get_io_channel(void *arg1, void *arg2)
+__get_io_channel(void *arg)
 {
-	struct io_target *target = arg1;
+	struct io_target *target = arg;
 
 	target->ch = spdk_bdev_get_io_channel(target->bdev_desc);
 	assert(target->ch);
@@ -102,52 +106,68 @@ __get_io_channel(void *arg1, void *arg2)
 }
 
 static int
+bdevio_construct_target(struct spdk_bdev *bdev)
+{
+	struct io_target *target;
+	int rc;
+	uint64_t num_blocks = spdk_bdev_get_num_blocks(bdev);
+	uint32_t block_size = spdk_bdev_get_block_size(bdev);
+
+	target = malloc(sizeof(struct io_target));
+	if (target == NULL) {
+		return -ENOMEM;
+	}
+
+	rc = spdk_bdev_open(bdev, true, NULL, NULL, &target->bdev_desc);
+	if (rc != 0) {
+		free(target);
+		SPDK_ERRLOG("Could not open leaf bdev %s, error=%d\n", spdk_bdev_get_name(bdev), rc);
+		return rc;
+	}
+
+	printf("  %s: %" PRIu64 " blocks of %" PRIu32 " bytes (%" PRIu64 " MiB)\n",
+	       spdk_bdev_get_name(bdev),
+	       num_blocks, block_size,
+	       (num_blocks * block_size + 1024 * 1024 - 1) / (1024 * 1024));
+
+	target->bdev = bdev;
+	target->next = g_io_targets;
+	execute_spdk_function(__get_io_channel, target);
+	g_io_targets = target;
+
+	return 0;
+}
+
+static int
 bdevio_construct_targets(void)
 {
 	struct spdk_bdev *bdev;
-	struct io_target *target;
 	int rc;
 
 	printf("I/O targets:\n");
 
 	bdev = spdk_bdev_first_leaf();
 	while (bdev != NULL) {
-		uint64_t num_blocks = spdk_bdev_get_num_blocks(bdev);
-		uint32_t block_size = spdk_bdev_get_block_size(bdev);
-
-		target = malloc(sizeof(struct io_target));
-		if (target == NULL) {
-			return -ENOMEM;
+		rc = bdevio_construct_target(bdev);
+		if (rc < 0) {
+			SPDK_ERRLOG("Could not construct bdev %s, error=%d\n", spdk_bdev_get_name(bdev), rc);
+			return rc;
 		}
-
-		rc = spdk_bdev_open(bdev, true, NULL, NULL, &target->bdev_desc);
-		if (rc != 0) {
-			free(target);
-			SPDK_ERRLOG("Could not open leaf bdev %s, error=%d\n", spdk_bdev_get_name(bdev), rc);
-			bdev = spdk_bdev_next_leaf(bdev);
-			continue;
-		}
-
-		printf("  %s: %" PRIu64 " blocks of %" PRIu32 " bytes (%" PRIu64 " MiB)\n",
-		       spdk_bdev_get_name(bdev),
-		       num_blocks, block_size,
-		       (num_blocks * block_size + 1024 * 1024 - 1) / (1024 * 1024));
-
-		target->bdev = bdev;
-		target->next = g_io_targets;
-		execute_spdk_function(__get_io_channel, target, NULL);
-		g_io_targets = target;
-
 		bdev = spdk_bdev_next_leaf(bdev);
+	}
+
+	if (g_io_targets == NULL) {
+		SPDK_ERRLOG("No bdevs to perform tests on\n");
+		return -1;
 	}
 
 	return 0;
 }
 
 static void
-__put_io_channel(void *arg1, void *arg2)
+__put_io_channel(void *arg)
 {
-	struct io_target *target = arg1;
+	struct io_target *target = arg;
 
 	spdk_put_io_channel(target->ch);
 	wake_ut_thread();
@@ -160,7 +180,7 @@ bdevio_cleanup_targets(void)
 
 	target = g_io_targets;
 	while (target != NULL) {
-		execute_spdk_function(__put_io_channel, target, NULL);
+		execute_spdk_function(__put_io_channel, target);
 		spdk_bdev_close(target->bdev_desc);
 		g_io_targets = target->next;
 		free(target);
@@ -173,7 +193,7 @@ static bool g_completion_success;
 static void
 initialize_buffer(char **buf, int pattern, int size)
 {
-	*buf = spdk_dma_zmalloc(size, 0x1000, NULL);
+	*buf = spdk_zmalloc(size, 0x1000, NULL, SPDK_ENV_LCORE_ID_ANY, SPDK_MALLOC_DMA);
 	memset(*buf, pattern, size);
 }
 
@@ -186,9 +206,9 @@ quick_test_complete(struct spdk_bdev_io *bdev_io, bool success, void *arg)
 }
 
 static void
-__blockdev_write(void *arg1, void *arg2)
+__blockdev_write(void *arg)
 {
-	struct bdevio_request *req = arg1;
+	struct bdevio_request *req = arg;
 	struct io_target *target = req->target;
 	int rc;
 
@@ -207,9 +227,9 @@ __blockdev_write(void *arg1, void *arg2)
 }
 
 static void
-__blockdev_write_zeroes(void *arg1, void *arg2)
+__blockdev_write_zeroes(void *arg)
 {
-	struct bdevio_request *req = arg1;
+	struct bdevio_request *req = arg;
 	struct io_target *target = req->target;
 	int rc;
 
@@ -261,7 +281,7 @@ blockdev_write(struct io_target *target, char *tx_buf,
 
 	g_completion_success = false;
 
-	execute_spdk_function(__blockdev_write, &req, NULL);
+	execute_spdk_function(__blockdev_write, &req);
 }
 
 static void
@@ -277,13 +297,13 @@ blockdev_write_zeroes(struct io_target *target, char *tx_buf,
 
 	g_completion_success = false;
 
-	execute_spdk_function(__blockdev_write_zeroes, &req, NULL);
+	execute_spdk_function(__blockdev_write_zeroes, &req);
 }
 
 static void
-__blockdev_read(void *arg1, void *arg2)
+__blockdev_read(void *arg)
 {
-	struct bdevio_request *req = arg1;
+	struct bdevio_request *req = arg;
 	struct io_target *target = req->target;
 	int rc;
 
@@ -316,7 +336,7 @@ blockdev_read(struct io_target *target, char *rx_buf,
 
 	g_completion_success = false;
 
-	execute_spdk_function(__blockdev_read, &req, NULL);
+	execute_spdk_function(__blockdev_read, &req);
 }
 
 static int
@@ -325,8 +345,8 @@ blockdev_write_read_data_match(char *rx_buf, char *tx_buf, int data_length)
 	int rc;
 	rc = memcmp(rx_buf, tx_buf, data_length);
 
-	spdk_dma_free(rx_buf);
-	spdk_dma_free(tx_buf);
+	spdk_free(rx_buf);
+	spdk_free(tx_buf);
 
 	return rc;
 }
@@ -340,48 +360,44 @@ blockdev_write_read(uint32_t data_length, uint32_t iov_len, int pattern, uint64_
 	char	*rx_buf = NULL;
 	int	rc;
 
-	target = g_io_targets;
-	while (target != NULL) {
-		if (data_length < spdk_bdev_get_block_size(target->bdev) ||
-		    data_length / spdk_bdev_get_block_size(target->bdev) > spdk_bdev_get_num_blocks(target->bdev)) {
-			target = target->next;
-			continue;
-		}
+	target = g_current_io_target;
 
-		if (!write_zeroes) {
-			initialize_buffer(&tx_buf, pattern, data_length);
-			initialize_buffer(&rx_buf, 0, data_length);
+	if (data_length < spdk_bdev_get_block_size(target->bdev) ||
+	    data_length / spdk_bdev_get_block_size(target->bdev) > spdk_bdev_get_num_blocks(target->bdev)) {
+		return;
+	}
 
-			blockdev_write(target, tx_buf, offset, data_length, iov_len);
-		} else {
-			initialize_buffer(&tx_buf, 0, data_length);
-			initialize_buffer(&rx_buf, pattern, data_length);
+	if (!write_zeroes) {
+		initialize_buffer(&tx_buf, pattern, data_length);
+		initialize_buffer(&rx_buf, 0, data_length);
 
-			blockdev_write_zeroes(target, tx_buf, offset, data_length);
-		}
+		blockdev_write(target, tx_buf, offset, data_length, iov_len);
+	} else {
+		initialize_buffer(&tx_buf, 0, data_length);
+		initialize_buffer(&rx_buf, pattern, data_length);
+
+		blockdev_write_zeroes(target, tx_buf, offset, data_length);
+	}
 
 
-		if (expected_rc == 0) {
-			CU_ASSERT_EQUAL(g_completion_success, true);
-		} else {
-			CU_ASSERT_EQUAL(g_completion_success, false);
-		}
-		blockdev_read(target, rx_buf, offset, data_length, iov_len);
+	if (expected_rc == 0) {
+		CU_ASSERT_EQUAL(g_completion_success, true);
+	} else {
+		CU_ASSERT_EQUAL(g_completion_success, false);
+	}
+	blockdev_read(target, rx_buf, offset, data_length, iov_len);
 
-		if (expected_rc == 0) {
-			CU_ASSERT_EQUAL(g_completion_success, true);
-		} else {
-			CU_ASSERT_EQUAL(g_completion_success, false);
-		}
+	if (expected_rc == 0) {
+		CU_ASSERT_EQUAL(g_completion_success, true);
+	} else {
+		CU_ASSERT_EQUAL(g_completion_success, false);
+	}
 
-		if (g_completion_success) {
-			rc = blockdev_write_read_data_match(rx_buf, tx_buf, data_length);
-			/* Assert the write by comparing it with values read
-			 * from each blockdev */
-			CU_ASSERT_EQUAL(rc, 0);
-		}
-
-		target = target->next;
+	if (g_completion_success) {
+		rc = blockdev_write_read_data_match(rx_buf, tx_buf, data_length);
+		/* Assert the write by comparing it with values read
+		 * from each blockdev */
+		CU_ASSERT_EQUAL(rc, 0);
 	}
 }
 
@@ -670,33 +686,29 @@ blockdev_write_read_offset_plus_nbytes_equals_bdev_size(void)
 	uint32_t block_size;
 	int rc;
 
-	target = g_io_targets;
-	while (target != NULL) {
-		bdev = target->bdev;
+	target = g_current_io_target;
+	bdev = target->bdev;
 
-		block_size = spdk_bdev_get_block_size(bdev);
+	block_size = spdk_bdev_get_block_size(bdev);
 
-		/* The start offset has been set to a marginal value
-		 * such that offset + nbytes == Total size of
-		 * blockdev. */
-		offset = ((spdk_bdev_get_num_blocks(bdev) - 1) * block_size);
+	/* The start offset has been set to a marginal value
+	 * such that offset + nbytes == Total size of
+	 * blockdev. */
+	offset = ((spdk_bdev_get_num_blocks(bdev) - 1) * block_size);
 
-		initialize_buffer(&tx_buf, 0xA3, block_size);
-		initialize_buffer(&rx_buf, 0, block_size);
+	initialize_buffer(&tx_buf, 0xA3, block_size);
+	initialize_buffer(&rx_buf, 0, block_size);
 
-		blockdev_write(target, tx_buf, offset, block_size, 0);
-		CU_ASSERT_EQUAL(g_completion_success, true);
+	blockdev_write(target, tx_buf, offset, block_size, 0);
+	CU_ASSERT_EQUAL(g_completion_success, true);
 
-		blockdev_read(target, rx_buf, offset, block_size, 0);
-		CU_ASSERT_EQUAL(g_completion_success, true);
+	blockdev_read(target, rx_buf, offset, block_size, 0);
+	CU_ASSERT_EQUAL(g_completion_success, true);
 
-		rc = blockdev_write_read_data_match(rx_buf, tx_buf, block_size);
-		/* Assert the write by comparing it with values read
-		 * from each blockdev */
-		CU_ASSERT_EQUAL(rc, 0);
-
-		target = target->next;
-	}
+	rc = blockdev_write_read_data_match(rx_buf, tx_buf, block_size);
+	/* Assert the write by comparing it with values read
+	 * from each blockdev */
+	CU_ASSERT_EQUAL(rc, 0);
 }
 
 static void
@@ -715,26 +727,22 @@ blockdev_write_read_offset_plus_nbytes_gt_bdev_size(void)
 	CU_ASSERT_TRUE(data_length < BUFFER_SIZE);
 	pattern = 0xA3;
 
-	target = g_io_targets;
-	while (target != NULL) {
-		bdev = target->bdev;
+	target = g_current_io_target;
+	bdev = target->bdev;
 
-		/* The start offset has been set to a valid value
-		 * but offset + nbytes is greater than the Total size
-		 * of the blockdev. The test should fail. */
-		offset = ((spdk_bdev_get_num_blocks(bdev) * spdk_bdev_get_block_size(bdev)) - 1024);
+	/* The start offset has been set to a valid value
+	 * but offset + nbytes is greater than the Total size
+	 * of the blockdev. The test should fail. */
+	offset = ((spdk_bdev_get_num_blocks(bdev) * spdk_bdev_get_block_size(bdev)) - 1024);
 
-		initialize_buffer(&tx_buf, pattern, data_length);
-		initialize_buffer(&rx_buf, 0, data_length);
+	initialize_buffer(&tx_buf, pattern, data_length);
+	initialize_buffer(&rx_buf, 0, data_length);
 
-		blockdev_write(target, tx_buf, offset, data_length, 0);
-		CU_ASSERT_EQUAL(g_completion_success, false);
+	blockdev_write(target, tx_buf, offset, data_length, 0);
+	CU_ASSERT_EQUAL(g_completion_success, false);
 
-		blockdev_read(target, rx_buf, offset, data_length, 0);
-		CU_ASSERT_EQUAL(g_completion_success, false);
-
-		target = target->next;
-	}
+	blockdev_read(target, rx_buf, offset, data_length, 0);
+	CU_ASSERT_EQUAL(g_completion_success, false);
 }
 
 static void
@@ -791,9 +799,9 @@ blockdev_overlapped_write_read_8k(void)
 }
 
 static void
-__blockdev_reset(void *arg1, void *arg2)
+__blockdev_reset(void *arg)
 {
-	struct bdevio_request *req = arg1;
+	struct bdevio_request *req = arg;
 	struct io_target *target = req->target;
 	int rc;
 
@@ -805,28 +813,23 @@ __blockdev_reset(void *arg1, void *arg2)
 }
 
 static void
-blockdev_reset(struct io_target *target)
+blockdev_test_reset(void)
 {
 	struct bdevio_request req;
+	struct io_target *target;
 
+	target = g_current_io_target;
 	req.target = target;
 
 	g_completion_success = false;
 
-	execute_spdk_function(__blockdev_reset, &req, NULL);
-}
+	execute_spdk_function(__blockdev_reset, &req);
 
-static void
-blockdev_test_reset(void)
-{
-	struct io_target	*target;
-
-	target = g_io_targets;
-	while (target != NULL) {
-		blockdev_reset(target);
+	/* Workaround: NVMe-oF target doesn't support reset yet - so for now
+	 *  don't fail the test if it's an NVMe bdev.
+	 */
+	if (!spdk_bdev_io_type_supported(target->bdev, SPDK_BDEV_IO_TYPE_NVME_IO)) {
 		CU_ASSERT_EQUAL(g_completion_success, true);
-
-		target = target->next;
 	}
 }
 
@@ -837,6 +840,7 @@ struct bdevio_passthrough_request {
 	struct io_target *target;
 	int sct;
 	int sc;
+	uint32_t cdw0;
 };
 
 static void
@@ -844,15 +848,15 @@ nvme_pt_test_complete(struct spdk_bdev_io *bdev_io, bool success, void *arg)
 {
 	struct bdevio_passthrough_request *pt_req = arg;
 
-	spdk_bdev_io_get_nvme_status(bdev_io, &pt_req->sct, &pt_req->sc);
+	spdk_bdev_io_get_nvme_status(bdev_io, &pt_req->cdw0, &pt_req->sct, &pt_req->sc);
 	spdk_bdev_free_io(bdev_io);
 	wake_ut_thread();
 }
 
 static void
-__blockdev_nvme_passthru(void *arg1, void *arg2)
+__blockdev_nvme_passthru(void *arg)
 {
-	struct bdevio_passthrough_request *pt_req = arg1;
+	struct bdevio_passthrough_request *pt_req = arg;
 	struct io_target *target = pt_req->target;
 	int rc;
 
@@ -865,10 +869,13 @@ __blockdev_nvme_passthru(void *arg1, void *arg2)
 }
 
 static void
-blockdev_nvme_passthru_rw(struct io_target *target)
+blockdev_test_nvme_passthru_rw(void)
 {
 	struct bdevio_passthrough_request pt_req;
 	void *write_buf, *read_buf;
+	struct io_target *target;
+
+	target = g_current_io_target;
 
 	if (!spdk_bdev_io_type_supported(target->bdev, SPDK_BDEV_IO_TYPE_NVME_IO)) {
 		return;
@@ -882,47 +889,38 @@ blockdev_nvme_passthru_rw(struct io_target *target)
 	pt_req.cmd.cdw12 = 0;
 
 	pt_req.len = spdk_bdev_get_block_size(target->bdev);
-	write_buf = spdk_dma_malloc(pt_req.len, 0, NULL);
+	write_buf = spdk_malloc(pt_req.len, 0, NULL, SPDK_ENV_LCORE_ID_ANY, SPDK_MALLOC_DMA);
 	memset(write_buf, 0xA5, pt_req.len);
 	pt_req.buf = write_buf;
 
 	pt_req.sct = SPDK_NVME_SCT_VENDOR_SPECIFIC;
 	pt_req.sc = SPDK_NVME_SC_INVALID_FIELD;
-	execute_spdk_function(__blockdev_nvme_passthru, &pt_req, NULL);
+	execute_spdk_function(__blockdev_nvme_passthru, &pt_req);
 	CU_ASSERT(pt_req.sct == SPDK_NVME_SCT_GENERIC);
 	CU_ASSERT(pt_req.sc == SPDK_NVME_SC_SUCCESS);
 
 	pt_req.cmd.opc = SPDK_NVME_OPC_READ;
-	read_buf = spdk_dma_zmalloc(pt_req.len, 0, NULL);
+	read_buf = spdk_zmalloc(pt_req.len, 0, NULL, SPDK_ENV_LCORE_ID_ANY, SPDK_MALLOC_DMA);
 	pt_req.buf = read_buf;
 
 	pt_req.sct = SPDK_NVME_SCT_VENDOR_SPECIFIC;
 	pt_req.sc = SPDK_NVME_SC_INVALID_FIELD;
-	execute_spdk_function(__blockdev_nvme_passthru, &pt_req, NULL);
+	execute_spdk_function(__blockdev_nvme_passthru, &pt_req);
 	CU_ASSERT(pt_req.sct == SPDK_NVME_SCT_GENERIC);
 	CU_ASSERT(pt_req.sc == SPDK_NVME_SC_SUCCESS);
 
 	CU_ASSERT(!memcmp(read_buf, write_buf, pt_req.len));
-	spdk_dma_free(read_buf);
-	spdk_dma_free(write_buf);
+	spdk_free(read_buf);
+	spdk_free(write_buf);
 }
 
 static void
-blockdev_test_nvme_passthru_rw(void)
-{
-	struct io_target	*target;
-
-	target = g_io_targets;
-	while (target != NULL) {
-		blockdev_nvme_passthru_rw(target);
-		target = target->next;
-	}
-}
-
-static void
-blockdev_nvme_passthru_vendor_specific(struct io_target *target)
+blockdev_test_nvme_passthru_vendor_specific(void)
 {
 	struct bdevio_passthrough_request pt_req;
+	struct io_target *target;
+
+	target = g_current_io_target;
 
 	if (!spdk_bdev_io_type_supported(target->bdev, SPDK_BDEV_IO_TYPE_NVME_IO)) {
 		return;
@@ -935,58 +933,112 @@ blockdev_nvme_passthru_vendor_specific(struct io_target *target)
 
 	pt_req.sct = SPDK_NVME_SCT_VENDOR_SPECIFIC;
 	pt_req.sc = SPDK_NVME_SC_SUCCESS;
-	execute_spdk_function(__blockdev_nvme_passthru, &pt_req, NULL);
+	pt_req.cdw0 = 0xbeef;
+	execute_spdk_function(__blockdev_nvme_passthru, &pt_req);
 	CU_ASSERT(pt_req.sct == SPDK_NVME_SCT_GENERIC);
 	CU_ASSERT(pt_req.sc == SPDK_NVME_SC_INVALID_OPCODE);
+	CU_ASSERT(pt_req.cdw0 == 0x0);
 }
 
 static void
-blockdev_test_nvme_passthru_vendor_specific(void)
+__blockdev_nvme_admin_passthru(void *arg)
 {
-	struct io_target	*target;
+	struct bdevio_passthrough_request *pt_req = arg;
+	struct io_target *target = pt_req->target;
+	int rc;
 
-	target = g_io_targets;
-	while (target != NULL) {
-		blockdev_nvme_passthru_vendor_specific(target);
-		target = target->next;
+	rc = spdk_bdev_nvme_admin_passthru(target->bdev_desc, target->ch,
+					   &pt_req->cmd, pt_req->buf, pt_req->len,
+					   nvme_pt_test_complete, pt_req);
+	if (rc) {
+		wake_ut_thread();
 	}
 }
 
 static void
-__stop_init_thread(void *arg1, void *arg2)
+blockdev_test_nvme_admin_passthru(void)
 {
-	unsigned num_failures = (unsigned)(uintptr_t)arg1;
+	struct io_target *target;
+	struct bdevio_passthrough_request pt_req;
+
+	target = g_current_io_target;
+
+	if (!spdk_bdev_io_type_supported(target->bdev, SPDK_BDEV_IO_TYPE_NVME_ADMIN)) {
+		return;
+	}
+
+	memset(&pt_req, 0, sizeof(pt_req));
+	pt_req.target = target;
+	pt_req.cmd.opc = SPDK_NVME_OPC_IDENTIFY;
+	pt_req.cmd.nsid = 0;
+	*(uint64_t *)&pt_req.cmd.cdw10 = SPDK_NVME_IDENTIFY_CTRLR;
+
+	pt_req.len = sizeof(struct spdk_nvme_ctrlr_data);
+	pt_req.buf = spdk_malloc(pt_req.len, 0, NULL, SPDK_ENV_LCORE_ID_ANY, SPDK_MALLOC_DMA);
+
+	pt_req.sct = SPDK_NVME_SCT_GENERIC;
+	pt_req.sc = SPDK_NVME_SC_SUCCESS;
+	execute_spdk_function(__blockdev_nvme_admin_passthru, &pt_req);
+	CU_ASSERT(pt_req.sct == SPDK_NVME_SCT_GENERIC);
+	CU_ASSERT(pt_req.sc == SPDK_NVME_SC_SUCCESS);
+}
+
+static void
+__stop_init_thread(void *arg)
+{
+	unsigned num_failures = g_num_failures;
+	struct spdk_jsonrpc_request *request = arg;
+
+	g_num_failures = 0;
 
 	bdevio_cleanup_targets();
+	if (g_wait_for_tests) {
+		/* Do not stop the app yet, wait for another RPC */
+		rpc_perform_tests_cb(num_failures, request);
+		return;
+	}
 	spdk_app_stop(num_failures);
 }
 
 static void
-stop_init_thread(unsigned num_failures)
+stop_init_thread(unsigned num_failures, struct spdk_jsonrpc_request *request)
 {
-	struct spdk_event *event;
+	g_num_failures = num_failures;
 
-	event = spdk_event_allocate(g_lcore_id_init, __stop_init_thread,
-				    (void *)(uintptr_t)num_failures, NULL);
-	spdk_event_call(event);
+	spdk_thread_send_msg(g_thread_init, __stop_init_thread, request);
 }
 
-static void
-__run_ut_thread(void *arg1, void *arg2)
+static int
+suite_init(void)
 {
-	CU_pSuite suite = NULL;
-	unsigned num_failures;
-
-	if (CU_initialize_registry() != CUE_SUCCESS) {
-		stop_init_thread(CU_get_error());
-		return;
+	if (g_current_io_target == NULL) {
+		g_current_io_target = g_io_targets;
 	}
+	return 0;
+}
 
-	suite = CU_add_suite("components_suite", NULL, NULL);
+static int
+suite_fini(void)
+{
+	g_current_io_target = g_current_io_target->next;
+	return 0;
+}
+
+#define SUITE_NAME_MAX 64
+
+static int
+__setup_ut_on_single_target(struct io_target *target)
+{
+	unsigned rc = 0;
+	CU_pSuite suite = NULL;
+	char name[SUITE_NAME_MAX];
+
+	snprintf(name, sizeof(name), "bdevio tests on: %s", spdk_bdev_get_name(target->bdev));
+	suite = CU_add_suite(name, suite_init, suite_fini);
 	if (suite == NULL) {
 		CU_cleanup_registry();
-		stop_init_thread(CU_get_error());
-		return;
+		rc = CU_get_error();
+		return -rc;
 	}
 
 	if (
@@ -995,6 +1047,8 @@ __run_ut_thread(void *arg1, void *arg2)
 		|| CU_add_test(suite, "blockdev write zeroes read 1m", blockdev_write_zeroes_read_1m) == NULL
 		|| CU_add_test(suite, "blockdev write zeroes read 3m", blockdev_write_zeroes_read_3m) == NULL
 		|| CU_add_test(suite, "blockdev write zeroes read 3.5m", blockdev_write_zeroes_read_3m_500k) == NULL
+		|| CU_add_test(suite, "blockdev reset",
+			       blockdev_test_reset) == NULL
 		|| CU_add_test(suite, "blockdev write read 512 bytes",
 			       blockdev_write_read_512Bytes) == NULL
 		|| CU_add_test(suite, "blockdev write read size > 128k",
@@ -1022,59 +1076,213 @@ __run_ut_thread(void *arg1, void *arg2)
 			       blockdev_test_nvme_passthru_rw) == NULL
 		|| CU_add_test(suite, "blockdev nvme passthru vendor specific",
 			       blockdev_test_nvme_passthru_vendor_specific) == NULL
-		|| CU_add_test(suite, "blockdev reset",
-			       blockdev_test_reset) == NULL
+		|| CU_add_test(suite, "blockdev nvme admin passthru",
+			       blockdev_test_nvme_admin_passthru) == NULL
 	) {
 		CU_cleanup_registry();
-		stop_init_thread(CU_get_error());
-		return;
+		rc = CU_get_error();
+		return -rc;
+	}
+	return 0;
+}
+
+static void
+__run_ut_thread(void *arg)
+{
+	struct spdk_jsonrpc_request *request = arg;
+	int rc = 0;
+	struct io_target *target;
+	unsigned num_failures;
+
+	if (CU_initialize_registry() != CUE_SUCCESS) {
+		/* CUnit error, probably won't recover */
+		rc = CU_get_error();
+		stop_init_thread(-rc, request);
 	}
 
+	target = g_io_targets;
+	while (target != NULL) {
+		rc = __setup_ut_on_single_target(target);
+		if (rc < 0) {
+			/* CUnit error, probably won't recover */
+			stop_init_thread(-rc, request);
+		}
+		target = target->next;
+	}
 	CU_basic_set_mode(CU_BRM_VERBOSE);
 	CU_basic_run_tests();
 	num_failures = CU_get_number_of_failures();
 	CU_cleanup_registry();
-	stop_init_thread(num_failures);
+
+	stop_init_thread(num_failures, request);
 }
 
 static void
-test_main(void *arg1)
+__construct_targets(void *arg)
 {
-	struct spdk_event *event;
-
-	pthread_mutex_init(&g_test_mutex, NULL);
-	pthread_cond_init(&g_test_cond, NULL);
-
-	g_lcore_id_init = spdk_env_get_first_core();
-	g_lcore_id_ut = spdk_env_get_next_core(g_lcore_id_init);
-	g_lcore_id_io = spdk_env_get_next_core(g_lcore_id_ut);
-
-	if (g_lcore_id_init == SPDK_ENV_LCORE_ID_ANY ||
-	    g_lcore_id_ut == SPDK_ENV_LCORE_ID_ANY ||
-	    g_lcore_id_io == SPDK_ENV_LCORE_ID_ANY) {
-		SPDK_ERRLOG("Could not reserve 3 separate threads.\n");
-		spdk_app_stop(-1);
-	}
-
 	if (bdevio_construct_targets() < 0) {
 		spdk_app_stop(-1);
 		return;
 	}
 
-	event = spdk_event_allocate(g_lcore_id_ut, __run_ut_thread, NULL, NULL);
-	spdk_event_call(event);
+	spdk_thread_send_msg(g_thread_ut, __run_ut_thread, NULL);
+}
+
+static void
+test_main(void *arg1)
+{
+	struct spdk_cpuset tmpmask = {}, *appmask;
+	uint32_t cpu, init_cpu;
+
+	pthread_mutex_init(&g_test_mutex, NULL);
+	pthread_cond_init(&g_test_cond, NULL);
+
+	appmask = spdk_app_get_core_mask();
+
+	if (spdk_cpuset_count(appmask) < 3) {
+		spdk_app_stop(-1);
+		return;
+	}
+
+	init_cpu = spdk_env_get_current_core();
+	g_thread_init = spdk_get_thread();
+
+	for (cpu = 0; cpu < SPDK_ENV_LCORE_ID_ANY; cpu++) {
+		if (cpu != init_cpu && spdk_cpuset_get_cpu(appmask, cpu)) {
+			spdk_cpuset_zero(&tmpmask);
+			spdk_cpuset_set_cpu(&tmpmask, cpu, true);
+			g_thread_ut = spdk_thread_create("ut_thread", &tmpmask);
+			break;
+		}
+	}
+
+	if (cpu == SPDK_ENV_LCORE_ID_ANY) {
+		spdk_app_stop(-1);
+		return;
+	}
+
+	for (cpu++; cpu < SPDK_ENV_LCORE_ID_ANY; cpu++) {
+		if (cpu != init_cpu && spdk_cpuset_get_cpu(appmask, cpu)) {
+			spdk_cpuset_zero(&tmpmask);
+			spdk_cpuset_set_cpu(&tmpmask, cpu, true);
+			g_thread_io = spdk_thread_create("io_thread", &tmpmask);
+			break;
+		}
+	}
+
+	if (cpu == SPDK_ENV_LCORE_ID_ANY) {
+		spdk_app_stop(-1);
+		return;
+	}
+
+	if (g_wait_for_tests) {
+		/* Do not perform any tests until RPC is received */
+		return;
+	}
+
+	spdk_thread_send_msg(g_thread_init, __construct_targets, NULL);
 }
 
 static void
 bdevio_usage(void)
 {
+	printf(" -w                        start bdevio app and wait for RPC to start the tests\n");
 }
 
 static int
 bdevio_parse_arg(int ch, char *arg)
 {
+	switch (ch) {
+	case 'w':
+		g_wait_for_tests =  true;
+		break;
+	default:
+		return -EINVAL;
+	}
 	return 0;
 }
+
+struct rpc_perform_tests {
+	char *name;
+};
+
+static void
+free_rpc_perform_tests(struct rpc_perform_tests *r)
+{
+	free(r->name);
+}
+
+static const struct spdk_json_object_decoder rpc_perform_tests_decoders[] = {
+	{"name", offsetof(struct rpc_perform_tests, name), spdk_json_decode_string, true},
+};
+
+static void
+rpc_perform_tests_cb(unsigned num_failures, struct spdk_jsonrpc_request *request)
+{
+	struct spdk_json_write_ctx *w;
+
+	if (num_failures == 0) {
+		w = spdk_jsonrpc_begin_result(request);
+		spdk_json_write_uint32(w, num_failures);
+		spdk_jsonrpc_end_result(request, w);
+	} else {
+		spdk_jsonrpc_send_error_response_fmt(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+						     "%d test cases failed", num_failures);
+	}
+}
+
+static void
+rpc_perform_tests(struct spdk_jsonrpc_request *request, const struct spdk_json_val *params)
+{
+	struct rpc_perform_tests req = {NULL};
+	struct spdk_bdev *bdev;
+	int rc;
+
+	if (params && spdk_json_decode_object(params, rpc_perform_tests_decoders,
+					      SPDK_COUNTOF(rpc_perform_tests_decoders),
+					      &req)) {
+		SPDK_ERRLOG("spdk_json_decode_object failed\n");
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS, "Invalid parameters");
+		goto invalid;
+	}
+
+	if (req.name) {
+		bdev = spdk_bdev_get_by_name(req.name);
+		if (bdev == NULL) {
+			SPDK_ERRLOG("Bdev '%s' does not exist\n", req.name);
+			spdk_jsonrpc_send_error_response_fmt(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+							     "Bdev '%s' does not exist: %s",
+							     req.name, spdk_strerror(ENODEV));
+			goto invalid;
+		}
+		rc = bdevio_construct_target(bdev);
+		if (rc < 0) {
+			SPDK_ERRLOG("Could not construct target for bdev '%s'\n", spdk_bdev_get_name(bdev));
+			spdk_jsonrpc_send_error_response_fmt(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+							     "Could not construct target for bdev '%s': %s",
+							     spdk_bdev_get_name(bdev), spdk_strerror(-rc));
+			goto invalid;
+		}
+	} else {
+		rc = bdevio_construct_targets();
+		if (rc < 0) {
+			SPDK_ERRLOG("Could not construct targets for all bdevs\n");
+			spdk_jsonrpc_send_error_response_fmt(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+							     "Could not construct targets for all bdevs: %s",
+							     spdk_strerror(-rc));
+			goto invalid;
+		}
+	}
+	free_rpc_perform_tests(&req);
+
+	spdk_thread_send_msg(g_thread_ut, __run_ut_thread, request);
+
+	return;
+
+invalid:
+	free_rpc_perform_tests(&req);
+}
+SPDK_RPC_REGISTER("perform_tests", rpc_perform_tests, SPDK_RPC_RUNTIME)
 
 int
 main(int argc, char **argv)
@@ -1084,10 +1292,9 @@ main(int argc, char **argv)
 
 	spdk_app_opts_init(&opts);
 	opts.name = "bdevio";
-	opts.rpc_addr = NULL;
 	opts.reactor_mask = "0x7";
 
-	if ((rc = spdk_app_parse_args(argc, argv, &opts, "", NULL,
+	if ((rc = spdk_app_parse_args(argc, argv, &opts, "w", NULL,
 				      bdevio_parse_arg, bdevio_usage)) !=
 	    SPDK_APP_PARSE_ARGS_SUCCESS) {
 		return rc;

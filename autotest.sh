@@ -4,15 +4,14 @@ rootdir=$(readlink -f $(dirname $0))
 
 # In autotest_common.sh all tests are disabled by default.
 # If the configuration of tests is not provided, no tests will be carried out.
-if [[ -z $1 ]]; then
-	echo "SPDK test configuration not specified"
+if [[ ! -f $1 ]]; then
+	echo "ERROR: SPDK test configuration not specified"
 	exit 1
 fi
 
+source "$1"
 source "$rootdir/test/common/autotest_common.sh"
 source "$rootdir/test/nvmf/common.sh"
-
-set -xe
 
 if [ $EUID -ne 0 ]; then
 	echo "$0 must be run as root"
@@ -80,7 +79,8 @@ if [ $(uname -s) = Linux ]; then
 	# discover if it is OCSSD or not so load the kernel driver first.
 
 
-	for dev in $(find /dev -maxdepth 1 -regex '/dev/nvme[0-9]+'); do
+	while IFS= read -r -d '' dev
+	do
 		# Send Open Channel 2.0 Geometry opcode "0xe2" - not supported by NVMe device.
 		if nvme admin-passthru $dev --namespace-id=1 --data-len=4096  --opcode=0xe2 --read >/dev/null; then
 			bdf="$(basename $(readlink -e /sys/class/nvme/${dev#/dev/}/device))"
@@ -88,7 +88,7 @@ if [ $(uname -s) = Linux ]; then
 			PCI_BLACKLIST+=" $bdf"
 			OCSSD_PCI_DEVICES+=" $bdf"
 		fi
-	done
+	done <   <(find /dev -maxdepth 1 -regex '/dev/nvme[0-9]+' -print0)
 
 	export OCSSD_PCI_DEVICES
 
@@ -115,10 +115,6 @@ done
 
 sync
 
-if [ $(uname -s) = Linux ]; then
-	# Load RAM disk driver if available
-	modprobe brd || true
-fi
 timing_exit cleanup
 
 # set up huge pages
@@ -138,110 +134,150 @@ if [[ $SPDK_TEST_CRYPTO -eq 1 || $SPDK_TEST_REDUCE -eq 1 ]]; then
 	fi
 fi
 
+# Revert existing OPAL to factory settings that may have been left from earlier failed tests.
+# This ensures we won't hit any unexpected failures due to NVMe SSDs being locked.
+# Disable this for now as we don't have opal test running
+# opal_revert_cleanup
+
 #####################
 # Unit Tests
 #####################
 
 if [ $SPDK_TEST_UNITTEST -eq 1 ]; then
-	timing_enter unittest
-	run_test suite ./test/unit/unittest.sh
+	run_test "unittest" ./test/unit/unittest.sh
 	report_test_completion "unittest"
-	timing_exit unittest
 fi
 
 
 if [ $SPDK_RUN_FUNCTIONAL_TEST -eq 1 ]; then
 	timing_enter lib
 
-	run_test suite test/env/env.sh
-	run_test suite test/rpc_client/rpc_client.sh
-	run_test suite ./test/json_config/json_config.sh
+	run_test "env" test/env/env.sh
+	run_test "rpc_client" test/rpc_client/rpc_client.sh
+	run_test "json_config" ./test/json_config/json_config.sh
+	run_test "alias_rpc" test/json_config/alias_rpc/alias_rpc.sh
+	run_test "spdkcli_tcp" test/spdkcli/tcp.sh
 
 	if [ $SPDK_TEST_BLOCKDEV -eq 1 ]; then
-		run_test suite test/bdev/blockdev.sh
-		run_test suite test/bdev/bdev_raid.sh
+		run_test "blockdev" test/bdev/blockdev.sh
+		run_test "bdev_raid" test/bdev/bdev_raid.sh
 	fi
 
 	if [ $SPDK_TEST_JSON -eq 1 ]; then
-		run_test suite test/config_converter/test_converter.sh
+		run_test "test_converter" test/config_converter/test_converter.sh
 	fi
 
 	if [ $SPDK_TEST_EVENT -eq 1 ]; then
-		run_test suite test/event/event.sh
+		run_test "event" test/event/event.sh
 	fi
 
 	if [ $SPDK_TEST_NVME -eq 1 ]; then
-		run_test suite test/nvme/nvme.sh
-		if [ $SPDK_TEST_NVME_CLI -eq 1 ]; then
-			run_test suite test/nvme/spdk_nvme_cli.sh
+		run_test "nvme" test/nvme/nvme.sh
+		if [[ $SPDK_TEST_NVME_CLI -eq 1 ]]; then
+			run_test "nvme_cli" test/nvme/spdk_nvme_cli.sh
+		fi
+		if [[ $SPDK_TEST_NVME_CUSE -eq 1 ]]; then
+			run_test "nvme_cli_cuse" test/nvme/spdk_nvme_cli_cuse.sh
+			run_test "nvme_smartctl_cuse" test/nvme/spdk_smartctl_cuse.sh
 		fi
 		# Only test hotplug without ASAN enabled. Since if it is
 		# enabled, it catches SEGV earlier than our handler which
 		# breaks the hotplug logic.
-		# Temporary workaround for issue #542, annotated for no VM image.
-		#if [ $SPDK_RUN_ASAN -eq 0 ]; then
-		#	run_test suite test/nvme/hotplug.sh intel
-		#fi
+		if [ $SPDK_RUN_ASAN -eq 0 ]; then
+			run_test "nvme_hotplug" test/nvme/hotplug.sh intel
+		fi
 	fi
 
 	if [ $SPDK_TEST_IOAT -eq 1 ]; then
-		run_test suite test/ioat/ioat.sh
+		run_test "ioat" test/ioat/ioat.sh
 	fi
 
 	timing_exit lib
 
 	if [ $SPDK_TEST_ISCSI -eq 1 ]; then
-		run_test suite ./test/iscsi_tgt/iscsi_tgt.sh posix
-		run_test suite ./test/spdkcli/iscsi.sh
+		run_test "iscsi_tgt_posix" ./test/iscsi_tgt/iscsi_tgt.sh posix
+		run_test "spdkcli_iscsi" ./test/spdkcli/iscsi.sh
+
+		# Run raid spdkcli test under iSCSI since blockdev tests run on systems that can't run spdkcli yet
+		run_test "spdkcli_raid" test/spdkcli/raid.sh
+	fi
+
+	if [ $SPDK_TEST_VPP -eq 1 ]; then
+		run_test "iscsi_tgt_vpp" ./test/iscsi_tgt/iscsi_tgt.sh vpp
 	fi
 
 	if [ $SPDK_TEST_BLOBFS -eq 1 ]; then
-		run_test suite ./test/blobfs/rocksdb/rocksdb.sh
-		run_test suite ./test/blobstore/blobstore.sh
+		run_test "rocksdb" ./test/blobfs/rocksdb/rocksdb.sh
+		run_test "blobstore" ./test/blobstore/blobstore.sh
+		run_test "blobfs" ./test/blobfs/blobfs.sh
 	fi
 
 	if [ $SPDK_TEST_NVMF -eq 1 ]; then
-		run_test suite ./test/nvmf/nvmf.sh
-		run_test suite ./test/spdkcli/nvmf.sh
+		# The NVMe-oF run test cases are split out like this so that the parser that compiles the
+		# list of all tests can properly differentiate them. Please do not merge them into one line.
+		if [ "$SPDK_TEST_NVMF_TRANSPORT" = "rdma" ]; then
+			run_test "nvmf_rdma" ./test/nvmf/nvmf.sh --transport=$SPDK_TEST_NVMF_TRANSPORT
+			run_test "spdkcli_nvmf_rdma" ./test/spdkcli/nvmf.sh
+		elif [ "$SPDK_TEST_NVMF_TRANSPORT" = "tcp" ]; then
+			run_test "nvmf_tcp" ./test/nvmf/nvmf.sh --transport=$SPDK_TEST_NVMF_TRANSPORT
+			run_test "spdkcli_nvmf_tcp" ./test/spdkcli/nvmf.sh
+		elif [ "$SPDK_TEST_NVMF_TRANSPORT" = "fc" ]; then
+				run_test "nvmf_fc" ./test/nvmf/nvmf.sh --transport=$SPDK_TEST_NVMF_TRANSPORT
+				run_test "spdkcli_nvmf_fc" ./test/spdkcli/nvmf.sh
+		else
+			echo "unknown NVMe transport, please specify rdma, tcp, or fc."
+			exit 1
+		fi
 	fi
 
 	if [ $SPDK_TEST_VHOST -eq 1 ]; then
-		run_test suite ./test/vhost/vhost.sh
-		report_test_completion "vhost"
+		run_test "vhost" ./test/vhost/vhost.sh
 	fi
 
 	if [ $SPDK_TEST_LVOL -eq 1 ]; then
-		timing_enter lvol
-		run_test suite ./test/lvol/lvol.sh --test-cases=all
-		run_test suite ./test/blobstore/blob_io_wait/blob_io_wait.sh
+		run_test "lvol" ./test/lvol/lvol.sh --test-cases=all
+		run_test "lvol2" ./test/lvol/lvol2.sh
+		run_test "blob_io_wait" ./test/blobstore/blob_io_wait/blob_io_wait.sh
 		report_test_completion "lvol"
-		timing_exit lvol
 	fi
 
 	if [ $SPDK_TEST_VHOST_INIT -eq 1 ]; then
 		timing_enter vhost_initiator
-		run_test suite ./test/vhost/initiator/blockdev.sh
-		run_test suite ./test/spdkcli/virtio.sh
-		run_test suite ./test/vhost/shared/shared.sh
-		report_test_completion "vhost_initiator"
+		run_test "vhost_blockdev" ./test/vhost/initiator/blockdev.sh
+		run_test "spdkcli_virtio" ./test/spdkcli/virtio.sh
+		run_test "vhost_shared" ./test/vhost/shared/shared.sh
+		run_test "vhost_fuzz" ./test/vhost/fuzz/fuzz.sh
+		report_test_completion "vhost initiator"
 		timing_exit vhost_initiator
 	fi
 
 	if [ $SPDK_TEST_PMDK -eq 1 ]; then
-		run_test suite ./test/pmem/pmem.sh -x
-		run_test suite ./test/spdkcli/pmem.sh
+		run_test "pmem" ./test/pmem/pmem.sh -x
+		run_test "spdkcli_pmem" ./test/spdkcli/pmem.sh
 	fi
 
 	if [ $SPDK_TEST_RBD -eq 1 ]; then
-		run_test suite ./test/spdkcli/rbd.sh
+		run_test "spdkcli_rbd" ./test/spdkcli/rbd.sh
 	fi
 
 	if [ $SPDK_TEST_OCF -eq 1 ]; then
-		run_test suite ./test/ocf/ocf.sh
+		run_test "ocf" ./test/ocf/ocf.sh
 	fi
 
-	if [ $SPDK_TEST_BDEV_FTL -eq 1 ]; then
-		run_test suite ./test/ftl/ftl.sh
+	if [ $SPDK_TEST_FTL -eq 1 ]; then
+		run_test "ftl" ./test/ftl/ftl.sh
+	fi
+
+	if [ $SPDK_TEST_VMD -eq 1 ]; then
+		run_test "vmd" ./test/vmd/vmd.sh
+	fi
+
+        if [ $SPDK_TEST_REDUCE -eq 1 ]; then
+                run_test "compress" ./test/compress/compress.sh
+        fi
+
+	if [ $SPDK_TEST_OPAL -eq 1 ]; then
+		run_test "nvme_opal" ./test/nvme/nvme_opal.sh
 	fi
 fi
 

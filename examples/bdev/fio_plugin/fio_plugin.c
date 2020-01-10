@@ -44,10 +44,17 @@
 #include "spdk/util.h"
 
 #include "spdk_internal/thread.h"
+#include "spdk_internal/event.h"
 
 #include "config-host.h"
 #include "fio.h"
 #include "optgroup.h"
+
+/* FreeBSD is missing CLOCK_MONOTONIC_RAW,
+ * so alternative is provided. */
+#ifndef CLOCK_MONOTONIC_RAW /* Defined in glibc bits/time.h */
+#define CLOCK_MONOTONIC_RAW CLOCK_MONOTONIC
+#endif
 
 struct spdk_fio_options {
 	void *pad;
@@ -147,6 +154,7 @@ spdk_fio_cleanup_thread(struct spdk_fio_thread *fio_thread)
 	spdk_set_thread(fio_thread->thread);
 
 	spdk_thread_exit(fio_thread->thread);
+	spdk_thread_destroy(fio_thread->thread);
 	free(fio_thread->iocq);
 	free(fio_thread);
 }
@@ -182,7 +190,7 @@ static pthread_cond_t g_init_cond;
 static bool g_poll_loop = true;
 
 static void
-spdk_fio_bdev_init_done(void *cb_arg, int rc)
+spdk_fio_bdev_init_done(int rc, void *cb_arg)
 {
 	*(bool *)cb_arg = true;
 }
@@ -192,11 +200,7 @@ spdk_fio_bdev_init_start(void *arg)
 {
 	bool *done = arg;
 
-	/* Initialize the copy engine */
-	spdk_copy_engine_initialize();
-
-	/* Initialize the bdev layer */
-	spdk_bdev_initialize(spdk_fio_bdev_init_done, done);
+	spdk_subsystem_init(spdk_fio_bdev_init_done, done);
 }
 
 static void
@@ -206,19 +210,11 @@ spdk_fio_bdev_fini_done(void *cb_arg)
 }
 
 static void
-spdk_fio_copy_fini_start(void *arg)
-{
-	bool *done = arg;
-
-	spdk_copy_engine_finish(spdk_fio_bdev_fini_done, done);
-}
-
-static void
 spdk_fio_bdev_fini_start(void *arg)
 {
 	bool *done = arg;
 
-	spdk_bdev_finish(spdk_fio_copy_fini_start, done);
+	spdk_subsystem_fini(spdk_fio_bdev_fini_done, done);
 }
 
 static void *
@@ -541,6 +537,8 @@ static int
 spdk_fio_io_u_init(struct thread_data *td, struct io_u *io_u)
 {
 	struct spdk_fio_request	*fio_req;
+
+	io_u->engine_data = NULL;
 
 	fio_req = calloc(1, sizeof(*fio_req));
 	if (fio_req == NULL) {

@@ -270,8 +270,8 @@ spdk_iscsi_tgt_node_access(struct spdk_iscsi_conn *conn,
 
 denied:
 	SPDK_DEBUGLOG(SPDK_LOG_ISCSI, "access denied from %s (%s) to %s (%s:%s,%d)\n",
-		      iqn, addr, target->name, conn->portal->host,
-		      conn->portal->port, conn->portal->group->tag);
+		      iqn, addr, target->name, conn->portal_host,
+		      conn->portal_port, conn->pg_tag);
 	return false;
 }
 
@@ -643,9 +643,6 @@ _iscsi_tgt_node_destruct(void *cb_arg, int rc)
 		return;
 	}
 
-	free(target->name);
-	free(target->alias);
-
 	pthread_mutex_lock(&g_spdk_iscsi.mutex);
 	iscsi_tgt_node_delete_all_pg_maps(target);
 	pthread_mutex_unlock(&g_spdk_iscsi.mutex);
@@ -697,7 +694,7 @@ iscsi_tgt_node_destruct(struct spdk_iscsi_tgt_node *target,
 	target->destruct_cb_fn = cb_fn;
 	target->destruct_cb_arg = cb_arg;
 
-	spdk_iscsi_conns_start_exit(target);
+	spdk_iscsi_conns_request_logout(target);
 
 	if (spdk_iscsi_get_active_conns(target) != 0) {
 		target->destruct_poller = spdk_poller_register(iscsi_tgt_node_check_active_conns,
@@ -795,8 +792,8 @@ failed:
 }
 
 int
-spdk_iscsi_tgt_node_add_pg_ig_maps(struct spdk_iscsi_tgt_node *target,
-				   int *pg_tag_list, int *ig_tag_list, uint16_t num_maps)
+spdk_iscsi_target_node_add_pg_ig_maps(struct spdk_iscsi_tgt_node *target,
+				      int *pg_tag_list, int *ig_tag_list, uint16_t num_maps)
 {
 	uint16_t i;
 	int rc;
@@ -823,8 +820,8 @@ invalid:
 }
 
 int
-spdk_iscsi_tgt_node_delete_pg_ig_maps(struct spdk_iscsi_tgt_node *target,
-				      int *pg_tag_list, int *ig_tag_list, uint16_t num_maps)
+spdk_iscsi_target_node_remove_pg_ig_maps(struct spdk_iscsi_tgt_node *target,
+		int *pg_tag_list, int *ig_tag_list, uint16_t num_maps)
 {
 	uint16_t i;
 	int rc;
@@ -968,13 +965,11 @@ spdk_iscsi_tgt_node_construct(int target_index,
 		return NULL;
 	}
 
-	target = malloc(sizeof(*target));
+	target = calloc(1, sizeof(*target));
 	if (!target) {
 		SPDK_ERRLOG("could not allocate target\n");
 		return NULL;
 	}
-
-	memset(target, 0, sizeof(*target));
 
 	rc = pthread_mutex_init(&target->mutex, NULL);
 	if (rc != 0) {
@@ -985,22 +980,14 @@ spdk_iscsi_tgt_node_construct(int target_index,
 
 	target->num = target_index;
 
-	target->name = strdup(fullname);
-	if (!target->name) {
-		SPDK_ERRLOG("Could not allocate TargetName\n");
-		iscsi_tgt_node_destruct(target, NULL, NULL);
-		return NULL;
-	}
+	memcpy(target->name, fullname, strlen(fullname));
 
-	if (alias == NULL) {
-		target->alias = NULL;
-	} else {
-		target->alias = strdup(alias);
-		if (!target->alias) {
-			SPDK_ERRLOG("Could not allocate TargetAlias\n");
+	if (alias != NULL) {
+		if (strlen(alias) > MAX_TARGET_NAME) {
 			iscsi_tgt_node_destruct(target, NULL, NULL);
 			return NULL;
 		}
+		memcpy(target->alias, alias, strlen(alias));
 	}
 
 	target->dev = spdk_scsi_dev_construct(fullname, bdev_name_list, lun_id_list, num_luns,
@@ -1012,7 +999,8 @@ spdk_iscsi_tgt_node_construct(int target_index,
 	}
 
 	TAILQ_INIT(&target->pg_map_head);
-	rc = spdk_iscsi_tgt_node_add_pg_ig_maps(target, pg_tag_list, ig_tag_list, num_maps);
+	rc = spdk_iscsi_target_node_add_pg_ig_maps(target, pg_tag_list,
+			ig_tag_list, num_maps);
 	if (rc != 0) {
 		SPDK_ERRLOG("could not add map to target\n");
 		iscsi_tgt_node_destruct(target, NULL, NULL);
@@ -1561,7 +1549,7 @@ iscsi_tgt_node_info_json(struct spdk_iscsi_tgt_node *target,
 
 	spdk_json_write_named_string(w, "name", target->name);
 
-	if (target->alias) {
+	if (target->alias[0] != '\0') {
 		spdk_json_write_named_string(w, "alias_name", target->alias);
 	}
 
@@ -1608,7 +1596,7 @@ iscsi_tgt_node_config_json(struct spdk_iscsi_tgt_node *target,
 {
 	spdk_json_write_object_begin(w);
 
-	spdk_json_write_named_string(w, "method", "construct_target_node");
+	spdk_json_write_named_string(w, "method", "iscsi_create_target_node");
 
 	spdk_json_write_name(w, "params");
 	iscsi_tgt_node_info_json(target, w);

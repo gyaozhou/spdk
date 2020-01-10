@@ -96,7 +96,7 @@ spdk_notify_type_get_name(const struct spdk_notify_type *type)
 
 
 void
-spdk_notify_get_types(spdk_notify_get_type_cb cb, void *ctx)
+spdk_notify_foreach_type(spdk_notify_foreach_type_cb cb, void *ctx)
 {
 	struct spdk_notify_type *it;
 
@@ -129,7 +129,8 @@ spdk_notify_send(const char *type, const char *ctx)
 }
 
 uint64_t
-spdk_notify_get_events(uint64_t start_idx, uint64_t max, spdk_notify_get_event_cb cb_fn, void *ctx)
+spdk_notify_foreach_event(uint64_t start_idx, uint64_t max,
+			  spdk_notify_foreach_event_cb cb_fn, void *ctx)
 {
 	uint64_t i;
 

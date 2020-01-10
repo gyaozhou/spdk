@@ -9,6 +9,7 @@
 * @ref nvme_fabrics_host
 * @ref nvme_multi_process
 * @ref nvme_hotplug
+* @ref nvme_cuse
 
 # Introduction {#nvme_intro}
 
@@ -266,3 +267,64 @@ This means I/O in flight during a hot remove will complete with an appropriate e
 code and will not crash the application.
 
 @sa spdk_nvme_probe
+
+# NVMe Character Devices {#nvme_cuse}
+
+This feature is considered as experimental.
+
+![NVMe character devices processing diagram](nvme_cuse.svg)
+
+For each controller as well as namespace, character devices are created in the
+locations:
+~~~{.sh}
+    /dev/spdk/nvmeX
+    /dev/spdk/nvmeXnY
+    ...
+~~~
+Where X is unique SPDK NVMe controller index and Y is namespace id.
+
+Requests from CUSE are handled by pthreads when controller and namespaces are created.
+Those pass the I/O or admin commands via a ring to a thread that processes them using
+spdk_nvme_io_msg_process().
+
+Ioctls that request information attained when attaching NVMe controller receive an
+immediate response, without passing them through the ring.
+
+This interface reserves one qpair for sending down the I/O for each controller.
+
+## Enabling cuse support for NVMe
+
+Cuse support is disabled by default. To enable support for NVMe devices SPDK
+must be compiled with "./configure --with-nvme-cuse".
+
+## Limitations
+
+NVMe CUSE presents character device for controller and namespaces only at the time
+the controller is being attached. Dynamic creation/deletion of namespaces is not
+supported yet.
+
+NVMe namespaces are created as character devices and their use may be limited for
+tools expecting block devices.
+
+Sysfs is not updated by SPDK.
+
+SPDK NVMe CUSE creates nodes in "/dev/spdk/" directory to explicitly differentiate
+from other devices. Tools that only search in the "/dev" directory might not work
+with SPDK NVMe CUSE.
+
+SCSI to NVMe Translation Layer is not implemented. Tools that are using this layer to
+identify, manage or operate device might not work properly or their use may be limited.
+
+### Examples of using smartctl
+
+smartctl tool recognizes device type based on the device path. If none of expected
+patterns match, SCSI translation layer is used to identify device.
+
+To use smartctl '-d nvme' parameter must be used in addition to full path to
+the NVMe device.
+
+~~~{.sh}
+    smartctl -d nvme -i /dev/spdk/nvme0
+    smartctl -d nvme -H /dev/spdk/nvme1
+    ...
+~~~

@@ -17,13 +17,13 @@ notification type.
 # Get info about events {#notify_get_info}
 
 A consumer can get information about the available event types during runtime using
-`spdk_notify_get_types`, which iterates over registered notification types and
+`spdk_notify_foreach_type`, which iterates over registered notification types and
 calls a callback on each of them, so that user can produce detailed information
 about notification.
 
 # Get new events {#notify_listen}
 
-A consumer can get events by calling function `spdk_notify_get_events`.
+A consumer can get events by calling function `spdk_notify_foreach_event`.
 The caller should specify last received event and the maximum number of invocations.
 There might be multiple consumers of each event. The event bus is implemented as a
 circular buffer, so older events may be overwritten by newer ones.
@@ -36,4 +36,4 @@ for example "Nvme0n1"
 
 # RPC Calls {#rpc_calls}
 
-See [JSON-RPC documentation](jsonrpc.md/#rpc_get_notification_types)
+See [JSON-RPC documentation](jsonrpc.md/#rpc_notify_get_types)

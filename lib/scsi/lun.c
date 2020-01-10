@@ -62,6 +62,27 @@ scsi_lun_complete_mgmt_task(struct spdk_scsi_lun *lun, struct spdk_scsi_task *ta
 }
 
 static bool
+scsi_lun_has_pending_mgmt_tasks(const struct spdk_scsi_lun *lun)
+{
+	return !TAILQ_EMPTY(&lun->pending_mgmt_tasks) ||
+	       !TAILQ_EMPTY(&lun->mgmt_tasks);
+}
+
+static bool
+scsi_lun_has_outstanding_mgmt_tasks(const struct spdk_scsi_lun *lun)
+{
+	return !TAILQ_EMPTY(&lun->mgmt_tasks);
+}
+
+/* This check includes both pending and submitted (outstanding) tasks. */
+static bool
+scsi_lun_has_pending_tasks(const struct spdk_scsi_lun *lun)
+{
+	return !TAILQ_EMPTY(&lun->pending_tasks) ||
+	       !TAILQ_EMPTY(&lun->tasks);
+}
+
+static bool
 scsi_lun_has_outstanding_tasks(struct spdk_scsi_lun *lun)
 {
 	return !TAILQ_EMPTY(&lun->tasks);
@@ -103,6 +124,12 @@ _scsi_lun_execute_mgmt_task(struct spdk_scsi_lun *lun,
 			    struct spdk_scsi_task *task)
 {
 	TAILQ_INSERT_TAIL(&lun->mgmt_tasks, task, scsi_link);
+
+	if (lun->removed) {
+		task->response = SPDK_SCSI_TASK_MGMT_RESP_INVALID_LUN;
+		scsi_lun_complete_mgmt_task(lun, task);
+		return;
+	}
 
 	switch (task->function) {
 	case SPDK_SCSI_TASK_FUNC_ABORT_TASK:
@@ -169,7 +196,14 @@ _scsi_lun_execute_task(struct spdk_scsi_lun *lun, struct spdk_scsi_task *task)
 	spdk_trace_record(TRACE_SCSI_TASK_START, lun->dev->id, task->length, (uintptr_t)task, 0);
 	TAILQ_INSERT_TAIL(&lun->tasks, task, scsi_link);
 	if (!lun->removed) {
-		rc = spdk_bdev_scsi_execute(task);
+		/* Check the command is allowed or not when reservation is exist */
+		rc = spdk_scsi_pr_check(task);
+		if (spdk_unlikely(rc < 0)) {
+			/* Reservation Conflict */
+			rc = SPDK_SCSI_TASK_COMPLETE;
+		} else {
+			rc = spdk_bdev_scsi_execute(task);
+		}
 	} else {
 		spdk_scsi_task_process_abort(task);
 		rc = SPDK_SCSI_TASK_COMPLETE;
@@ -194,16 +228,10 @@ spdk_scsi_lun_append_task(struct spdk_scsi_lun *lun, struct spdk_scsi_task *task
 	TAILQ_INSERT_TAIL(&lun->pending_tasks, task, scsi_link);
 }
 
-void
-spdk_scsi_lun_execute_tasks(struct spdk_scsi_lun *lun)
+static void
+scsi_lun_execute_tasks(struct spdk_scsi_lun *lun)
 {
 	struct spdk_scsi_task *task, *task_tmp;
-
-	if (spdk_scsi_lun_has_pending_mgmt_tasks(lun)) {
-		/* Pending IO tasks will wait for completion of existing mgmt tasks.
-		 */
-		return;
-	}
 
 	TAILQ_FOREACH_SAFE(task, &lun->pending_tasks, scsi_link, task_tmp) {
 		TAILQ_REMOVE(&lun->pending_tasks, task, scsi_link);
@@ -211,13 +239,44 @@ spdk_scsi_lun_execute_tasks(struct spdk_scsi_lun *lun)
 	}
 }
 
+void
+spdk_scsi_lun_execute_tasks(struct spdk_scsi_lun *lun)
+{
+	if (scsi_lun_has_pending_mgmt_tasks(lun)) {
+		/* Pending IO tasks will wait for completion of existing mgmt tasks.
+		 */
+		return;
+	}
+	scsi_lun_execute_tasks(lun);
+}
+
+static void
+_scsi_lun_remove(void *arg)
+{
+	struct spdk_scsi_lun *lun = (struct spdk_scsi_lun *)arg;
+
+	spdk_bdev_close(lun->bdev_desc);
+	spdk_scsi_dev_delete_lun(lun->dev, lun);
+	free(lun);
+}
+
 static void
 scsi_lun_remove(struct spdk_scsi_lun *lun)
 {
-	spdk_bdev_close(lun->bdev_desc);
+	struct spdk_scsi_pr_registrant *reg, *tmp;
+	struct spdk_thread *thread;
 
-	spdk_scsi_dev_delete_lun(lun->dev, lun);
-	free(lun);
+	TAILQ_FOREACH_SAFE(reg, &lun->reg_head, link, tmp) {
+		TAILQ_REMOVE(&lun->reg_head, reg, link);
+		free(reg);
+	}
+
+	thread = spdk_get_thread();
+	if (thread != lun->thread) {
+		spdk_thread_send_msg(lun->thread, _scsi_lun_remove, lun);
+	} else {
+		_scsi_lun_remove(lun);
+	}
 }
 
 static int
@@ -260,12 +319,12 @@ scsi_lun_notify_hot_remove(struct spdk_scsi_lun *lun)
 }
 
 static int
-scsi_lun_check_pending_tasks(void *arg)
+scsi_lun_check_outstanding_tasks(void *arg)
 {
 	struct spdk_scsi_lun *lun = (struct spdk_scsi_lun *)arg;
 
-	if (spdk_scsi_lun_has_pending_tasks(lun) ||
-	    spdk_scsi_lun_has_pending_mgmt_tasks(lun)) {
+	if (scsi_lun_has_outstanding_tasks(lun) ||
+	    scsi_lun_has_outstanding_mgmt_tasks(lun)) {
 		return -1;
 	}
 	spdk_poller_unregister(&lun->hotremove_poller);
@@ -279,9 +338,17 @@ _scsi_lun_hot_remove(void *arg1)
 {
 	struct spdk_scsi_lun *lun = arg1;
 
-	if (spdk_scsi_lun_has_pending_tasks(lun) ||
-	    spdk_scsi_lun_has_pending_mgmt_tasks(lun)) {
-		lun->hotremove_poller = spdk_poller_register(scsi_lun_check_pending_tasks,
+	/* If lun->removed is set, no new task can be submitted to the LUN.
+	 * Execute previously queued tasks, which will be immediately aborted.
+	 */
+	scsi_lun_execute_tasks(lun);
+
+	/* Then we only need to wait for all outstanding tasks to be completed
+	 * before notifying the upper layer about the removal.
+	 */
+	if (scsi_lun_has_outstanding_tasks(lun) ||
+	    scsi_lun_has_outstanding_mgmt_tasks(lun)) {
+		lun->hotremove_poller = spdk_poller_register(scsi_lun_check_outstanding_tasks,
 					lun, 10);
 	} else {
 		scsi_lun_notify_hot_remove(lun);
@@ -348,6 +415,8 @@ spdk_scsi_lun_construct(struct spdk_bdev *bdev,
 		return NULL;
 	}
 
+	lun->thread = spdk_get_thread();
+
 	TAILQ_INIT(&lun->tasks);
 	TAILQ_INIT(&lun->pending_tasks);
 	TAILQ_INIT(&lun->mgmt_tasks);
@@ -358,6 +427,7 @@ spdk_scsi_lun_construct(struct spdk_bdev *bdev,
 	lun->hotremove_cb = hotremove_cb;
 	lun->hotremove_ctx = hotremove_ctx;
 	TAILQ_INIT(&lun->open_descs);
+	TAILQ_INIT(&lun->reg_head);
 
 	return lun;
 }
@@ -476,18 +546,53 @@ spdk_scsi_lun_get_dev(const struct spdk_scsi_lun *lun)
 }
 
 bool
-spdk_scsi_lun_has_pending_mgmt_tasks(const struct spdk_scsi_lun *lun)
+spdk_scsi_lun_has_pending_mgmt_tasks(const struct spdk_scsi_lun *lun,
+				     const struct spdk_scsi_port *initiator_port)
 {
-	return !TAILQ_EMPTY(&lun->pending_mgmt_tasks) ||
-	       !TAILQ_EMPTY(&lun->mgmt_tasks);
+	struct spdk_scsi_task *task;
+
+	if (initiator_port == NULL) {
+		return scsi_lun_has_pending_mgmt_tasks(lun);
+	}
+
+	TAILQ_FOREACH(task, &lun->pending_mgmt_tasks, scsi_link) {
+		if (task->initiator_port == initiator_port) {
+			return true;
+		}
+	}
+
+	TAILQ_FOREACH(task, &lun->mgmt_tasks, scsi_link) {
+		if (task->initiator_port == initiator_port) {
+			return true;
+		}
+	}
+
+	return false;
 }
 
-/* This check includes both pending and submitted (outstanding) tasks. */
 bool
-spdk_scsi_lun_has_pending_tasks(const struct spdk_scsi_lun *lun)
+spdk_scsi_lun_has_pending_tasks(const struct spdk_scsi_lun *lun,
+				const struct spdk_scsi_port *initiator_port)
 {
-	return !TAILQ_EMPTY(&lun->pending_tasks) ||
-	       !TAILQ_EMPTY(&lun->tasks);
+	struct spdk_scsi_task *task;
+
+	if (initiator_port == NULL) {
+		return scsi_lun_has_pending_tasks(lun);
+	}
+
+	TAILQ_FOREACH(task, &lun->pending_tasks, scsi_link) {
+		if (task->initiator_port == initiator_port) {
+			return true;
+		}
+	}
+
+	TAILQ_FOREACH(task, &lun->tasks, scsi_link) {
+		if (task->initiator_port == initiator_port) {
+			return true;
+		}
+	}
+
+	return false;
 }
 
 bool
@@ -497,8 +602,8 @@ spdk_scsi_lun_is_removing(const struct spdk_scsi_lun *lun)
 }
 
 bool
-spdk_scsi_lun_get_dif_ctx(struct spdk_scsi_lun *lun, uint8_t *cdb,
-			  uint32_t offset, struct spdk_dif_ctx *dif_ctx)
+spdk_scsi_lun_get_dif_ctx(struct spdk_scsi_lun *lun, struct spdk_scsi_task *task,
+			  struct spdk_dif_ctx *dif_ctx)
 {
-	return spdk_scsi_bdev_get_dif_ctx(lun->bdev, cdb, offset, dif_ctx);
+	return spdk_scsi_bdev_get_dif_ctx(lun->bdev, task, dif_ctx);
 }

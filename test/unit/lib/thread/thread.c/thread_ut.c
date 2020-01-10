@@ -40,14 +40,45 @@
 #include "thread/thread.c"
 #include "common/lib/ut_multithread.c"
 
+static int g_sched_rc = 0;
+
+static int
+_thread_schedule(struct spdk_thread *thread)
+{
+	return g_sched_rc;
+}
+
 static void
 thread_alloc(void)
 {
-	CU_ASSERT(TAILQ_EMPTY(&g_threads));
-	allocate_threads(1);
-	CU_ASSERT(!TAILQ_EMPTY(&g_threads));
-	free_threads();
-	CU_ASSERT(TAILQ_EMPTY(&g_threads));
+	struct spdk_thread *thread;
+
+	/* No schedule callback */
+	spdk_thread_lib_init(NULL, 0);
+	thread = spdk_thread_create(NULL, NULL);
+	SPDK_CU_ASSERT_FATAL(thread != NULL);
+	spdk_set_thread(thread);
+	spdk_thread_exit(thread);
+	spdk_thread_destroy(thread);
+	spdk_thread_lib_fini();
+
+	/* Schedule callback exists */
+	spdk_thread_lib_init(_thread_schedule, 0);
+
+	/* Scheduling succeeds */
+	g_sched_rc = 0;
+	thread = spdk_thread_create(NULL, NULL);
+	SPDK_CU_ASSERT_FATAL(thread != NULL);
+	spdk_set_thread(thread);
+	spdk_thread_exit(thread);
+	spdk_thread_destroy(thread);
+
+	/* Scheduling fails */
+	g_sched_rc = -1;
+	thread = spdk_thread_create(NULL, NULL);
+	SPDK_CU_ASSERT_FATAL(thread == NULL);
+
+	spdk_thread_lib_fini();
 }
 
 static void
@@ -144,6 +175,169 @@ thread_poller(void)
 
 	spdk_poller_unregister(&poller);
 	CU_ASSERT(poller == NULL);
+
+	free_threads();
+}
+
+struct poller_ctx {
+	struct spdk_poller	*poller;
+	bool			run;
+};
+
+static int
+poller_run_pause(void *ctx)
+{
+	struct poller_ctx *poller_ctx = ctx;
+
+	poller_ctx->run = true;
+	spdk_poller_pause(poller_ctx->poller);
+
+	return 0;
+}
+
+static void
+poller_msg_pause_cb(void *ctx)
+{
+	struct spdk_poller *poller = ctx;
+
+	spdk_poller_pause(poller);
+}
+
+static void
+poller_msg_resume_cb(void *ctx)
+{
+	struct spdk_poller *poller = ctx;
+
+	spdk_poller_resume(poller);
+}
+
+static void
+poller_pause(void)
+{
+	struct poller_ctx poller_ctx = {};
+	unsigned int delay[] = { 0, 1000 };
+	unsigned int i;
+
+	allocate_threads(1);
+	set_thread(0);
+
+	/* Register a poller that pauses itself */
+	poller_ctx.poller = spdk_poller_register(poller_run_pause, &poller_ctx, 0);
+	CU_ASSERT_PTR_NOT_NULL(poller_ctx.poller);
+
+	poller_ctx.run = false;
+	poll_threads();
+	CU_ASSERT_EQUAL(poller_ctx.run, true);
+
+	poller_ctx.run = false;
+	poll_threads();
+	CU_ASSERT_EQUAL(poller_ctx.run, false);
+
+	spdk_poller_unregister(&poller_ctx.poller);
+	CU_ASSERT_PTR_NULL(poller_ctx.poller);
+
+	/* Verify that resuming an unpaused poller doesn't do anything */
+	poller_ctx.poller = spdk_poller_register(poller_run_done, &poller_ctx.run, 0);
+	CU_ASSERT_PTR_NOT_NULL(poller_ctx.poller);
+
+	spdk_poller_resume(poller_ctx.poller);
+
+	poller_ctx.run = false;
+	poll_threads();
+	CU_ASSERT_EQUAL(poller_ctx.run, true);
+
+	/* Verify that pausing the same poller twice works too */
+	spdk_poller_pause(poller_ctx.poller);
+
+	poller_ctx.run = false;
+	poll_threads();
+	CU_ASSERT_EQUAL(poller_ctx.run, false);
+
+	spdk_poller_pause(poller_ctx.poller);
+	poll_threads();
+	CU_ASSERT_EQUAL(poller_ctx.run, false);
+
+	spdk_poller_resume(poller_ctx.poller);
+	poll_threads();
+	CU_ASSERT_EQUAL(poller_ctx.run, true);
+
+	/* Verify that a poller is run when it's resumed immediately after pausing */
+	poller_ctx.run = false;
+	spdk_poller_pause(poller_ctx.poller);
+	spdk_poller_resume(poller_ctx.poller);
+	poll_threads();
+	CU_ASSERT_EQUAL(poller_ctx.run, true);
+
+	spdk_poller_unregister(&poller_ctx.poller);
+	CU_ASSERT_PTR_NULL(poller_ctx.poller);
+
+	/* Poll the thread to make sure the previous poller gets unregistered */
+	poll_threads();
+	CU_ASSERT_EQUAL(spdk_thread_has_pollers(spdk_get_thread()), false);
+
+	/* Verify that it's possible to unregister a paused poller */
+	poller_ctx.poller = spdk_poller_register(poller_run_done, &poller_ctx.run, 0);
+	CU_ASSERT_PTR_NOT_NULL(poller_ctx.poller);
+
+	poller_ctx.run = false;
+	poll_threads();
+	CU_ASSERT_EQUAL(poller_ctx.run, true);
+
+	spdk_poller_pause(poller_ctx.poller);
+
+	poller_ctx.run = false;
+	poll_threads();
+	CU_ASSERT_EQUAL(poller_ctx.run, false);
+
+	spdk_poller_unregister(&poller_ctx.poller);
+
+	poll_threads();
+	CU_ASSERT_EQUAL(poller_ctx.run, false);
+	CU_ASSERT_EQUAL(spdk_thread_has_pollers(spdk_get_thread()), false);
+
+	/* Register pollers with 0 and 1000us wait time and pause/resume them */
+	for (i = 0; i < SPDK_COUNTOF(delay); ++i) {
+		poller_ctx.poller = spdk_poller_register(poller_run_done, &poller_ctx.run, delay[i]);
+		CU_ASSERT_PTR_NOT_NULL(poller_ctx.poller);
+
+		spdk_delay_us(delay[i]);
+		poller_ctx.run = false;
+		poll_threads();
+		CU_ASSERT_EQUAL(poller_ctx.run, true);
+
+		spdk_poller_pause(poller_ctx.poller);
+
+		spdk_delay_us(delay[i]);
+		poller_ctx.run = false;
+		poll_threads();
+		CU_ASSERT_EQUAL(poller_ctx.run, false);
+
+		spdk_poller_resume(poller_ctx.poller);
+
+		spdk_delay_us(delay[i]);
+		poll_threads();
+		CU_ASSERT_EQUAL(poller_ctx.run, true);
+
+		/* Verify that the poller can be paused/resumed from spdk_thread_send_msg */
+		spdk_thread_send_msg(spdk_get_thread(), poller_msg_pause_cb, poller_ctx.poller);
+
+		spdk_delay_us(delay[i]);
+		poller_ctx.run = false;
+		poll_threads();
+		CU_ASSERT_EQUAL(poller_ctx.run, false);
+
+		spdk_thread_send_msg(spdk_get_thread(), poller_msg_resume_cb, poller_ctx.poller);
+
+		poll_threads();
+		if (delay[i] > 0) {
+			spdk_delay_us(delay[i]);
+			poll_threads();
+		}
+		CU_ASSERT_EQUAL(poller_ctx.run, true);
+
+		spdk_poller_unregister(&poller_ctx.poller);
+		CU_ASSERT_PTR_NULL(poller_ctx.poller);
+	}
 
 	free_threads();
 }
@@ -354,6 +548,7 @@ thread_name(void)
 	name = spdk_thread_get_name(thread);
 	CU_ASSERT(name != NULL);
 	spdk_thread_exit(thread);
+	spdk_thread_destroy(thread);
 
 	/* Create thread named "test_thread" */
 	thread = spdk_thread_create("test_thread", NULL);
@@ -364,6 +559,7 @@ thread_name(void)
 	SPDK_CU_ASSERT_FATAL(name != NULL);
 	CU_ASSERT(strcmp(name, "test_thread") == 0);
 	spdk_thread_exit(thread);
+	spdk_thread_destroy(thread);
 
 	spdk_thread_lib_fini();
 }
@@ -546,6 +742,7 @@ main(int argc, char **argv)
 		CU_add_test(suite, "thread_alloc", thread_alloc) == NULL ||
 		CU_add_test(suite, "thread_send_msg", thread_send_msg) == NULL ||
 		CU_add_test(suite, "thread_poller", thread_poller) == NULL ||
+		CU_add_test(suite, "poller_pause", poller_pause) == NULL ||
 		CU_add_test(suite, "thread_for_each", thread_for_each) == NULL ||
 		CU_add_test(suite, "for_each_channel_remove", for_each_channel_remove) == NULL ||
 		CU_add_test(suite, "for_each_channel_unreg", for_each_channel_unreg) == NULL ||

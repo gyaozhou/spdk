@@ -141,6 +141,24 @@ _fs_init(void *arg)
 }
 
 static void
+_fs_load(void *arg)
+{
+	struct spdk_thread *thread;
+	struct spdk_bs_dev *dev;
+
+	g_fs = NULL;
+	g_fserrno = -1;
+	dev = init_dev();
+	spdk_fs_load(dev, send_request, fs_op_with_handle_complete, NULL);
+	thread = spdk_get_thread();
+	while (spdk_thread_poll(thread, 0, 0) > 0) {}
+
+	SPDK_CU_ASSERT_FATAL(g_fs != NULL);
+	SPDK_CU_ASSERT_FATAL(g_fs->bdev == dev);
+	CU_ASSERT(g_fserrno == 0);
+}
+
+static void
 _fs_unload(void *arg)
 {
 	struct spdk_thread *thread;
@@ -154,12 +172,18 @@ _fs_unload(void *arg)
 }
 
 static void
-cache_write(void)
+_nop(void *arg)
+{
+}
+
+static void
+cache_read_after_write(void)
 {
 	uint64_t length;
 	int rc;
-	char buf[100];
+	char w_buf[100], r_buf[100];
 	struct spdk_fs_thread_ctx *channel;
+	struct spdk_file_stat stat = {0};
 
 	ut_send_request(_fs_init, NULL);
 
@@ -173,12 +197,27 @@ cache_write(void)
 	rc = spdk_file_truncate(g_file, channel, length);
 	CU_ASSERT(rc == 0);
 
-	spdk_file_write(g_file, channel, buf, 0, sizeof(buf));
+	memset(w_buf, 0x5a, sizeof(w_buf));
+	spdk_file_write(g_file, channel, w_buf, 0, sizeof(w_buf));
 
 	CU_ASSERT(spdk_file_get_length(g_file) == length);
 
-	rc = spdk_file_truncate(g_file, channel, sizeof(buf));
+	rc = spdk_file_truncate(g_file, channel, sizeof(w_buf));
 	CU_ASSERT(rc == 0);
+
+	spdk_file_close(g_file, channel);
+
+	rc = spdk_fs_file_stat(g_fs, channel, "testfile", &stat);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(sizeof(w_buf) == stat.size);
+
+	rc = spdk_fs_open_file(g_fs, channel, "testfile", 0, &g_file);
+	CU_ASSERT(rc == 0);
+	SPDK_CU_ASSERT_FATAL(g_file != NULL);
+
+	memset(r_buf, 0, sizeof(r_buf));
+	spdk_file_read(g_file, channel, r_buf, 0, sizeof(r_buf));
+	CU_ASSERT(memcmp(w_buf, r_buf, sizeof(r_buf)) == 0);
 
 	spdk_file_close(g_file, channel);
 	rc = spdk_fs_delete_file(g_fs, channel, "testfile");
@@ -186,6 +225,197 @@ cache_write(void)
 
 	rc = spdk_fs_delete_file(g_fs, channel, "testfile");
 	CU_ASSERT(rc == -ENOENT);
+
+	spdk_fs_free_thread_ctx(channel);
+
+	ut_send_request(_fs_unload, NULL);
+}
+
+static void
+file_length(void)
+{
+	int rc;
+	char *buf;
+	uint64_t buf_length;
+	volatile uint64_t *length_flushed;
+	struct spdk_fs_thread_ctx *channel;
+	struct spdk_file_stat stat = {0};
+
+	ut_send_request(_fs_init, NULL);
+
+	channel = spdk_fs_alloc_thread_ctx(g_fs);
+
+	g_file = NULL;
+	rc = spdk_fs_open_file(g_fs, channel, "testfile", SPDK_BLOBFS_OPEN_CREATE, &g_file);
+	CU_ASSERT(rc == 0);
+	SPDK_CU_ASSERT_FATAL(g_file != NULL);
+
+	/* Write one CACHE_BUFFER.  Filling at least one cache buffer triggers
+	 * a flush to disk.
+	 */
+	buf_length = CACHE_BUFFER_SIZE;
+	buf = calloc(1, buf_length);
+	spdk_file_write(g_file, channel, buf, 0, buf_length);
+	free(buf);
+
+	/* Spin until all of the data has been flushed to the SSD.  There's been no
+	 * sync operation yet, so the xattr on the file is still 0.
+	 *
+	 * length_flushed: This variable is modified by a different thread in this unit
+	 * test. So we need to dereference it as a volatile to ensure the value is always
+	 * re-read.
+	 */
+	length_flushed = &g_file->length_flushed;
+	while (*length_flushed != buf_length) {}
+
+	/* Close the file.  This causes an implicit sync which should write the
+	 * length_flushed value as the "length" xattr on the file.
+	 */
+	spdk_file_close(g_file, channel);
+
+	rc = spdk_fs_file_stat(g_fs, channel, "testfile", &stat);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(buf_length == stat.size);
+
+	spdk_fs_free_thread_ctx(channel);
+
+	/* Unload and reload the filesystem.  The file length will be
+	 * read during load from the length xattr.  We want to make sure
+	 * it matches what was written when the file was originally
+	 * written and closed.
+	 */
+	ut_send_request(_fs_unload, NULL);
+
+	ut_send_request(_fs_load, NULL);
+
+	channel = spdk_fs_alloc_thread_ctx(g_fs);
+
+	rc = spdk_fs_file_stat(g_fs, channel, "testfile", &stat);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(buf_length == stat.size);
+
+	g_file = NULL;
+	rc = spdk_fs_open_file(g_fs, channel, "testfile", 0, &g_file);
+	CU_ASSERT(rc == 0);
+	SPDK_CU_ASSERT_FATAL(g_file != NULL);
+
+	spdk_file_close(g_file, channel);
+
+	rc = spdk_fs_delete_file(g_fs, channel, "testfile");
+	CU_ASSERT(rc == 0);
+
+	spdk_fs_free_thread_ctx(channel);
+
+	ut_send_request(_fs_unload, NULL);
+}
+
+static void
+append_write_to_extend_blob(void)
+{
+	uint64_t blob_size, buf_length;
+	char *buf, append_buf[64];
+	int rc;
+	struct spdk_fs_thread_ctx *channel;
+
+	ut_send_request(_fs_init, NULL);
+
+	channel = spdk_fs_alloc_thread_ctx(g_fs);
+
+	/* create a file and write the file with blob_size - 1 data length */
+	rc = spdk_fs_open_file(g_fs, channel, "testfile", SPDK_BLOBFS_OPEN_CREATE, &g_file);
+	CU_ASSERT(rc == 0);
+	SPDK_CU_ASSERT_FATAL(g_file != NULL);
+
+	blob_size = __file_get_blob_size(g_file);
+
+	buf_length = blob_size - 1;
+	buf = calloc(1, buf_length);
+	rc = spdk_file_write(g_file, channel, buf, 0, buf_length);
+	CU_ASSERT(rc == 0);
+	free(buf);
+
+	spdk_file_close(g_file, channel);
+	spdk_fs_free_thread_ctx(channel);
+	ut_send_request(_fs_unload, NULL);
+
+	/* load existing file and write extra 2 bytes to cross blob boundary */
+	ut_send_request(_fs_load, NULL);
+
+	channel = spdk_fs_alloc_thread_ctx(g_fs);
+	g_file = NULL;
+	rc = spdk_fs_open_file(g_fs, channel, "testfile", 0, &g_file);
+	CU_ASSERT(rc == 0);
+	SPDK_CU_ASSERT_FATAL(g_file != NULL);
+
+	CU_ASSERT(g_file->length == buf_length);
+	CU_ASSERT(g_file->last == NULL);
+	CU_ASSERT(g_file->append_pos == buf_length);
+
+	rc = spdk_file_write(g_file, channel, append_buf, buf_length, 2);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(2 * blob_size == __file_get_blob_size(g_file));
+	spdk_file_close(g_file, channel);
+	CU_ASSERT(g_file->length == buf_length + 2);
+
+	spdk_fs_free_thread_ctx(channel);
+	ut_send_request(_fs_unload, NULL);
+}
+
+static void
+partial_buffer(void)
+{
+	int rc;
+	char *buf;
+	uint64_t buf_length;
+	struct spdk_fs_thread_ctx *channel;
+	struct spdk_file_stat stat = {0};
+
+	ut_send_request(_fs_init, NULL);
+
+	channel = spdk_fs_alloc_thread_ctx(g_fs);
+
+	g_file = NULL;
+	rc = spdk_fs_open_file(g_fs, channel, "testfile", SPDK_BLOBFS_OPEN_CREATE, &g_file);
+	CU_ASSERT(rc == 0);
+	SPDK_CU_ASSERT_FATAL(g_file != NULL);
+
+	/* Write one CACHE_BUFFER plus one byte.  Filling at least one cache buffer triggers
+	 * a flush to disk.  We want to make sure the extra byte is not implicitly flushed.
+	 * It should only get flushed once we sync or close the file.
+	 */
+	buf_length = CACHE_BUFFER_SIZE + 1;
+	buf = calloc(1, buf_length);
+	spdk_file_write(g_file, channel, buf, 0, buf_length);
+	free(buf);
+
+	/* Send some nop messages to the dispatch thread.  This will ensure any of the
+	 * pending write operations are completed.  A well-functioning blobfs should only
+	 * issue one write for the filled CACHE_BUFFER - a buggy one might try to write
+	 * the extra byte.  So do a bunch of _nops to make sure all of them (even the buggy
+	 * ones) get a chance to run.  Note that we can't just send a message to the
+	 * dispatch thread to call spdk_thread_poll() because the messages are themselves
+	 * run in the context of spdk_thread_poll().
+	 */
+	ut_send_request(_nop, NULL);
+	ut_send_request(_nop, NULL);
+	ut_send_request(_nop, NULL);
+	ut_send_request(_nop, NULL);
+	ut_send_request(_nop, NULL);
+	ut_send_request(_nop, NULL);
+
+	CU_ASSERT(g_file->length_flushed == CACHE_BUFFER_SIZE);
+
+	/* Close the file.  This causes an implicit sync which should write the
+	 * length_flushed value as the "length" xattr on the file.
+	 */
+	spdk_file_close(g_file, channel);
+
+	rc = spdk_fs_file_stat(g_fs, channel, "testfile", &stat);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(buf_length == stat.size);
+
+	rc = spdk_fs_delete_file(g_fs, channel, "testfile");
+	CU_ASSERT(rc == 0);
 
 	spdk_fs_free_thread_ctx(channel);
 
@@ -249,6 +479,37 @@ fs_create_sync(void)
 	rc = spdk_fs_delete_file(g_fs, channel, "testfile");
 	CU_ASSERT(rc == 0);
 
+	spdk_fs_free_thread_ctx(channel);
+
+	thread = spdk_get_thread();
+	while (spdk_thread_poll(thread, 0, 0) > 0) {}
+
+	ut_send_request(_fs_unload, NULL);
+}
+
+static void
+fs_rename_sync(void)
+{
+	int rc;
+	struct spdk_fs_thread_ctx *channel;
+	struct spdk_thread *thread;
+
+	ut_send_request(_fs_init, NULL);
+
+	channel = spdk_fs_alloc_thread_ctx(g_fs);
+	CU_ASSERT(channel != NULL);
+
+	rc = spdk_fs_open_file(g_fs, channel, "testfile", SPDK_BLOBFS_OPEN_CREATE, &g_file);
+	CU_ASSERT(rc == 0);
+	SPDK_CU_ASSERT_FATAL(g_file != NULL);
+
+	CU_ASSERT(strcmp(spdk_file_get_name(g_file), "testfile") == 0);
+
+	rc = spdk_fs_rename_file(g_fs, channel, "testfile", "newtestfile");
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(strcmp(spdk_file_get_name(g_file), "newtestfile") == 0);
+
+	spdk_file_close(g_file, channel);
 	spdk_fs_free_thread_ctx(channel);
 
 	thread = spdk_get_thread();
@@ -376,9 +637,13 @@ int main(int argc, char **argv)
 	}
 
 	if (
-		CU_add_test(suite, "write", cache_write) == NULL ||
+		CU_add_test(suite, "cache read after write", cache_read_after_write) == NULL ||
+		CU_add_test(suite, "file length", file_length) == NULL ||
+		CU_add_test(suite, "append write to extend blob", append_write_to_extend_blob) == NULL ||
+		CU_add_test(suite, "partial buffer", partial_buffer) == NULL ||
 		CU_add_test(suite, "write_null_buffer", cache_write_null_buffer) == NULL ||
 		CU_add_test(suite, "create_sync", fs_create_sync) == NULL ||
+		CU_add_test(suite, "rename_sync", fs_rename_sync) == NULL ||
 		CU_add_test(suite, "append_no_cache", cache_append_no_cache) == NULL ||
 		CU_add_test(suite, "delete_file_without_close", fs_delete_file_without_close) == NULL
 	) {
@@ -409,8 +674,13 @@ int main(int argc, char **argv)
 	while (spdk_thread_poll(g_dispatch_thread, 0, 0) > 0) {}
 	while (spdk_thread_poll(thread, 0, 0) > 0) {}
 
+	spdk_set_thread(thread);
 	spdk_thread_exit(thread);
+	spdk_thread_destroy(thread);
+
+	spdk_set_thread(g_dispatch_thread);
 	spdk_thread_exit(g_dispatch_thread);
+	spdk_thread_destroy(g_dispatch_thread);
 
 	spdk_thread_lib_fini();
 

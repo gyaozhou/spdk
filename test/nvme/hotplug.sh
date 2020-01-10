@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 
-set -xe
-
 testdir=$(readlink -f $(dirname $0))
 rootdir=$(readlink -f $testdir/../..)
 source $rootdir/test/common/autotest_common.sh
@@ -12,10 +10,10 @@ if [ -z "${DEPENDENCY_DIR}" ]; then
 fi
 
 function ssh_vm() {
-	local shell_restore_x="$( [[ "$-" =~ x ]] && echo 'set -x' )"
-	set +x
-	sshpass -p "$password" ssh -o PubkeyAuthentication=no -o StrictHostKeyChecking=no -p 10022 root@localhost "$@"
-	$shell_restore_x
+	xtrace_disable
+	sshpass -p "$password" ssh -o PubkeyAuthentication=no \
+	-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 10022 root@localhost "$@"
+	xtrace_restore
 }
 
 function monitor_cmd() {
@@ -80,16 +78,14 @@ function devices_delete() {
 }
 
 password=$1
-base_img=${DEPENDENCY_DIR}/fedora24.img
-test_img=${DEPENDENCY_DIR}/fedora24_test.img
+base_img=${DEPENDENCY_DIR}/fedora-hotplug.qcow2
+test_img=${DEPENDENCY_DIR}/fedora-hotplug-test.qcow2
 qemu_pidfile=${DEPENDENCY_DIR}/qemupid
 
 if [ ! -e "$base_img" ]; then
 	echo "Hotplug VM image not found; skipping test"
 	exit 0
 fi
-
-timing_enter hotplug
 
 timing_enter start_qemu
 
@@ -139,12 +135,10 @@ timing_exit wait_for_example
 
 trap - SIGINT SIGTERM EXIT
 
-qemupid=`cat "$qemu_pidfile" | awk '{printf $0}'`
+qemupid=$(cat "$qemu_pidfile" | awk '{printf $0}')
 kill -9 $qemupid
 rm "$qemu_pidfile"
 rm "$test_img"
 
 report_test_completion "nvme_hotplug"
 timing_exit hotplug_test
-
-timing_exit hotplug

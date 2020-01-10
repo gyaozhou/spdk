@@ -36,6 +36,7 @@
 #include "spdk/nvme.h"
 #include "spdk/env.h"
 #include "spdk/string.h"
+#include "spdk/pci_ids.h"
 
 struct ctrlr_entry {
 	struct spdk_nvme_ctrlr	*ctrlr;
@@ -81,6 +82,7 @@ static struct ctrlr_entry *g_controllers = NULL;
 static struct ns_entry *g_namespaces = NULL;
 static int g_num_namespaces = 0;
 static struct worker_thread *g_workers = NULL;
+static bool g_qemu_ssd_found = false;
 
 static uint64_t g_tsc_rate;
 
@@ -168,10 +170,10 @@ submit_single_io(struct ns_worker_ctx *ns_ctx)
 		exit(1);
 	}
 
-	task->buf = spdk_dma_zmalloc(g_io_size_bytes, 0x200, NULL);
+	task->buf = spdk_zmalloc(g_io_size_bytes, 0x200, NULL, SPDK_ENV_LCORE_ID_ANY, SPDK_MALLOC_DMA);
 	if (!task->buf) {
-		spdk_dma_free(task->buf);
-		fprintf(stderr, "task->buf spdk_dma_zmalloc failed\n");
+		spdk_free(task->buf);
+		fprintf(stderr, "task->buf spdk_zmalloc failed\n");
 		exit(1);
 	}
 
@@ -219,7 +221,7 @@ task_complete(struct reset_task *task, const struct spdk_nvme_cpl *completion)
 		ns_ctx->io_completed++;
 	}
 
-	spdk_dma_free(task->buf);
+	spdk_free(task->buf);
 	spdk_mempool_put(task_pool, task);
 
 	/*
@@ -285,17 +287,6 @@ work_fn(void *arg)
 	}
 
 	while (1) {
-		/*
-		 * Check for completed I/O for each controller. A new
-		 * I/O will be submitted in the io_complete callback
-		 * to replace each I/O that is completed.
-		 */
-		ns_ctx = worker->ns_ctx;
-		while (ns_ctx != NULL) {
-			check_io(ns_ctx);
-			ns_ctx = ns_ctx->next;
-		}
-
 		if (!did_reset && ((tsc_end - spdk_get_ticks()) / g_tsc_rate) > (uint64_t)g_time_in_sec / 2) {
 			ns_ctx = worker->ns_ctx;
 			while (ns_ctx != NULL) {
@@ -306,6 +297,17 @@ work_fn(void *arg)
 				ns_ctx = ns_ctx->next;
 			}
 			did_reset = true;
+		}
+
+		/*
+		 * Check for completed I/O for each controller. A new
+		 * I/O will be submitted in the io_complete callback
+		 * to replace each I/O that is completed.
+		 */
+		ns_ctx = worker->ns_ctx;
+		while (ns_ctx != NULL) {
+			check_io(ns_ctx);
+			ns_ctx = ns_ctx->next;
 		}
 
 		if (spdk_get_ticks() > tsc_end) {
@@ -518,6 +520,7 @@ static bool
 probe_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
 	 struct spdk_nvme_ctrlr_opts *opts)
 {
+	opts->disable_error_logging = true;
 	return true;
 }
 
@@ -525,6 +528,22 @@ static void
 attach_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
 	  struct spdk_nvme_ctrlr *ctrlr, const struct spdk_nvme_ctrlr_opts *opts)
 {
+	if (trid->trtype == SPDK_NVME_TRANSPORT_PCIE) {
+		struct spdk_pci_device *dev = spdk_nvme_ctrlr_get_pci_device(ctrlr);
+
+		/* QEMU emulated SSDs can't handle this test, so we will skip
+		 *  them.  QEMU NVMe SSDs report themselves as VID == Intel.  So we need
+		 *  to check this specific 0x5845 device ID to know whether it's QEMU
+		 *  or not.
+		 */
+		if (spdk_pci_device_get_vendor_id(dev) == SPDK_PCI_VID_INTEL &&
+		    spdk_pci_device_get_device_id(dev) == 0x5845) {
+			g_qemu_ssd_found = true;
+			printf("Skipping QEMU NVMe SSD at %s\n", trid->traddr);
+			return;
+		}
+	}
+
 	register_ctrlr(ctrlr);
 }
 
@@ -591,12 +610,10 @@ associate_workers_with_ns(void)
 }
 
 static int
-run_nvme_reset_cycle(int retry_count)
+run_nvme_reset_cycle(void)
 {
 	struct worker_thread *worker;
 	struct ns_worker_ctx *ns_ctx;
-
-	spdk_nvme_retry_count = retry_count;
 
 	if (work_fn(g_workers) != 0) {
 		return -1;
@@ -656,7 +673,7 @@ int main(int argc, char **argv)
 
 	if (!g_controllers) {
 		printf("No NVMe controller found, %s exiting\n", argv[0]);
-		return 1;
+		return g_qemu_ssd_found ? 0 : 1;
 	}
 
 	task_pool = spdk_mempool_create("task_pool", TASK_POOL_NUM,
@@ -681,7 +698,7 @@ int main(int argc, char **argv)
 	printf("Initialization complete. Launching workers.\n");
 
 	for (i = 2; i >= 0; i--) {
-		rc = run_nvme_reset_cycle(i);
+		rc = run_nvme_reset_cycle();
 		if (rc != 0) {
 			goto cleanup;
 		}

@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 
-set -e
+testdir=$(readlink -f $(dirname $0))
+rootdir=$(readlink -f $testdir/../../..)
+source $rootdir/test/common/autotest_common.sh
+source $rootdir/test/vhost/common.sh
+source $testdir/migration-tc1.sh
+source $testdir/migration-tc2.sh
+
 
 vms=()
 declare -A vms_os
@@ -10,22 +16,18 @@ declare -A vms_ctrlrs_disks
 
 # By default use Guest fio
 fio_bin=""
-test_cases=""
 MGMT_TARGET_IP=""
 MGMT_INITIATOR_IP=""
 RDMA_TARGET_IP=""
 RDMA_INITIATOR_IP=""
 function usage()
 {
-	[[ ! -z $2 ]] && ( echo "$2"; echo ""; )
+	[[ -n $2 ]] && ( echo "$2"; echo ""; )
 	echo "Shortcut script for doing automated test of live migration."
 	echo "Usage: $(basename $1) [OPTIONS]"
 	echo
-	echo "    --work-dir=WORK_DIR   Where to find build file. Must exist. [default: $TEST_DIR]"
 	echo "    --os ARGS             VM configuration. This parameter might be used more than once:"
 	echo "    --fio-bin=FIO         Use specific fio binary (will be uploaded to VM)"
-	echo "    --test-cases=TESTS    Coma-separated list of tests to run. Implemented test cases are: 1"
-	echo "                          See test/vhost/test_plan.md for more info."
 	echo "    --mgmt-tgt-ip=IP      IP address of target."
 	echo "    --mgmt-init-ip=IP     IP address of initiator."
 	echo "    --rdma-tgt-ip=IP      IP address of targets rdma capable NIC."
@@ -39,10 +41,8 @@ for param in "$@"; do
 			usage $0
 			exit 0
 			;;
-		--work-dir=*) TEST_DIR="${param#*=}" ;;
 		--os=*) os_image="${param#*=}" ;;
 		--fio-bin=*) fio_bin="${param}" ;;
-		--test-cases=*) test_cases="${param#*=}" ;;
 		--mgmt-tgt-ip=*) MGMT_TARGET_IP="${param#*=}" ;;
 		--mgmt-init-ip=*) MGMT_INITIATOR_IP="${param#*=}" ;;
 		--rdma-tgt-ip=*) RDMA_TARGET_IP="${param#*=}" ;;
@@ -55,10 +55,7 @@ for param in "$@"; do
 	esac
 done
 
-. $(readlink -e "$(dirname $0)/../common/common.sh") || exit 1
-MIGRATION_DIR=$(readlink -f $(dirname $0))
-
-[[ ! -z "$test_cases" ]] || fail "Need '--test-cases=' parameter"
+vhosttestinit
 
 trap 'error_exit "${FUNCNAME}" "${LINENO}"' INT ERR EXIT
 
@@ -66,10 +63,11 @@ function vm_monitor_send()
 {
 	local vm_num=$1
 	local cmd_result_file="$2"
-	local vm_dir="$VM_BASE_DIR/$1"
-	local vm_monitor_port=$(cat $vm_dir/monitor_port)
+	local vm_dir="$VM_DIR/$1"
+	local vm_monitor_port
+	vm_monitor_port=$(cat $vm_dir/monitor_port)
 
-	[[ ! -z "$vm_monitor_port" ]] || fail "No monitor port!"
+	[[ -n "$vm_monitor_port" ]] || fail "No monitor port!"
 
 	shift 2
 	nc 127.0.0.1 $vm_monitor_port "$@" > $cmd_result_file
@@ -78,10 +76,13 @@ function vm_monitor_send()
 # Migrate VM $1
 function vm_migrate()
 {
-	local from_vm_dir="$VM_BASE_DIR/$1"
-	local target_vm_dir="$(readlink -e $from_vm_dir/vm_migrate_to)"
-	local target_vm="$(basename $target_vm_dir)"
-	local target_vm_migration_port="$(cat $target_vm_dir/migration_port)"
+	local from_vm_dir="$VM_DIR/$1"
+	local target_vm_dir
+	local target_vm
+	local target_vm_migration_port
+	target_vm_dir="$(readlink -e $from_vm_dir/vm_migrate_to)"
+	target_vm="$(basename $target_vm_dir)"
+	target_vm_migration_port="$(cat $target_vm_dir/migration_port)"
 	if [[ -n "$2" ]]; then
 		local target_ip=$2
 	else
@@ -123,31 +124,21 @@ function vm_migrate()
 
 function is_fio_running()
 {
-	local shell_restore_x="$( [[ "$-" =~ x ]] && echo 'set -x' )"
-	set +x
+	xtrace_disable
 
-	if vm_ssh $1 'kill -0 $(cat /root/fio.pid)'; then
+	if vm_exec $1 'kill -0 $(cat /root/fio.pid)'; then
 		local ret=0
 	else
 		local ret=1
 	fi
 
-	$shell_restore_x
+	xtrace_restore
 	return $ret
 }
 
-for test_case in ${test_cases//,/ }; do
-	assert_number "$test_case"
-	notice "==============================="
-	notice "Running Migration test case ${test_case}"
-	notice "==============================="
-
-	timing_enter migration-tc${test_case}
-	source $MIGRATION_DIR/migration-tc${test_case}.sh
-	timing_exit migration-tc${test_case}
-done
-
-notice "Migration Test SUCCESS"
-notice "==============="
+run_test "vhost_migration_tc1" migration_tc1
+run_test "vhost_migration_tc2" migration_tc2
 
 trap - SIGINT ERR EXIT
+
+vhosttestfini

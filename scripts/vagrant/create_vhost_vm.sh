@@ -70,9 +70,10 @@ export INSTALL_DEPS
 
 
 shift "$((OPTIND-1))"   # Discard the options and sentinel --
-SPDK_VAGRANT_DISTRO="$@"
 
-case "$SPDK_VAGRANT_DISTRO" in
+SPDK_VAGRANT_DISTRO=( "$@" )
+
+case "${SPDK_VAGRANT_DISTRO[0]}" in
 	ubuntu16)
 		export SPDK_VAGRANT_DISTRO
 	;;
@@ -100,7 +101,7 @@ fi
 export SPDK_VAGRANT_SSH_KEY="${VAGRANT_TARGET}/${SPDK_VAGRANT_DISTRO}/ssh_keys/spdk_vhost_id_rsa"
 
 pushd "${VAGRANT_TARGET}/${SPDK_VAGRANT_DISTRO}"
-if [ ! -z "${http_proxy}" ]; then
+if [ -n "${http_proxy}" ]; then
 	export http_proxy
 	export https_proxy
 	if vagrant plugin list | grep -q vagrant-proxyconf; then

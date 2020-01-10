@@ -40,12 +40,44 @@
 
 #include "spdk/stdinc.h"
 
+#include "spdk/queue.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 struct spdk_sock;
 struct spdk_sock_group;
+
+/**
+ * Anywhere this struct is used, an iovec array is assumed to
+ * immediately follow the last member in memory, without any
+ * padding.
+ *
+ * A simpler implementation would be to place a 0-length array
+ * of struct iovec at the end of this request. However, embedding
+ * a structure that ends with a variable length array inside of
+ * another structure is a GNU C extension and not standard.
+ */
+struct spdk_sock_request {
+	/* When the request is completed, this callback will be called.
+	 * err will be 0 on success or a negated errno value on failure. */
+	void	(*cb_fn)(void *cb_arg, int err);
+	void				*cb_arg;
+
+	/**
+	 * These fields are used by the socket layer and should not be modified
+	 */
+	struct __sock_request_internal {
+		TAILQ_ENTRY(spdk_sock_request)	link;
+		unsigned int			offset;
+	} internal;
+
+	int				iovcnt;
+	/* struct iovec			iov[]; */
+};
+
+#define SPDK_SOCK_REQUEST_IOV(req, i) ((struct iovec *)(((uint8_t *)req + sizeof(struct spdk_sock_request)) + (sizeof(struct iovec) * i)))
 
 /**
  * Get client and server addresses of the given socket.
@@ -127,6 +159,15 @@ ssize_t spdk_sock_recv(struct spdk_sock *sock, void *buf, size_t len);
 ssize_t spdk_sock_writev(struct spdk_sock *sock, struct iovec *iov, int iovcnt);
 
 /**
+ * Write data to the given socket asynchronously, calling
+ * the provided callback when the data has been written.
+ *
+ * \param sock Socket to write to.
+ * \param req The write request to submit.
+ */
+void spdk_sock_writev_async(struct spdk_sock *sock, struct spdk_sock_request *req);
+
+/**
  * Read message from the given socket to the I/O vector array.
  *
  * \param sock Socket to receive message.
@@ -158,6 +199,16 @@ int spdk_sock_set_recvlowat(struct spdk_sock *sock, int nbytes);
 int spdk_sock_set_recvbuf(struct spdk_sock *sock, int sz);
 
 /**
+ * Set priority for the given socket.
+ *
+ * \param sock Socket to set the priority.
+ * \param priority Priority given by the user.
+ *
+ * \return 0 on success, -1 on failure.
+ */
+int spdk_sock_set_priority(struct spdk_sock *sock, int priority);
+
+/**
  * Set send buffer size for the given socket.
  *
  * \param sock Socket to set buffer size for.
@@ -186,6 +237,15 @@ bool spdk_sock_is_ipv6(struct spdk_sock *sock);
 bool spdk_sock_is_ipv4(struct spdk_sock *sock);
 
 /**
+ * Check whether the socket is currently connected.
+ *
+ * \param sock Socket to check
+ *
+ * \return true if the socket is connected or false otherwise.
+ */
+bool spdk_sock_is_connected(struct spdk_sock *sock);
+
+/**
  * Callback function for spdk_sock_group_add_sock().
  *
  * \param arg Argument for the callback function.
@@ -195,11 +255,21 @@ bool spdk_sock_is_ipv4(struct spdk_sock *sock);
 typedef void (*spdk_sock_cb)(void *arg, struct spdk_sock_group *group, struct spdk_sock *sock);
 
 /**
- * Create a new socket group.
+ * Create a new socket group with user provided pointer
  *
+ * \param ctx the context provided by user.
  * \return a pointer to the created group on success, or NULL on failure.
  */
-struct spdk_sock_group *spdk_sock_group_create(void);
+struct spdk_sock_group *spdk_sock_group_create(void *ctx);
+
+/**
+ * Get the ctx of the sock group
+ *
+ * \param sock_group Socket group.
+ * \return a pointer which is ctx of the sock_group.
+ */
+void *spdk_sock_group_get_ctx(struct spdk_sock_group *sock_group);
+
 
 /**
  * Add a socket to the group.
@@ -229,7 +299,7 @@ int spdk_sock_group_remove_sock(struct spdk_sock_group *group, struct spdk_sock 
  *
  * \param group Group to poll.
  *
- * \return 0 on success, -1 on failure.
+ * \return the number of events on success, -1 on failure.
  */
 int spdk_sock_group_poll(struct spdk_sock_group *group);
 
@@ -251,6 +321,16 @@ int spdk_sock_group_poll_count(struct spdk_sock_group *group, int max_events);
  * \return 0 on success, -1 on failure.
  */
 int spdk_sock_group_close(struct spdk_sock_group **group);
+
+/**
+ * Get the optimal sock group for this sock.
+ *
+ * \param sock The socket
+ * \param group Returns the optimal sock group. If there is no optimal sock group, returns NULL.
+ *
+ * \return 0 on success. Negated errno on failure.
+ */
+int spdk_sock_get_optimal_sock_group(struct spdk_sock *sock, struct spdk_sock_group **group);
 
 #ifdef __cplusplus
 }

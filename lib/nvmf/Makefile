@@ -35,7 +35,7 @@ SPDK_ROOT_DIR := $(abspath $(CURDIR)/../..)
 include $(SPDK_ROOT_DIR)/mk/spdk.common.mk
 
 C_SRCS = ctrlr.c ctrlr_discovery.c ctrlr_bdev.c \
-	 subsystem.c nvmf.c transport.c tcp.c
+	 subsystem.c nvmf.c nvmf_rpc.c transport.c tcp.c
 
 C_SRCS-$(CONFIG_RDMA) += rdma.c
 LIBNAME = nvmf
@@ -56,6 +56,14 @@ endif
 ifneq ("$(wildcard /usr/lib/libcxgb4.*)","")
 LOCAL_SYS_LIBS += -lcxgb4
 endif
+endif
+endif
+
+ifeq ($(CONFIG_FC),y)
+C_SRCS += fc.c fc_ls.c
+CFLAGS += -I$(CURDIR)
+ifneq ($(strip $(CONFIG_FC_PATH)),)
+CFLAGS += -I$(CONFIG_FC_PATH)
 endif
 endif
 

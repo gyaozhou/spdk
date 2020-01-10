@@ -228,7 +228,7 @@ spdk_nbd_write_config_json(struct spdk_json_write_ctx *w)
 	TAILQ_FOREACH(nbd, &g_spdk_nbd.disk_head, tailq) {
 		spdk_json_write_object_begin(w);
 
-		spdk_json_write_named_string(w, "method", "start_nbd_disk");
+		spdk_json_write_named_string(w, "method", "nbd_start_disk");
 
 		spdk_json_write_named_object_begin(w, "params");
 		spdk_json_write_named_string(w, "nbd_device",  spdk_nbd_disk_get_nbd_path(nbd));
@@ -274,7 +274,7 @@ static void
 spdk_put_nbd_io(struct spdk_nbd_disk *nbd, struct nbd_io *io)
 {
 	if (io->payload) {
-		spdk_dma_free(io->payload);
+		spdk_free(io->payload);
 	}
 	free(io);
 
@@ -618,7 +618,8 @@ spdk_nbd_io_recv_internal(struct spdk_nbd_disk *nbd)
 
 			/* io payload allocate */
 			if (io->payload_size) {
-				io->payload = spdk_dma_malloc(io->payload_size, nbd->buf_align, NULL);
+				io->payload = spdk_malloc(io->payload_size, nbd->buf_align, NULL,
+							  SPDK_ENV_LCORE_ID_ANY, SPDK_MALLOC_DMA);
 				if (io->payload == NULL) {
 					SPDK_ERRLOG("could not allocate io->payload of size %d\n", io->payload_size);
 					spdk_put_nbd_io(nbd, io);

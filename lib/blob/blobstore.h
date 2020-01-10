@@ -280,6 +280,7 @@ enum spdk_blob_op_type {
 
 #define BLOB_SNAPSHOT "SNAP"
 #define SNAPSHOT_IN_PROGRESS "SNAPTMP"
+#define SNAPSHOT_PENDING_REMOVAL "SNAPRM"
 
 // zhou:
 struct spdk_blob_bs_dev {
@@ -308,7 +309,7 @@ struct spdk_bs_md_mask {
 };
 
 #define SPDK_MD_DESCRIPTOR_TYPE_PADDING 0
-#define SPDK_MD_DESCRIPTOR_TYPE_EXTENT 1
+#define SPDK_MD_DESCRIPTOR_TYPE_EXTENT_RLE 1
 #define SPDK_MD_DESCRIPTOR_TYPE_XATTR 2
 #define SPDK_MD_DESCRIPTOR_TYPE_FLAGS 3
 #define SPDK_MD_DESCRIPTOR_TYPE_XATTR_INTERNAL 4
@@ -329,7 +330,8 @@ struct spdk_blob_md_descriptor_xattr {
 //       used to describe allocated clusters info. Once there is no enough room
 //       of first Blob Metadata Page, then we need allocate more Blob Metadata Page
 //       to hold it.
-struct spdk_blob_md_descriptor_extent {
+
+struct spdk_blob_md_descriptor_extent_rle {
 	uint8_t		type;
 	uint32_t	length;
 
@@ -405,6 +407,8 @@ struct spdk_blob_md_page {
 // zhou: 4 KB
 #define SPDK_BS_PAGE_SIZE 0x1000
 SPDK_STATIC_ASSERT(SPDK_BS_PAGE_SIZE == sizeof(struct spdk_blob_md_page), "Invalid md page size");
+
+#define SPDK_BS_MAX_DESC_SIZE sizeof(((struct spdk_blob_md_page*)0)->descriptors)
 
 #define SPDK_BS_SUPER_BLOCK_SIG "SPDKBLOB"
 

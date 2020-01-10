@@ -35,28 +35,26 @@
 
 #include "spdk_cunit.h"
 
+#include "spdk_internal/mock.h"
+
 #include "nvmf/ctrlr_bdev.c"
 
 
 SPDK_LOG_REGISTER_COMPONENT("nvmf", SPDK_LOG_NVMF)
 
-int
-spdk_nvmf_request_complete(struct spdk_nvmf_request *req)
-{
-	return -1;
-}
+DEFINE_STUB(spdk_nvmf_request_complete, int, (struct spdk_nvmf_request *req), -1);
 
-const char *
-spdk_bdev_get_name(const struct spdk_bdev *bdev)
-{
-	return "test";
-}
+DEFINE_STUB(spdk_bdev_get_name, const char *, (const struct spdk_bdev *bdev), "test");
+
+struct spdk_bdev {
+	uint32_t blocklen;
+	uint32_t md_len;
+};
 
 uint32_t
 spdk_bdev_get_block_size(const struct spdk_bdev *bdev)
 {
-	abort();
-	return 0;
+	return bdev->blocklen;
 }
 
 uint64_t
@@ -73,100 +71,85 @@ spdk_bdev_get_optimal_io_boundary(const struct spdk_bdev *bdev)
 	return 0;
 }
 
-struct spdk_io_channel *
-spdk_bdev_get_io_channel(struct spdk_bdev_desc *desc)
+uint32_t
+spdk_bdev_get_md_size(const struct spdk_bdev *bdev)
 {
-	return NULL;
+	return bdev->md_len;
 }
 
-int
-spdk_bdev_flush_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
-		       uint64_t offset_blocks, uint64_t num_blocks,
-		       spdk_bdev_io_completion_cb cb, void *cb_arg)
-{
-	return 0;
-}
+DEFINE_STUB(spdk_bdev_is_md_interleaved, bool, (const struct spdk_bdev *bdev), false);
 
-int
-spdk_bdev_unmap_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
-		       uint64_t offset_blocks, uint64_t num_blocks,
-		       spdk_bdev_io_completion_cb cb, void *cb_arg)
-{
-	return 0;
-}
+DEFINE_STUB(spdk_bdev_get_dif_type, enum spdk_dif_type,
+	    (const struct spdk_bdev *bdev), SPDK_DIF_DISABLE);
 
-bool
-spdk_bdev_io_type_supported(struct spdk_bdev *bdev, enum spdk_bdev_io_type io_type)
-{
-	return false;
-}
+DEFINE_STUB(spdk_bdev_is_dif_head_of_md, bool, (const struct spdk_bdev *bdev), false);
 
-int
-spdk_bdev_queue_io_wait(struct spdk_bdev *bdev, struct spdk_io_channel *ch,
-			struct spdk_bdev_io_wait_entry *entry)
-{
-	return 0;
-}
+DEFINE_STUB(spdk_bdev_is_dif_check_enabled, bool,
+	    (const struct spdk_bdev *bdev, enum spdk_dif_check_type check_type), false);
 
-int
-spdk_bdev_write_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch, void *buf,
-		       uint64_t offset_blocks, uint64_t num_blocks,
-		       spdk_bdev_io_completion_cb cb, void *cb_arg)
-{
-	return 0;
-}
+DEFINE_STUB(spdk_bdev_get_io_channel, struct spdk_io_channel *,
+	    (struct spdk_bdev_desc *desc), NULL);
 
-int
-spdk_bdev_writev_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
-			struct iovec *iov, int iovcnt,
-			uint64_t offset_blocks, uint64_t num_blocks,
-			spdk_bdev_io_completion_cb cb, void *cb_arg)
-{
-	return 0;
-}
+DEFINE_STUB(spdk_bdev_flush_blocks, int,
+	    (struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
+	     uint64_t offset_blocks, uint64_t num_blocks,
+	     spdk_bdev_io_completion_cb cb, void *cb_arg),
+	    0);
 
-int
-spdk_bdev_read_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch, void *buf,
-		      uint64_t offset_blocks, uint64_t num_blocks,
-		      spdk_bdev_io_completion_cb cb, void *cb_arg)
-{
-	return 0;
-}
+DEFINE_STUB(spdk_bdev_unmap_blocks, int,
+	    (struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
+	     uint64_t offset_blocks, uint64_t num_blocks,
+	     spdk_bdev_io_completion_cb cb, void *cb_arg),
+	    0);
 
-int spdk_bdev_readv_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
-			   struct iovec *iov, int iovcnt,
-			   uint64_t offset_blocks, uint64_t num_blocks,
-			   spdk_bdev_io_completion_cb cb, void *cb_arg)
-{
-	return 0;
-}
+DEFINE_STUB(spdk_bdev_io_type_supported, bool,
+	    (struct spdk_bdev *bdev, enum spdk_bdev_io_type io_type), false);
 
-int
-spdk_bdev_write_zeroes_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
-			      uint64_t offset_blocks, uint64_t num_blocks,
-			      spdk_bdev_io_completion_cb cb, void *cb_arg)
-{
-	return 0;
-}
+DEFINE_STUB(spdk_bdev_queue_io_wait, int,
+	    (struct spdk_bdev *bdev, struct spdk_io_channel *ch,
+	     struct spdk_bdev_io_wait_entry *entry),
+	    0);
 
-int
-spdk_bdev_nvme_io_passthru(struct spdk_bdev_desc *desc,
-			   struct spdk_io_channel *ch,
-			   const struct spdk_nvme_cmd *cmd,
-			   void *buf, size_t nbytes,
-			   spdk_bdev_io_completion_cb cb, void *cb_arg)
-{
-	return 0;
-}
+DEFINE_STUB(spdk_bdev_write_blocks, int,
+	    (struct spdk_bdev_desc *desc, struct spdk_io_channel *ch, void *buf,
+	     uint64_t offset_blocks, uint64_t num_blocks,
+	     spdk_bdev_io_completion_cb cb, void *cb_arg),
+	    0);
 
-void spdk_bdev_free_io(struct spdk_bdev_io *bdev_io)
-{
-}
+DEFINE_STUB(spdk_bdev_writev_blocks, int,
+	    (struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
+	     struct iovec *iov, int iovcnt, uint64_t offset_blocks, uint64_t num_blocks,
+	     spdk_bdev_io_completion_cb cb, void *cb_arg),
+	    0);
 
-const char *spdk_nvmf_subsystem_get_nqn(struct spdk_nvmf_subsystem *subsystem)
-{
-	return NULL;
-}
+DEFINE_STUB(spdk_bdev_read_blocks, int,
+	    (struct spdk_bdev_desc *desc, struct spdk_io_channel *ch, void *buf,
+	     uint64_t offset_blocks, uint64_t num_blocks,
+	     spdk_bdev_io_completion_cb cb, void *cb_arg),
+	    0);
+
+DEFINE_STUB(spdk_bdev_readv_blocks, int,
+	    (struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
+	     struct iovec *iov, int iovcnt, uint64_t offset_blocks, uint64_t num_blocks,
+	     spdk_bdev_io_completion_cb cb, void *cb_arg),
+	    0);
+
+DEFINE_STUB(spdk_bdev_write_zeroes_blocks, int,
+	    (struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
+	     uint64_t offset_blocks, uint64_t num_blocks,
+	     spdk_bdev_io_completion_cb cb, void *cb_arg),
+	    0);
+
+DEFINE_STUB(spdk_bdev_nvme_io_passthru, int,
+	    (struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
+	     const struct spdk_nvme_cmd *cmd, void *buf, size_t nbytes,
+	     spdk_bdev_io_completion_cb cb, void *cb_arg),
+	    0);
+
+DEFINE_STUB_V(spdk_bdev_free_io, (struct spdk_bdev_io *bdev_io));
+
+DEFINE_STUB(spdk_nvmf_subsystem_get_nqn, const char *,
+	    (struct spdk_nvmf_subsystem *subsystem), NULL);
 
 struct spdk_nvmf_ns *
 spdk_nvmf_subsystem_get_ns(struct spdk_nvmf_subsystem *subsystem, uint32_t nsid)
@@ -189,8 +172,20 @@ spdk_nvmf_subsystem_get_next_ns(struct spdk_nvmf_subsystem *subsystem, struct sp
 	return NULL;
 }
 
-void spdk_bdev_io_get_nvme_status(const struct spdk_bdev_io *bdev_io, int *sct, int *sc)
+DEFINE_STUB_V(spdk_bdev_io_get_nvme_status,
+	      (const struct spdk_bdev_io *bdev_io, uint32_t *cdw0, int *sct, int *sc));
+
+int
+spdk_dif_ctx_init(struct spdk_dif_ctx *ctx, uint32_t block_size, uint32_t md_size,
+		  bool md_interleave, bool dif_loc, enum spdk_dif_type dif_type, uint32_t dif_flags,
+		  uint32_t init_ref_tag, uint16_t apptag_mask, uint16_t app_tag,
+		  uint32_t data_offset, uint16_t guard_seed)
 {
+	ctx->block_size = block_size;
+	ctx->md_size = md_size;
+	ctx->init_ref_tag = init_ref_tag;
+
+	return 0;
 }
 
 static void
@@ -224,9 +219,33 @@ test_lba_in_range(void)
 
 	/* Overflow edge cases */
 	CU_ASSERT(nvmf_bdev_ctrlr_lba_in_range(UINT64_MAX, 0, UINT64_MAX) == true);
-	CU_ASSERT(nvmf_bdev_ctrlr_lba_in_range(UINT64_MAX, 1, UINT64_MAX) == false)
+	CU_ASSERT(nvmf_bdev_ctrlr_lba_in_range(UINT64_MAX, 1, UINT64_MAX) == false);
 	CU_ASSERT(nvmf_bdev_ctrlr_lba_in_range(UINT64_MAX, UINT64_MAX - 1, 1) == true);
 	CU_ASSERT(nvmf_bdev_ctrlr_lba_in_range(UINT64_MAX, UINT64_MAX, 1) == false);
+}
+
+static void
+test_get_dif_ctx(void)
+{
+	struct spdk_bdev bdev = {};
+	struct spdk_nvme_cmd cmd = {};
+	struct spdk_dif_ctx dif_ctx = {};
+	bool ret;
+
+	bdev.md_len = 0;
+
+	ret = spdk_nvmf_bdev_ctrlr_get_dif_ctx(&bdev, &cmd, &dif_ctx);
+	CU_ASSERT(ret == false);
+
+	to_le64(&cmd.cdw10, 0x1234567890ABCDEF);
+	bdev.blocklen = 520;
+	bdev.md_len = 8;
+
+	ret = spdk_nvmf_bdev_ctrlr_get_dif_ctx(&bdev, &cmd, &dif_ctx);
+	CU_ASSERT(ret == true);
+	CU_ASSERT(dif_ctx.block_size = 520);
+	CU_ASSERT(dif_ctx.md_size == 8);
+	CU_ASSERT(dif_ctx.init_ref_tag == 0x90ABCDEF);
 }
 
 int main(int argc, char **argv)
@@ -246,7 +265,8 @@ int main(int argc, char **argv)
 
 	if (
 		CU_add_test(suite, "get_rw_params", test_get_rw_params) == NULL ||
-		CU_add_test(suite, "lba_in_range", test_lba_in_range) == NULL
+		CU_add_test(suite, "lba_in_range", test_lba_in_range) == NULL ||
+		CU_add_test(suite, "get_dif_ctx", test_get_dif_ctx) == NULL
 	) {
 		CU_cleanup_registry();
 		return CU_get_error();

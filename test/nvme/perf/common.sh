@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 
-set -xe
+set -e
 BASE_DIR=$(readlink -f $(dirname $0))
 ROOT_DIR=$(readlink -f $BASE_DIR/../../..)
 PLUGIN_DIR_NVME=$ROOT_DIR/examples/nvme/fio_plugin
 PLUGIN_DIR_BDEV=$ROOT_DIR/examples/bdev/fio_plugin
+BDEVPERF_DIR=$ROOT_DIR/test/bdev/bdevperf
 . $ROOT_DIR/scripts/common.sh || exit 1
 . $ROOT_DIR/test/common/autotest_common.sh
 NVME_FIO_RESULTS=$BASE_DIR/result.json
@@ -25,6 +26,15 @@ NUMJOBS=1
 REPEAT_NO=3
 NOIOSCALING=false
 
+function is_bdf_not_mounted() {
+	local bdf=$1
+	local blkname
+	local mountpoints
+	blkname=$(ls -l /sys/block/ | grep $bdf | awk '{print $9}')
+	mountpoints=$(lsblk /dev/$blkname --output MOUNTPOINT -n | wc -w)
+	return $mountpoints
+}
+
 function get_cores(){
 	local cpu_list="$1"
 	for cpu in ${cpu_list//,/ }; do
@@ -35,7 +45,7 @@ function get_cores(){
 function get_cores_numa_node(){
 	local cores=$1
 	for core in $cores; do
-		echo $(lscpu -p=cpu,node | grep "^$core\b" | awk -F ',' '{print $2}')
+		lscpu -p=cpu,node | grep "^$core\b" | awk -F ',' '{print $2}'
 	done
 }
 
@@ -44,21 +54,27 @@ function get_numa_node(){
 	local disks=$2
 	if [ "$plugin" = "nvme" ]; then
 		for bdf in $disks; do
-			local driver=`grep DRIVER /sys/bus/pci/devices/$bdf/uevent |awk -F"=" '{print $2}'`
+			local driver
+			driver=$(grep DRIVER /sys/bus/pci/devices/$bdf/uevent |awk -F"=" '{print $2}')
 			# Use this check to ommit blacklisted devices ( not binded to driver with setup.sh script )
 			if [ "$driver" = "vfio-pci" ] || [ "$driver" = "uio_pci_generic" ]; then
-				echo $(cat /sys/bus/pci/devices/$bdf/numa_node)
+				cat /sys/bus/pci/devices/$bdf/numa_node
 			fi
 		done
-	elif [ "$plugin" = "bdev" ]; then
-		local bdevs=$(discover_bdevs $ROOT_DIR $BASE_DIR/bdev.conf)
+	elif [ "$plugin" = "bdev" ] || [ "$plugin" = "bdevperf" ]; then
+		local bdevs
+		bdevs=$(discover_bdevs $ROOT_DIR $BASE_DIR/bdev.conf)
 		for name in $disks; do
-			local bdev_bdf=$(jq -r ".[] | select(.name==\"$name\").driver_specific.nvme.pci_address" <<< $bdevs)
-			echo $(cat /sys/bus/pci/devices/$bdev_bdf/numa_node)
+			local bdev_bdf
+			bdev_bdf=$(jq -r ".[] | select(.name==\"$name\").driver_specific.nvme.pci_address" <<< $bdevs)
+			cat /sys/bus/pci/devices/$bdev_bdf/numa_node
 		done
 	else
+		# Only target not mounted NVMes
 		for bdf in $(iter_pci_class_code 01 08 02); do
-				echo $(cat /sys/bus/pci/devices/$bdf/numa_node)
+			if is_bdf_not_mounted $bdf; then
+				cat /sys/bus/pci/devices/$bdf/numa_node
+			fi
 		done
 	fi
 }
@@ -67,17 +83,23 @@ function get_disks(){
 	local plugin=$1
 	if [ "$plugin" = "nvme" ]; then
 		for bdf in $(iter_pci_class_code 01 08 02); do
-			driver=`grep DRIVER /sys/bus/pci/devices/$bdf/uevent |awk -F"=" '{print $2}'`
+			driver=$(grep DRIVER /sys/bus/pci/devices/$bdf/uevent |awk -F"=" '{print $2}')
 			if [ "$driver" = "vfio-pci" ] || [ "$driver" = "uio_pci_generic" ]; then
 				echo "$bdf"
 			fi
 		done
-	elif [ "$plugin" = "bdev" ]; then
-		local bdevs=$(discover_bdevs $ROOT_DIR $BASE_DIR/bdev.conf)
-		echo $(jq -r '.[].name' <<< $bdevs)
+	elif [ "$plugin" = "bdev" ] || [ "$plugin" = "bdevperf" ]; then
+		local bdevs
+		bdevs=$(discover_bdevs $ROOT_DIR $BASE_DIR/bdev.conf)
+		jq -r '.[].name' <<< $bdevs
 	else
+		# Only target not mounted NVMes
 		for bdf in $(iter_pci_class_code 01 08 02); do
-			echo $(ls -l /sys/block/ | grep $bdf |awk '{print $9}')
+			if is_bdf_not_mounted $bdf; then
+				local blkname
+				blkname=$(ls -l /sys/block/ | grep $bdf | awk '{print $9}')
+				echo $blkname
+			fi
 		done
 	fi
 }
@@ -92,7 +114,7 @@ function get_disks_on_numa(){
 	for (( i=0; i<${#devs[@]}; i++ ))
 	do
 		if [ ${numas[$i]} = $numa_no ]; then
-			disks_on_numa=$(($disks_on_numa+1))
+			disks_on_numa=$((disks_on_numa+1))
 		fi
 	done
 	echo $disks_on_numa
@@ -108,19 +130,20 @@ function create_fio_config(){
 	local no_cores=${#cores[@]}
 	local filename=""
 
-	local cores_numa=($(get_cores_numa_node "$5"))
-	local disks_per_core=$(($disk_no/$no_cores))
-	local disks_per_core_mod=$(($disk_no%$no_cores))
+	local cores_numa
+	cores_numa=($(get_cores_numa_node "$5"))
+	local disks_per_core=$((disk_no/no_cores))
+	local disks_per_core_mod=$((disk_no%no_cores))
 
 	# For kernel dirver, each disk will be alligned with all cpus on the same NUMA node
 	if [ "$plugin" != "nvme" ] && [ "$plugin" != "bdev" ]; then
-		for (( i=0; i<$disk_no; i++ ))
+		for (( i=0; i<disk_no; i++ ))
 		do
 			sed -i -e "\$a[filename${i}]" $BASE_DIR/config.fio
 			filename="/dev/${disks[$i]}"
 			sed -i -e "\$afilename=$filename" $BASE_DIR/config.fio
 			cpu_used=""
-				for (( j=0; j<$no_cores; j++ ))
+				for (( j=0; j<no_cores; j++ ))
 				do
 					core_numa=${cores_numa[$j]}
 					if [ "${disks_numa[$i]}" = "$core_numa" ]; then
@@ -131,13 +154,13 @@ function create_fio_config(){
 				echo "" >> $BASE_DIR/config.fio
 		done
 	else
-		for (( i=0; i<$no_cores; i++ ))
+		for (( i=0; i<no_cores; i++ ))
 		do
 			core_numa=${cores_numa[$i]}
 			total_disks_per_core=$disks_per_core
 			if [ "$disks_per_core_mod" -gt "0" ]; then
-				total_disks_per_core=$(($disks_per_core+1))
-				disks_per_core_mod=$(($disks_per_core_mod-1))
+				total_disks_per_core=$((disks_per_core+1))
+				disks_per_core_mod=$((disks_per_core_mod-1))
 			fi
 
 			if [ "$total_disks_per_core" = "0" ]; then
@@ -151,7 +174,7 @@ function create_fio_config(){
 			n=0 #counter of all disks
 			while [ "$m" -lt  "$total_disks_per_core" ]; do
 				if [ ${disks_numa[$n]} = $core_numa ]; then
-					m=$(($m+1))
+					m=$((m+1))
 					if [ "$plugin" = "nvme" ]; then
 						filename='trtype=PCIe traddr='${disks[$n]//:/.}' ns=1'
 					elif [ "$plugin" = "bdev" ]; then
@@ -161,7 +184,7 @@ function create_fio_config(){
 					#Mark numa of n'th disk as "x" to mark it as claimed
 					disks_numa[$n]="x"
 				fi
-				n=$(($n+1))
+				n=$((n+1))
 				# If there is no more disks with numa node same as cpu numa node, switch to other numa node.
 				if [ $n -ge $total_disks ]; then
 					if [ "$core_numa" = "1" ]; then
@@ -182,8 +205,15 @@ function preconditioning(){
 	local filename=""
 	local i
 	sed -i -e "\$a[preconditioning]" $BASE_DIR/config.fio
-	for bdf in $(iter_pci_class_code 01 08 02); do
-		dev_name='trtype=PCIe traddr='${bdf//:/.}' ns=1'
+
+	# Generate filename argument for FIO.
+	# We only want to target NVMes not bound to nvme driver.
+	# If they're still bound to nvme that means they were skipped by
+	# setup.sh on purpose.
+	local nvme_list
+	nvme_list=$(get_disks nvme)
+	for nvme in $nvme_list; do
+		dev_name='trtype=PCIe traddr='${nvme//:/.}' ns=1'
 		filename+=$(printf %s":" "$dev_name")
 	done
 	echo "** Preconditioning disks, this can take a while, depending on the size of disks."
@@ -204,37 +234,52 @@ function get_results(){
 		mean_lat_usec)
 		mean_lat=$(cat $NVME_FIO_RESULTS | jq -r ".jobs[] | (.read.lat_ns.mean * $reads_pct + .write.lat_ns.mean * $writes_pct)")
 		mean_lat=${mean_lat%.*}
-		echo $(( $mean_lat/100000 ))
+		echo $(( mean_lat/100000 ))
 		;;
 		p99_lat_usec)
 		p99_lat=$(cat $NVME_FIO_RESULTS | jq -r ".jobs[] | (.read.clat_ns.percentile.\"99.000000\" * $reads_pct + .write.clat_ns.percentile.\"99.000000\" * $writes_pct)")
 		p99_lat=${p99_lat%.*}
-		echo $(( $p99_lat/100000 ))
+		echo $(( p99_lat/100000 ))
 		;;
 		p99_99_lat_usec)
 		p99_99_lat=$(cat $NVME_FIO_RESULTS | jq -r ".jobs[] | (.read.clat_ns.percentile.\"99.990000\" * $reads_pct + .write.clat_ns.percentile.\"99.990000\" * $writes_pct)")
 		p99_99_lat=${p99_99_lat%.*}
-		echo $(( $p99_99_lat/100000 ))
+		echo $(( p99_99_lat/100000 ))
 		;;
 		stdev_usec)
 		stdev=$(cat $NVME_FIO_RESULTS | jq -r ".jobs[] | (.read.clat_ns.stddev * $reads_pct + .write.clat_ns.stddev * $writes_pct)")
 		stdev=${stdev%.*}
-		echo $(( $stdev/100000 ))
+		echo $(( stdev/100000 ))
 		;;
 		mean_slat_usec)
 		mean_slat=$(cat $NVME_FIO_RESULTS | jq -r ".jobs[] | (.read.slat_ns.mean * $reads_pct + .write.slat_ns.mean * $writes_pct)")
 		mean_slat=${mean_slat%.*}
-		echo $(( $mean_slat/100000 ))
+		echo $(( mean_slat/100000 ))
 		;;
 		mean_clat_usec)
 		mean_clat=$(cat $NVME_FIO_RESULTS | jq -r ".jobs[] | (.read.clat_ns.mean * $reads_pct + .write.clat_ns.mean * $writes_pct)")
 		mean_clat=${mean_clat%.*}
-		echo $(( $mean_clat/100000 ))
+		echo $(( mean_clat/100000 ))
 		;;
 		bw_Kibs)
 		bw=$(cat $NVME_FIO_RESULTS | jq -r ".jobs[] | (.read.bw + .write.bw)")
 		bw=${bw%.*}
-		echo $(( $bw ))
+		echo $(( bw ))
+		;;
+	esac
+}
+
+function get_bdevperf_results(){
+	case "$1" in
+		iops)
+		iops=$(grep Total $NVME_FIO_RESULTS | awk -F 'Total' '{print $2}' | awk '{print $2}')
+		iops=${iops%.*}
+		echo $iops
+		;;
+		bw_Kibs)
+		bw_MBs=$(grep Total $NVME_FIO_RESULTS | awk -F 'Total' '{print $2}' | awk '{print $4}')
+		bw_MBs=${bw_MBs%.*}
+		echo $(( bw_MBs * 1024 ))
 		;;
 	esac
 }
@@ -259,10 +304,30 @@ function run_nvme_fio(){
 	sleep 1
 }
 
+function run_bdevperf(){
+	echo "** Running bdevperf test, this can take a while, depending on the run-time setting."
+	$BDEVPERF_DIR/bdevperf -c $BASE_DIR/bdev.conf -q $IODEPTH -o $BLK_SIZE -w $RW -M $MIX -t $RUNTIME
+	sleep 1
+}
+
+function wait_for_nvme_reload() {
+	local nvmes=$1
+
+	shopt -s extglob
+	for disk in $nvmes; do
+		cmd="ls /sys/block/$disk/queue/*@(iostats|rq_affinity|nomerges|io_poll_delay)*"
+		until $cmd 2>/dev/null; do
+			echo "Waiting for full nvme driver reload..."
+			sleep 0.5
+		done
+	done
+	shopt -q extglob
+}
+
 function usage()
 {
 	set +x
-	[[ ! -z $2 ]] && ( echo "$2"; echo ""; )
+	[[ -n $2 ]] && ( echo "$2"; echo ""; )
 	echo "Run NVMe PMD/BDEV performance test. Change options for easier debug and setup configuration"
 	echo "Usage: $(basename $1) [options]"
 	echo "-h, --help                Print help and exit"
@@ -270,7 +335,8 @@ function usage()
 	echo "    --ramp-time=TIME[s]   Fio will run the specified workload for this amount of time before logging any performance numbers. [default=$RAMP_TIME]"
 	echo "    --fio-bin=PATH        Path to fio binary. [default=$FIO_BIN]"
 	echo "    --driver=STR          Use 'bdev' or 'nvme' for spdk driver with fio_plugin,"
-	echo "                          'kernel-libaio', 'kernel-classic-polling' or 'kernel-hybrid-polling' for kernel driver. [default=$PLUGIN]"
+	echo "                          'kernel-libaio', 'kernel-classic-polling', 'kernel-hybrid-polling' or"
+	echo "                          'kernel-io-uring' for kernel driver. [default=$PLUGIN]"
 	echo "    --max-disk=INT,ALL    Number of disks to test on, this will run multiple workloads with increasing number of disk each run, if =ALL then test on all found disk. [default=$DISKNO]"
 	echo "    --disk-no=INT,ALL     Number of disks to test on, this will run one workload on selected number od disks, it discards max-disk setting, if =ALL then test on all found disk"
 	echo "    --rw=STR              Type of I/O pattern. Accepted values are randrw,rw. [default=$RW]"
@@ -316,7 +382,7 @@ done
 trap 'rm -f *.state $BASE_DIR/bdev.conf; print_backtrace' ERR SIGTERM SIGABRT
 mkdir -p $BASE_DIR/results
 date="$(date +'%m_%d_%Y_%H%M%S')"
-if [ $PLUGIN = "bdev" ]; then
+if [[ $PLUGIN == "bdev" ]] || [[ $PLUGIN == "bdevperf" ]]; then
 	$ROOT_DIR/scripts/gen_nvme.sh >> $BASE_DIR/bdev.conf
 fi
 

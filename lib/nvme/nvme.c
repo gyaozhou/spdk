@@ -33,13 +33,12 @@
 
 #include "spdk/nvmf_spec.h"
 #include "nvme_internal.h"
+#include "nvme_io_msg.h"
 
 #define SPDK_NVME_DRIVER_NAME "spdk_nvme_driver"
 
 struct nvme_driver	*g_spdk_nvme_driver;
 pid_t			g_spdk_nvme_pid;
-
-int32_t			spdk_nvme_retry_count;
 
 /* gross timeout of 180 seconds in milliseconds */
 static int g_nvme_driver_timeout_ms = 3 * 60 * 1000;
@@ -70,6 +69,7 @@ spdk_nvme_detach(struct spdk_nvme_ctrlr *ctrlr)
 	nvme_ctrlr_proc_put_ref(ctrlr);
 
 	if (nvme_ctrlr_get_ref_count(ctrlr) == 0) {
+		nvme_io_msg_ctrlr_detach(ctrlr);
 		if (nvme_ctrlr_shared(ctrlr)) {
 			TAILQ_REMOVE(&g_spdk_nvme_driver->shared_attached_ctrlrs, ctrlr, tailq);
 		} else {
@@ -122,7 +122,11 @@ spdk_nvme_wait_for_completion_robust_lock(
 			nvme_robust_mutex_lock(robust_mutex);
 		}
 
-		spdk_nvme_qpair_process_completions(qpair, 0);
+		if (spdk_nvme_qpair_process_completions(qpair, 0) < 0) {
+			status->done = true;
+			status->cpl.status.sct = SPDK_NVME_SCT_GENERIC;
+			status->cpl.status.sc = SPDK_NVME_SC_ABORTED_SQ_DELETION;
+		}
 
 		if (robust_mutex) {
 			nvme_robust_mutex_unlock(robust_mutex);
@@ -182,7 +186,7 @@ nvme_user_copy_cmd_complete(void *arg, const struct spdk_nvme_cpl *cpl)
 			memcpy(req->user_buffer, req->payload.contig_or_cb_arg, req->payload_size);
 		}
 
-		spdk_dma_free(req->payload.contig_or_cb_arg);
+		spdk_free(req->payload.contig_or_cb_arg);
 	}
 
 	/* Call the user's original callback now that the buffer has been copied */
@@ -391,6 +395,7 @@ nvme_driver_init(void)
 	return ret;
 }
 
+/* This function must only be called while holding g_spdk_nvme_driver->lock */
 int
 nvme_ctrlr_probe(const struct spdk_nvme_transport_id *trid,
 		 struct spdk_nvme_probe_ctx *probe_ctx, void *devhandle)
@@ -403,12 +408,39 @@ nvme_ctrlr_probe(const struct spdk_nvme_transport_id *trid,
 	spdk_nvme_ctrlr_get_default_ctrlr_opts(&opts, sizeof(opts));
 
 	if (!probe_ctx->probe_cb || probe_ctx->probe_cb(probe_ctx->cb_ctx, trid, &opts)) {
+		ctrlr = spdk_nvme_get_ctrlr_by_trid_unsafe(trid);
+		if (ctrlr) {
+			/* This ctrlr already exists.
+			* Increase the ref count before calling attach_cb() as the user may
+			* call nvme_detach() immediately. */
+			nvme_ctrlr_proc_get_ref(ctrlr);
+
+			if (probe_ctx->attach_cb) {
+				nvme_robust_mutex_unlock(&g_spdk_nvme_driver->lock);
+				probe_ctx->attach_cb(probe_ctx->cb_ctx, &ctrlr->trid, ctrlr, &ctrlr->opts);
+				nvme_robust_mutex_lock(&g_spdk_nvme_driver->lock);
+			}
+			return 0;
+		}
+
 		ctrlr = nvme_transport_ctrlr_construct(trid, &opts, devhandle);
 		if (ctrlr == NULL) {
 			SPDK_ERRLOG("Failed to construct NVMe controller for SSD: %s\n", trid->traddr);
 			return -1;
 		}
+		ctrlr->remove_cb = probe_ctx->remove_cb;
+		ctrlr->cb_ctx = probe_ctx->cb_ctx;
 
+		if (ctrlr->quirks & NVME_QUIRK_MINIMUM_IO_QUEUE_SIZE &&
+		    ctrlr->opts.io_queue_size == DEFAULT_IO_QUEUE_SIZE) {
+			/* If the user specifically set an IO queue size different than the
+			 * default, use that value.  Otherwise overwrite with the quirked value.
+			 * This allows this quirk to be overridden when necessary.
+			 */
+			ctrlr->opts.io_queue_size = DEFAULT_IO_QUEUE_SIZE_FOR_QUIRK;
+		}
+
+		nvme_qpair_set_state(ctrlr->adminq, NVME_QPAIR_ENABLED);
 		TAILQ_INSERT_TAIL(&probe_ctx->init_ctrlrs, ctrlr, tailq);
 		return 0;
 	}
@@ -428,6 +460,7 @@ nvme_ctrlr_poll_internal(struct spdk_nvme_ctrlr *ctrlr,
 		/* Controller failed to initialize. */
 		TAILQ_REMOVE(&probe_ctx->init_ctrlrs, ctrlr, tailq);
 		SPDK_ERRLOG("Failed to initialize SSD: %s\n", ctrlr->trid.traddr);
+		nvme_ctrlr_fail(ctrlr, false);
 		nvme_ctrlr_destruct(ctrlr);
 		return rc;
 	}
@@ -435,6 +468,8 @@ nvme_ctrlr_poll_internal(struct spdk_nvme_ctrlr *ctrlr,
 	if (ctrlr->state != NVME_CTRLR_STATE_READY) {
 		return 0;
 	}
+
+	STAILQ_INIT(&ctrlr->io_producers);
 
 	/*
 	 * Controller has been initialized.
@@ -521,7 +556,7 @@ spdk_nvme_probe_internal(struct spdk_nvme_probe_ctx *probe_ctx,
 			 bool direct_connect)
 {
 	int rc;
-	struct spdk_nvme_ctrlr *ctrlr;
+	struct spdk_nvme_ctrlr *ctrlr, *ctrlr_tmp;
 
 	if (!spdk_nvme_transport_available(probe_ctx->trid.trtype)) {
 		SPDK_ERRLOG("NVMe trtype %u not available\n", probe_ctx->trid.trtype);
@@ -533,6 +568,10 @@ spdk_nvme_probe_internal(struct spdk_nvme_probe_ctx *probe_ctx,
 	rc = nvme_transport_ctrlr_scan(probe_ctx, direct_connect);
 	if (rc != 0) {
 		SPDK_ERRLOG("NVMe ctrlr scan failed\n");
+		TAILQ_FOREACH_SAFE(ctrlr, &probe_ctx->init_ctrlrs, tailq, ctrlr_tmp) {
+			TAILQ_REMOVE(&probe_ctx->init_ctrlrs, ctrlr, tailq);
+			nvme_transport_ctrlr_destruct(ctrlr);
+		}
 		nvme_robust_mutex_unlock(&g_spdk_nvme_driver->lock);
 		return -1;
 	}
@@ -860,6 +899,12 @@ spdk_nvme_transport_id_parse(struct spdk_nvme_transport_id *trid, const char *st
 			 * it as an invalid key.
 			 */
 			continue;
+		} else if (strcasecmp(key, "alt_traddr") == 0) {
+			/*
+			 * Used by applications for enabling transport ID failover.
+			 * Please see the case above for more information on custom parameters.
+			 */
+			continue;
 		} else {
 			SPDK_ERRLOG("Unknown transport ID key '%s'\n", key);
 		}
@@ -945,8 +990,8 @@ spdk_nvme_transport_id_compare(const struct spdk_nvme_transport_id *trid1,
 	}
 
 	if (trid1->trtype == SPDK_NVME_TRANSPORT_PCIE) {
-		struct spdk_pci_addr pci_addr1;
-		struct spdk_pci_addr pci_addr2;
+		struct spdk_pci_addr pci_addr1 = {};
+		struct spdk_pci_addr pci_addr2 = {};
 
 		/* Normalize PCI addresses before comparing */
 		if (spdk_pci_addr_parse(&pci_addr1, trid1->traddr) < 0 ||

@@ -41,6 +41,10 @@
 #include "spdk/thread.h"
 #include "spdk/bdev.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct spdk_ftl_dev;
 
 /* Limit thresholds */
@@ -79,13 +83,24 @@ struct spdk_ftl_conf {
 	/* IO pool size per user thread */
 	size_t					user_io_pool_size;
 
-	struct {
-		/* Lowest percentage of invalid lbks for a band to be defragged */
-		size_t				invalid_thld;
+	/* Lowest percentage of invalid lbks for a band to be defragged */
+	size_t					invalid_thld;
 
-		/* User writes limits */
-		struct spdk_ftl_limit		limits[SPDK_FTL_LIMIT_MAX];
-	} defrag;
+	/* User writes limits */
+	struct spdk_ftl_limit			limits[SPDK_FTL_LIMIT_MAX];
+
+	/* Number of interleaving units per ws_opt */
+	size_t                                  num_interleave_units;
+
+	/* Allow for partial recovery from open bands instead of returning error */
+	bool					allow_open_bands;
+
+	struct {
+		/* Maximum number of concurrent requests */
+		size_t				max_request_cnt;
+		/* Maximum number of blocks per one request */
+		size_t				max_request_size;
+	} nv_cache;
 };
 
 /* Range of parallel units (inclusive) */
@@ -113,7 +128,7 @@ struct spdk_ftl_dev_init_opts {
 	struct spdk_thread			*read_thread;
 
 	/* Device's config */
-	struct spdk_ftl_conf			*conf;
+	const struct spdk_ftl_conf		*conf;
 	/* Device's name */
 	const char				*name;
 	/* Parallel unit range */
@@ -135,6 +150,12 @@ struct spdk_ftl_attrs {
 	size_t					lbk_size;
 	/* Write buffer cache */
 	struct spdk_bdev_desc			*cache_bdev_desc;
+	/* Number of zones per parallel unit in the underlying device (including any offline ones) */
+	size_t					num_zones;
+	/* Number of logical blocks per zone */
+	size_t					zone_size;
+	/* Device specific configuration */
+	struct spdk_ftl_conf			conf;
 };
 
 struct ftl_module_init_opts {
@@ -197,7 +218,7 @@ int spdk_ftl_dev_init(const struct spdk_ftl_dev_init_opts *opts, spdk_ftl_init_f
  *
  * \return 0 if successfully scheduled free, negative errno otherwise.
  */
-int spdk_ftl_dev_free(struct spdk_ftl_dev *dev, spdk_ftl_fn cb, void *cb_arg);
+int spdk_ftl_dev_free(struct spdk_ftl_dev *dev, spdk_ftl_init_fn cb, void *cb_arg);
 
 /**
  * Initialize FTL configuration structure with default values.
@@ -212,7 +233,7 @@ void spdk_ftl_conf_init_defaults(struct spdk_ftl_conf *conf);
  * \param dev device
  * \param attr Attribute structure to fill
  */
-void  spdk_ftl_dev_get_attrs(const struct spdk_ftl_dev *dev, struct spdk_ftl_attrs *attr);
+void spdk_ftl_dev_get_attrs(const struct spdk_ftl_dev *dev, struct spdk_ftl_attrs *attr);
 
 /**
  * Submits a read to the specified device.
@@ -260,5 +281,9 @@ int spdk_ftl_write(struct spdk_ftl_dev *dev, struct spdk_io_channel *ch, uint64_
  * \return 0 if successfully submitted, negative errno otherwise.
  */
 int spdk_ftl_flush(struct spdk_ftl_dev *dev, spdk_ftl_fn cb_fn, void *cb_arg);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* SPDK_FTL_H */

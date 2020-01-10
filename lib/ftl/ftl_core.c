@@ -36,8 +36,10 @@
 #include "spdk/nvme.h"
 #include "spdk/io_channel.h"
 #include "spdk/bdev_module.h"
+#include "spdk/string.h"
 #include "spdk_internal/log.h"
 #include "spdk/ftl.h"
+#include "spdk/crc32.h"
 
 #include "ftl_core.h"
 #include "ftl_band.h"
@@ -47,8 +49,17 @@
 #include "ftl_debug.h"
 #include "ftl_reloc.h"
 
-/* Max number of iovecs */
-#define FTL_MAX_IOV 1024
+struct ftl_band_flush {
+	struct spdk_ftl_dev		*dev;
+	/* Number of bands left to be flushed */
+	size_t				num_bands;
+	/* User callback */
+	spdk_ftl_fn			cb_fn;
+	/* Callback's argument */
+	void				*cb_arg;
+	/* List link */
+	LIST_ENTRY(ftl_band_flush)	list_entry;
+};
 
 struct ftl_wptr {
 	/* Owner device */
@@ -63,14 +74,26 @@ struct ftl_wptr {
 	/* Current logical block's offset */
 	uint64_t			offset;
 
-	/* Current erase block */
-	struct ftl_chunk		*chunk;
+	/* Current zone */
+	struct ftl_zone			*zone;
 
-	/* IO that is currently processed */
-	struct ftl_io			*current_io;
+	/* Pending IO queue */
+	TAILQ_HEAD(, ftl_io)		pending_queue;
 
 	/* List link */
 	LIST_ENTRY(ftl_wptr)		list_entry;
+
+	/*
+	 * If setup in direct mode, there will be no offset or band state update after IO.
+	 * The PPA is not assigned by wptr, and is instead taken directly from the request.
+	 */
+	bool				direct_mode;
+
+	/* Number of outstanding write requests */
+	uint32_t			num_outstanding;
+
+	/* Marks that the band related to this wptr needs to be closed as soon as possible */
+	bool				flush;
 };
 
 struct ftl_flush {
@@ -81,7 +104,10 @@ struct ftl_flush {
 	size_t				num_req;
 
 	/* Callback */
-	struct ftl_cb			cb;
+	struct {
+		spdk_ftl_fn		fn;
+		void			*ctx;
+	} cb;
 
 	/* Batch bitmap */
 	struct spdk_bit_array		*bmap;
@@ -89,10 +115,6 @@ struct ftl_flush {
 	/* List link */
 	LIST_ENTRY(ftl_flush)		list_entry;
 };
-
-typedef int (*ftl_next_ppa_fn)(struct ftl_io *, struct ftl_ppa *, size_t, void *);
-static void _ftl_read(void *);
-static void _ftl_write(void *);
 
 static int
 ftl_rwb_flags_from_io(const struct ftl_io *io)
@@ -120,6 +142,20 @@ ftl_wptr_free(struct ftl_wptr *wptr)
 static void
 ftl_remove_wptr(struct ftl_wptr *wptr)
 {
+	struct spdk_ftl_dev *dev = wptr->dev;
+	struct ftl_band_flush *flush, *tmp;
+
+	if (spdk_unlikely(wptr->flush)) {
+		LIST_FOREACH_SAFE(flush, &dev->band_flush_list, list_entry, tmp) {
+			assert(flush->num_bands > 0);
+			if (--flush->num_bands == 0) {
+				flush->cb_fn(flush->cb_arg, 0);
+				LIST_REMOVE(flush, list_entry);
+				free(flush);
+			}
+		}
+	}
+
 	LIST_REMOVE(wptr, list_entry);
 	ftl_wptr_free(wptr);
 }
@@ -136,7 +172,6 @@ ftl_io_cmpl_cb(void *arg, const struct spdk_nvme_cpl *status)
 	ftl_trace_completion(io->dev, io, FTL_TRACE_COMPLETION_DISK);
 
 	ftl_io_dec_req(io);
-
 	if (ftl_io_done(io)) {
 		ftl_io_complete(io);
 	}
@@ -187,6 +222,7 @@ ftl_md_write_fail(struct ftl_io *io, int status)
 	char buf[128];
 
 	wptr = ftl_wptr_from_band(band);
+	assert(wptr);
 
 	SPDK_ERRLOG("Metadata write failed @ppa: %s, status: %d\n",
 		    ftl_ppa2str(wptr->ppa, buf, sizeof(buf)), status);
@@ -195,27 +231,54 @@ ftl_md_write_fail(struct ftl_io *io, int status)
 }
 
 static void
-ftl_md_write_cb(void *arg, int status)
+ftl_md_write_cb(struct ftl_io *io, void *arg, int status)
 {
-	struct ftl_io *io = arg;
+	struct spdk_ftl_dev *dev = io->dev;
+	struct ftl_nv_cache *nv_cache = &dev->nv_cache;
+	struct ftl_band *band = io->band;
 	struct ftl_wptr *wptr;
+	size_t id;
 
-	wptr = ftl_wptr_from_band(io->band);
+	wptr = ftl_wptr_from_band(band);
+	assert(wptr);
 
 	if (status) {
 		ftl_md_write_fail(io, status);
 		return;
 	}
 
-	ftl_band_set_next_state(io->band);
-	if (io->band->state == FTL_BAND_STATE_CLOSED) {
+	ftl_band_set_next_state(band);
+	if (band->state == FTL_BAND_STATE_CLOSED) {
+		if (ftl_dev_has_nv_cache(dev)) {
+			pthread_spin_lock(&nv_cache->lock);
+			nv_cache->num_available += ftl_band_user_lbks(band);
+
+			if (spdk_unlikely(nv_cache->num_available > nv_cache->num_data_blocks)) {
+				nv_cache->num_available = nv_cache->num_data_blocks;
+			}
+			pthread_spin_unlock(&nv_cache->lock);
+		}
+
+		/*
+		 * Go through the reloc_bitmap, checking for all the bands that had its data moved
+		 * onto current band and update their counters to allow them to be used for writing
+		 * (once they're closed and empty).
+		 */
+		for (id = 0; id < ftl_dev_num_bands(dev); ++id) {
+			if (spdk_bit_array_get(band->reloc_bitmap, id)) {
+				assert(dev->bands[id].num_reloc_bands > 0);
+				dev->bands[id].num_reloc_bands--;
+
+				spdk_bit_array_clear(band->reloc_bitmap, id);
+			}
+		}
+
 		ftl_remove_wptr(wptr);
 	}
 }
 
 static int
-ftl_ppa_read_next_ppa(struct ftl_io *io, struct ftl_ppa *ppa,
-		      size_t lbk, void *ctx)
+ftl_ppa_read_next_ppa(struct ftl_io *io, struct ftl_ppa *ppa)
 {
 	struct spdk_ftl_dev *dev = io->dev;
 	size_t lbk_cnt, max_lbks;
@@ -223,16 +286,16 @@ ftl_ppa_read_next_ppa(struct ftl_io *io, struct ftl_ppa *ppa,
 	assert(ftl_io_mode_ppa(io));
 	assert(io->iov_pos < io->iov_cnt);
 
-	if (lbk == 0) {
+	if (io->pos == 0) {
 		*ppa = io->ppa;
 	} else {
-		*ppa = ftl_band_next_xfer_ppa(io->band, io->ppa, lbk);
+		*ppa = ftl_band_next_xfer_ppa(io->band, io->ppa, io->pos);
 	}
 
 	assert(!ftl_ppa_invalid(*ppa));
 
 	/* Metadata has to be read in the way it's written (jumping across */
-	/* the chunks in xfer_size increments) */
+	/* the zones in xfer_size increments) */
 	if (io->flags & FTL_IO_MD) {
 		max_lbks = dev->xfer_size - (ppa->lbk % dev->xfer_size);
 		lbk_cnt = spdk_min(ftl_io_iovec_len_left(io), max_lbks);
@@ -250,9 +313,8 @@ ftl_wptr_close_band(struct ftl_wptr *wptr)
 	struct ftl_band *band = wptr->band;
 
 	ftl_band_set_state(band, FTL_BAND_STATE_CLOSING);
-	band->tail_md_ppa = wptr->ppa;
 
-	return ftl_band_write_tail_md(band, band->md.dma_buf, ftl_md_write_cb);
+	return ftl_band_write_tail_md(band, ftl_md_write_cb);
 }
 
 static int
@@ -260,15 +322,15 @@ ftl_wptr_open_band(struct ftl_wptr *wptr)
 {
 	struct ftl_band *band = wptr->band;
 
-	assert(ftl_band_chunk_is_first(band, wptr->chunk));
-	assert(band->md.num_vld == 0);
+	assert(ftl_band_zone_is_first(band, wptr->zone));
+	assert(band->lba_map.num_vld == 0);
 
-	ftl_band_clear_md(band);
+	ftl_band_clear_lba_map(band);
 
 	assert(band->state == FTL_BAND_STATE_PREP);
 	ftl_band_set_state(band, FTL_BAND_STATE_OPENING);
 
-	return ftl_band_write_head_md(band, band->md.dma_buf, ftl_md_write_cb);
+	return ftl_band_write_head_md(band, ftl_md_write_cb);
 }
 
 static int
@@ -277,17 +339,16 @@ ftl_submit_erase(struct ftl_io *io)
 	struct spdk_ftl_dev *dev = io->dev;
 	struct ftl_band *band = io->band;
 	struct ftl_ppa ppa = io->ppa;
-	struct ftl_chunk *chunk;
+	struct ftl_zone *zone;
 	uint64_t ppa_packed;
 	int rc = 0;
 	size_t i;
 
 	for (i = 0; i < io->lbk_cnt; ++i) {
 		if (i != 0) {
-			chunk = ftl_band_next_chunk(band, ftl_band_chunk_from_ppa(band, ppa));
-			assert(chunk->state == FTL_CHUNK_STATE_CLOSED ||
-			       chunk->state == FTL_CHUNK_STATE_VACANT);
-			ppa = chunk->start_ppa;
+			zone = ftl_band_next_zone(band, ftl_band_zone_from_ppa(band, ppa));
+			assert(zone->state == SPDK_BDEV_ZONE_STATE_CLOSED);
+			ppa = zone->start_ppa;
 		}
 
 		assert(ppa.lbk == 0);
@@ -296,7 +357,7 @@ ftl_submit_erase(struct ftl_io *io)
 		ftl_trace_submission(dev, io, ppa, 1);
 		rc = spdk_nvme_ocssd_ns_cmd_vector_reset(dev->ns, ftl_get_write_qpair(dev),
 				&ppa_packed, 1, NULL, ftl_io_cmpl_cb, io);
-		if (rc) {
+		if (spdk_unlikely(rc)) {
 			ftl_io_fail(io, rc);
 			SPDK_ERRLOG("Vector reset failed with status: %d\n", rc);
 			break;
@@ -331,6 +392,20 @@ ftl_check_read_thread(const struct spdk_ftl_dev *dev)
 	return dev->read_thread.thread == spdk_get_thread();
 }
 
+struct spdk_io_channel *
+ftl_get_io_channel(const struct spdk_ftl_dev *dev)
+{
+	if (ftl_check_core_thread(dev)) {
+		return dev->core_thread.ioch;
+	}
+	if (ftl_check_read_thread(dev)) {
+		return dev->read_thread.ioch;
+	}
+
+	assert(0);
+	return NULL;
+}
+
 int
 ftl_io_erase(struct ftl_io *io)
 {
@@ -349,11 +424,17 @@ ftl_next_write_band(struct spdk_ftl_dev *dev)
 {
 	struct ftl_band *band;
 
-	band = LIST_FIRST(&dev->free_bands);
-	if (!band) {
+	/* Find a free band that has all of its data moved onto other closed bands */
+	LIST_FOREACH(band, &dev->free_bands, list_entry) {
+		assert(band->state == FTL_BAND_STATE_FREE);
+		if (band->num_reloc_bands == 0 && band->num_reloc_blocks == 0) {
+			break;
+		}
+	}
+
+	if (spdk_unlikely(!band)) {
 		return NULL;
 	}
-	assert(band->state == FTL_BAND_STATE_FREE);
 
 	if (ftl_band_erase(band)) {
 		/* TODO: handle erase failure */
@@ -392,10 +473,63 @@ ftl_wptr_init(struct ftl_band *band)
 
 	wptr->dev = dev;
 	wptr->band = band;
-	wptr->chunk = CIRCLEQ_FIRST(&band->chunks);
-	wptr->ppa = wptr->chunk->start_ppa;
+	wptr->zone = CIRCLEQ_FIRST(&band->zones);
+	wptr->ppa = wptr->zone->start_ppa;
+	TAILQ_INIT(&wptr->pending_queue);
 
 	return wptr;
+}
+
+static int
+ftl_add_direct_wptr(struct ftl_band *band)
+{
+	struct spdk_ftl_dev *dev = band->dev;
+	struct ftl_wptr *wptr;
+
+	assert(band->state == FTL_BAND_STATE_OPEN);
+
+	wptr = ftl_wptr_init(band);
+	if (!wptr) {
+		return -1;
+	}
+
+	wptr->direct_mode = true;
+
+	if (ftl_band_alloc_lba_map(band)) {
+		ftl_wptr_free(wptr);
+		return -1;
+	}
+
+	LIST_INSERT_HEAD(&dev->wptr_list, wptr, list_entry);
+
+	SPDK_DEBUGLOG(SPDK_LOG_FTL_CORE, "wptr: direct band %u\n", band->id);
+	ftl_trace_write_band(dev, band);
+	return 0;
+}
+
+static void
+ftl_close_direct_wptr(struct ftl_band *band)
+{
+	struct ftl_wptr *wptr = ftl_wptr_from_band(band);
+
+	assert(wptr);
+	assert(wptr->direct_mode);
+	assert(band->state == FTL_BAND_STATE_CLOSED);
+
+	ftl_band_release_lba_map(band);
+
+	ftl_remove_wptr(wptr);
+}
+
+int
+ftl_band_set_direct_access(struct ftl_band *band, bool access)
+{
+	if (access) {
+		return ftl_add_direct_wptr(band);
+	} else {
+		ftl_close_direct_wptr(band);
+		return 0;
+	}
 }
 
 static int
@@ -434,6 +568,10 @@ ftl_wptr_advance(struct ftl_wptr *wptr, size_t xfer_size)
 	struct spdk_ftl_conf *conf = &dev->conf;
 	size_t next_thld;
 
+	if (spdk_unlikely(wptr->direct_mode)) {
+		return;
+	}
+
 	wptr->offset += xfer_size;
 	next_thld = (ftl_band_num_usable_lbks(band) * conf->band_thld) / 100;
 
@@ -441,18 +579,24 @@ ftl_wptr_advance(struct ftl_wptr *wptr, size_t xfer_size)
 		ftl_band_set_state(band, FTL_BAND_STATE_FULL);
 	}
 
-	wptr->chunk->busy = true;
+	wptr->zone->busy = true;
 	wptr->ppa = ftl_band_next_xfer_ppa(band, wptr->ppa, xfer_size);
-	wptr->chunk = ftl_band_next_operational_chunk(band, wptr->chunk);
+	wptr->zone = ftl_band_next_operational_zone(band, wptr->zone);
 
 	assert(!ftl_ppa_invalid(wptr->ppa));
 
-	SPDK_DEBUGLOG(SPDK_LOG_FTL_CORE, "wptr: grp:%d, pu:%d chunk:%d, lbk:%u\n",
+	SPDK_DEBUGLOG(SPDK_LOG_FTL_CORE, "wptr: grp:%d, pu:%d zone:%d, lbk:%u\n",
 		      wptr->ppa.grp, wptr->ppa.pu, wptr->ppa.chk, wptr->ppa.lbk);
 
 	if (wptr->offset >= next_thld && !dev->next_band) {
 		dev->next_band = ftl_next_write_band(dev);
 	}
+}
+
+static size_t
+ftl_wptr_user_lbks_left(const struct ftl_wptr *wptr)
+{
+	return ftl_band_user_lbks_left(wptr->band, wptr->offset);
 }
 
 static int
@@ -462,9 +606,9 @@ ftl_wptr_ready(struct ftl_wptr *wptr)
 
 	/* TODO: add handling of empty bands */
 
-	if (spdk_unlikely(!ftl_chunk_is_writable(wptr->chunk))) {
+	if (spdk_unlikely(!ftl_zone_is_writable(wptr->zone))) {
 		/* Erasing band may fail after it was assigned to wptr. */
-		if (spdk_unlikely(wptr->chunk->state == FTL_CHUNK_STATE_BAD)) {
+		if (spdk_unlikely(wptr->zone->state == SPDK_BDEV_ZONE_STATE_OFFLINE)) {
 			ftl_wptr_advance(wptr, wptr->dev->xfer_size);
 		}
 		return 0;
@@ -478,10 +622,13 @@ ftl_wptr_ready(struct ftl_wptr *wptr)
 	}
 
 	if (band->state == FTL_BAND_STATE_FULL) {
-		if (ftl_wptr_close_band(wptr)) {
-			/* TODO: need recovery here */
-			assert(false);
+		if (wptr->num_outstanding == 0) {
+			if (ftl_wptr_close_band(wptr)) {
+				/* TODO: need recovery here */
+				assert(false);
+			}
 		}
+
 		return 0;
 	}
 
@@ -490,17 +637,45 @@ ftl_wptr_ready(struct ftl_wptr *wptr)
 			/* TODO: need recovery here */
 			assert(false);
 		}
+
 		return 0;
 	}
 
 	return 1;
 }
 
+int
+ftl_flush_active_bands(struct spdk_ftl_dev *dev, spdk_ftl_fn cb_fn, void *cb_arg)
+{
+	struct ftl_wptr *wptr;
+	struct ftl_band_flush *flush;
+
+	assert(ftl_get_core_thread(dev) == spdk_get_thread());
+
+	flush = calloc(1, sizeof(*flush));
+	if (spdk_unlikely(!flush)) {
+		return -ENOMEM;
+	}
+
+	LIST_INSERT_HEAD(&dev->band_flush_list, flush, list_entry);
+
+	flush->cb_fn = cb_fn;
+	flush->cb_arg = cb_arg;
+	flush->dev = dev;
+
+	LIST_FOREACH(wptr, &dev->wptr_list, list_entry) {
+		wptr->flush = true;
+		flush->num_bands++;
+	}
+
+	return 0;
+}
+
 static const struct spdk_ftl_limit *
 ftl_get_limit(const struct spdk_ftl_dev *dev, int type)
 {
 	assert(type < SPDK_FTL_LIMIT_MAX);
-	return &dev->conf.defrag.limits[type];
+	return &dev->conf.limits[type];
 }
 
 static bool
@@ -590,28 +765,48 @@ ftl_remove_free_bands(struct spdk_ftl_dev *dev)
 }
 
 static void
-ftl_process_shutdown(struct spdk_ftl_dev *dev)
+ftl_wptr_pad_band(struct ftl_wptr *wptr)
 {
-	size_t size = ftl_rwb_num_acquired(dev->rwb, FTL_RWB_TYPE_INTERNAL) +
-		      ftl_rwb_num_acquired(dev->rwb, FTL_RWB_TYPE_USER);
+	struct spdk_ftl_dev *dev = wptr->dev;
+	size_t size = ftl_rwb_num_pending(dev->rwb);
+	size_t blocks_left, rwb_size, pad_size;
 
-	if (size >= dev->xfer_size) {
+	blocks_left = ftl_wptr_user_lbks_left(wptr);
+	assert(size <= blocks_left);
+	assert(blocks_left % dev->xfer_size == 0);
+	rwb_size = ftl_rwb_size(dev->rwb) - size;
+	pad_size = spdk_min(blocks_left - size, rwb_size);
+
+	/* Pad write buffer until band is full */
+	ftl_rwb_pad(dev, pad_size);
+}
+
+static void
+ftl_wptr_process_shutdown(struct ftl_wptr *wptr)
+{
+	struct spdk_ftl_dev *dev = wptr->dev;
+	size_t size = ftl_rwb_num_pending(dev->rwb);
+	size_t num_active = dev->xfer_size * ftl_rwb_get_active_batches(dev->rwb);
+
+	num_active = num_active ? num_active : dev->xfer_size;
+	if (size >= num_active) {
 		return;
 	}
 
 	/* If we reach this point we need to remove free bands */
 	/* and pad current wptr band to the end */
-	ftl_remove_free_bands(dev);
+	if (ftl_rwb_get_active_batches(dev->rwb) <= 1) {
+		ftl_remove_free_bands(dev);
+	}
 
-	/* Pad write buffer until band is full */
-	ftl_rwb_pad(dev, dev->xfer_size - size);
+	ftl_wptr_pad_band(wptr);
 }
 
 static int
 ftl_shutdown_complete(struct spdk_ftl_dev *dev)
 {
 	return !__atomic_load_n(&dev->num_inflight, __ATOMIC_SEQ_CST) &&
-	       LIST_EMPTY(&dev->wptr_list);
+	       LIST_EMPTY(&dev->wptr_list) && TAILQ_EMPTY(&dev->retry_queue);
 }
 
 void
@@ -650,17 +845,17 @@ static int
 ftl_invalidate_addr_unlocked(struct spdk_ftl_dev *dev, struct ftl_ppa ppa)
 {
 	struct ftl_band *band = ftl_band_from_ppa(dev, ppa);
-	struct ftl_md *md = &band->md;
+	struct ftl_lba_map *lba_map = &band->lba_map;
 	uint64_t offset;
 
 	offset = ftl_band_lbkoff_from_ppa(band, ppa);
 
 	/* The bit might be already cleared if two writes are scheduled to the */
 	/* same LBA at the same time */
-	if (spdk_bit_array_get(md->vld_map, offset)) {
-		assert(md->num_vld > 0);
-		spdk_bit_array_clear(md->vld_map, offset);
-		md->num_vld--;
+	if (spdk_bit_array_get(lba_map->vld, offset)) {
+		assert(lba_map->num_vld > 0);
+		spdk_bit_array_clear(lba_map->vld, offset);
+		lba_map->num_vld--;
 		return 1;
 	}
 
@@ -676,9 +871,9 @@ ftl_invalidate_addr(struct spdk_ftl_dev *dev, struct ftl_ppa ppa)
 	assert(!ftl_ppa_cached(ppa));
 	band = ftl_band_from_ppa(dev, ppa);
 
-	pthread_spin_lock(&band->md.lock);
+	pthread_spin_lock(&band->lba_map.lock);
 	rc = ftl_invalidate_addr_unlocked(dev, ppa);
-	pthread_spin_unlock(&band->md.lock);
+	pthread_spin_unlock(&band->lba_map.lock);
 
 	return rc;
 }
@@ -692,7 +887,7 @@ ftl_read_retry(int rc)
 static int
 ftl_read_canceled(int rc)
 {
-	return rc == 0;
+	return rc == -EFAULT || rc == 0;
 }
 
 static void
@@ -702,59 +897,6 @@ ftl_add_to_retry_queue(struct ftl_io *io)
 		io->flags |= FTL_IO_RETRY;
 		TAILQ_INSERT_TAIL(&io->dev->retry_queue, io, retry_entry);
 	}
-}
-
-static int
-ftl_submit_read(struct ftl_io *io, ftl_next_ppa_fn next_ppa,
-		void *ctx)
-{
-	struct spdk_ftl_dev *dev = io->dev;
-	struct ftl_ppa ppa;
-	int rc = 0, lbk_cnt;
-
-	while (io->pos < io->lbk_cnt) {
-		/* We might hit the cache here, if so, skip the read */
-		lbk_cnt = rc = next_ppa(io, &ppa, io->pos, ctx);
-
-		/* We might need to retry the read from scratch (e.g. */
-		/* because write was under way and completed before */
-		/* we could read it from rwb */
-		if (ftl_read_retry(rc)) {
-			continue;
-		}
-
-		/* We don't have to schedule the read, as it was read from cache */
-		if (ftl_read_canceled(rc)) {
-			ftl_io_advance(io, 1);
-			continue;
-		}
-
-		assert(lbk_cnt > 0);
-
-		ftl_trace_submission(dev, io, ppa, lbk_cnt);
-		rc = spdk_nvme_ns_cmd_read(dev->ns, ftl_get_read_qpair(dev),
-					   ftl_io_iovec_addr(io),
-					   ftl_ppa_addr_pack(io->dev, ppa), lbk_cnt,
-					   ftl_io_cmpl_cb, io, 0);
-		if (rc == -ENOMEM) {
-			ftl_add_to_retry_queue(io);
-			break;
-		} else if (rc) {
-			ftl_io_fail(io, rc);
-			break;
-		}
-
-		ftl_io_inc_req(io);
-		ftl_io_advance(io, lbk_cnt);
-	}
-
-	/* If we didn't have to read anything from the device, */
-	/* complete the request right away */
-	if (ftl_io_done(io)) {
-		ftl_io_complete(io);
-	}
-
-	return rc;
 }
 
 static int
@@ -782,26 +924,24 @@ out:
 }
 
 static int
-ftl_lba_read_next_ppa(struct ftl_io *io, struct ftl_ppa *ppa,
-		      size_t lbk, void *ctx)
+ftl_lba_read_next_ppa(struct ftl_io *io, struct ftl_ppa *ppa)
 {
 	struct spdk_ftl_dev *dev = io->dev;
 	struct ftl_ppa next_ppa;
 	size_t i;
 
-	*ppa = ftl_l2p_get(dev, io->lba + lbk);
+	*ppa = ftl_l2p_get(dev, ftl_io_current_lba(io));
 
-	SPDK_DEBUGLOG(SPDK_LOG_FTL_CORE, "Read ppa:%lx, lba:%lu\n", ppa->ppa, io->lba);
+	SPDK_DEBUGLOG(SPDK_LOG_FTL_CORE, "Read ppa:%lx, lba:%lu\n",
+		      ppa->ppa, ftl_io_current_lba(io));
 
 	/* If the PPA is invalid, skip it (the buffer should already be zero'ed) */
 	if (ftl_ppa_invalid(*ppa)) {
-		ftl_trace_completion(io->dev, io, FTL_TRACE_COMPLETION_INVALID);
-		return 0;
+		return -EFAULT;
 	}
 
 	if (ftl_ppa_cached(*ppa)) {
-		if (!ftl_ppa_cache_read(io, io->lba + lbk, *ppa, ftl_io_iovec_addr(io))) {
-			ftl_trace_completion(io->dev, io, FTL_TRACE_COMPLETION_CACHE);
+		if (!ftl_ppa_cache_read(io, ftl_io_current_lba(io), *ppa, ftl_io_iovec_addr(io))) {
 			return 0;
 		}
 
@@ -810,7 +950,7 @@ ftl_lba_read_next_ppa(struct ftl_io *io, struct ftl_ppa *ppa,
 	}
 
 	for (i = 1; i < ftl_io_iovec_len_left(io); ++i) {
-		next_ppa = ftl_l2p_get(dev, io->lba + lbk + i);
+		next_ppa = ftl_l2p_get(dev, ftl_io_get_lba(io, io->pos + i));
 
 		if (ftl_ppa_invalid(next_ppa) || ftl_ppa_cached(next_ppa)) {
 			break;
@@ -822,6 +962,67 @@ ftl_lba_read_next_ppa(struct ftl_io *io, struct ftl_ppa *ppa,
 	}
 
 	return i;
+}
+
+static int
+ftl_submit_read(struct ftl_io *io)
+{
+	struct spdk_ftl_dev *dev = io->dev;
+	struct ftl_ppa ppa;
+	int rc = 0, lbk_cnt;
+
+	assert(LIST_EMPTY(&io->children));
+
+	while (io->pos < io->lbk_cnt) {
+		if (ftl_io_mode_ppa(io)) {
+			lbk_cnt = rc = ftl_ppa_read_next_ppa(io, &ppa);
+		} else {
+			lbk_cnt = rc = ftl_lba_read_next_ppa(io, &ppa);
+		}
+
+		/* We might need to retry the read from scratch (e.g. */
+		/* because write was under way and completed before */
+		/* we could read it from rwb */
+		if (ftl_read_retry(rc)) {
+			continue;
+		}
+
+		/* We don't have to schedule the read, as it was read from cache */
+		if (ftl_read_canceled(rc)) {
+			ftl_io_advance(io, 1);
+			ftl_trace_completion(io->dev, io, rc ? FTL_TRACE_COMPLETION_INVALID :
+					     FTL_TRACE_COMPLETION_CACHE);
+			rc = 0;
+			continue;
+		}
+
+		assert(lbk_cnt > 0);
+
+		ftl_trace_submission(dev, io, ppa, lbk_cnt);
+		rc = spdk_nvme_ns_cmd_read(dev->ns, ftl_get_read_qpair(dev),
+					   ftl_io_iovec_addr(io),
+					   ftl_ppa_addr_pack(io->dev, ppa), lbk_cnt,
+					   ftl_io_cmpl_cb, io, 0);
+		if (spdk_unlikely(rc)) {
+			if (rc == -ENOMEM) {
+				ftl_add_to_retry_queue(io);
+			} else {
+				ftl_io_fail(io, rc);
+			}
+			break;
+		}
+
+		ftl_io_inc_req(io);
+		ftl_io_advance(io, lbk_cnt);
+	}
+
+	/* If we didn't have to read anything from the device, */
+	/* complete the request right away */
+	if (ftl_io_done(io)) {
+		ftl_io_complete(io);
+	}
+
+	return rc;
 }
 
 static void
@@ -855,6 +1056,259 @@ ftl_process_flush(struct spdk_ftl_dev *dev, struct ftl_rwb_batch *batch)
 }
 
 static void
+ftl_nv_cache_wrap_cb(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
+{
+	struct ftl_nv_cache *nv_cache = cb_arg;
+
+	if (!success) {
+		SPDK_ERRLOG("Unable to write non-volatile cache metadata header\n");
+		/* TODO: go into read-only mode */
+		assert(0);
+	}
+
+	pthread_spin_lock(&nv_cache->lock);
+	nv_cache->ready = true;
+	pthread_spin_unlock(&nv_cache->lock);
+
+	spdk_bdev_free_io(bdev_io);
+}
+
+static void
+ftl_nv_cache_wrap(void *ctx)
+{
+	struct ftl_nv_cache *nv_cache = ctx;
+	int rc;
+
+	rc = ftl_nv_cache_write_header(nv_cache, false, ftl_nv_cache_wrap_cb, nv_cache);
+	if (spdk_unlikely(rc != 0)) {
+		SPDK_ERRLOG("Unable to write non-volatile cache metadata header: %s\n",
+			    spdk_strerror(-rc));
+		/* TODO: go into read-only mode */
+		assert(0);
+	}
+}
+
+static uint64_t
+ftl_reserve_nv_cache(struct ftl_nv_cache *nv_cache, size_t *num_lbks, unsigned int *phase)
+{
+	struct spdk_bdev *bdev = spdk_bdev_desc_get_bdev(nv_cache->bdev_desc);
+	struct spdk_ftl_dev *dev = SPDK_CONTAINEROF(nv_cache, struct spdk_ftl_dev, nv_cache);
+	uint64_t num_available, cache_size, cache_addr = FTL_LBA_INVALID;
+
+	cache_size = spdk_bdev_get_num_blocks(bdev);
+
+	pthread_spin_lock(&nv_cache->lock);
+	if (spdk_unlikely(nv_cache->num_available == 0 || !nv_cache->ready)) {
+		goto out;
+	}
+
+	num_available = spdk_min(nv_cache->num_available, *num_lbks);
+	num_available = spdk_min(num_available, dev->conf.nv_cache.max_request_cnt);
+
+	if (spdk_unlikely(nv_cache->current_addr + num_available > cache_size)) {
+		*num_lbks = cache_size - nv_cache->current_addr;
+	} else {
+		*num_lbks = num_available;
+	}
+
+	cache_addr = nv_cache->current_addr;
+	nv_cache->current_addr += *num_lbks;
+	nv_cache->num_available -= *num_lbks;
+	*phase = nv_cache->phase;
+
+	if (nv_cache->current_addr == spdk_bdev_get_num_blocks(bdev)) {
+		nv_cache->current_addr = FTL_NV_CACHE_DATA_OFFSET;
+		nv_cache->phase = ftl_nv_cache_next_phase(nv_cache->phase);
+		nv_cache->ready = false;
+		spdk_thread_send_msg(ftl_get_core_thread(dev), ftl_nv_cache_wrap, nv_cache);
+	}
+out:
+	pthread_spin_unlock(&nv_cache->lock);
+	return cache_addr;
+}
+
+static struct ftl_io *
+ftl_alloc_io_nv_cache(struct ftl_io *parent, size_t num_lbks)
+{
+	struct ftl_io_init_opts opts = {
+		.dev		= parent->dev,
+		.parent		= parent,
+		.data		= ftl_io_iovec_addr(parent),
+		.lbk_cnt	= num_lbks,
+		.flags		= parent->flags | FTL_IO_CACHE,
+	};
+
+	return ftl_io_init_internal(&opts);
+}
+
+static void
+ftl_nv_cache_submit_cb(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
+{
+	struct ftl_io *io = cb_arg;
+	struct ftl_nv_cache *nv_cache = &io->dev->nv_cache;
+
+	if (spdk_unlikely(!success)) {
+		SPDK_ERRLOG("Non-volatile cache write failed at %"PRIx64"\n", io->ppa.ppa);
+		io->status = -EIO;
+	}
+
+	ftl_io_dec_req(io);
+	if (ftl_io_done(io)) {
+		spdk_mempool_put(nv_cache->md_pool, io->md);
+		ftl_io_complete(io);
+	}
+
+	spdk_bdev_free_io(bdev_io);
+}
+
+static void
+ftl_submit_nv_cache(void *ctx)
+{
+	struct ftl_io *io = ctx;
+	struct spdk_ftl_dev *dev = io->dev;
+	struct spdk_thread *thread;
+	struct ftl_nv_cache *nv_cache = &dev->nv_cache;
+	struct ftl_io_channel *ioch;
+	int rc;
+
+	ioch = spdk_io_channel_get_ctx(io->ioch);
+	thread = spdk_io_channel_get_thread(io->ioch);
+
+	rc = spdk_bdev_write_blocks_with_md(nv_cache->bdev_desc, ioch->cache_ioch,
+					    ftl_io_iovec_addr(io), io->md, io->ppa.ppa,
+					    io->lbk_cnt, ftl_nv_cache_submit_cb, io);
+	if (rc == -ENOMEM) {
+		spdk_thread_send_msg(thread, ftl_submit_nv_cache, io);
+		return;
+	} else if (rc) {
+		SPDK_ERRLOG("Write to persistent cache failed: %s (%"PRIu64", %"PRIu64")\n",
+			    spdk_strerror(-rc), io->ppa.ppa, io->lbk_cnt);
+		spdk_mempool_put(nv_cache->md_pool, io->md);
+		io->status = -EIO;
+		ftl_io_complete(io);
+		return;
+	}
+
+	ftl_io_advance(io, io->lbk_cnt);
+	ftl_io_inc_req(io);
+}
+
+static void
+ftl_nv_cache_fill_md(struct ftl_io *io, unsigned int phase)
+{
+	struct spdk_bdev *bdev;
+	struct ftl_nv_cache *nv_cache = &io->dev->nv_cache;
+	uint64_t lbk_off, lba;
+	void *md_buf = io->md;
+
+	bdev = spdk_bdev_desc_get_bdev(nv_cache->bdev_desc);
+
+	for (lbk_off = 0; lbk_off < io->lbk_cnt; ++lbk_off) {
+		lba = ftl_nv_cache_pack_lba(ftl_io_get_lba(io, lbk_off), phase);
+		memcpy(md_buf, &lba, sizeof(lba));
+		md_buf += spdk_bdev_get_md_size(bdev);
+	}
+}
+
+static void
+_ftl_write_nv_cache(void *ctx)
+{
+	struct ftl_io *child, *io = ctx;
+	struct spdk_ftl_dev *dev = io->dev;
+	struct spdk_thread *thread;
+	unsigned int phase;
+	uint64_t num_lbks;
+
+	thread = spdk_io_channel_get_thread(io->ioch);
+
+	while (io->pos < io->lbk_cnt) {
+		num_lbks = ftl_io_iovec_len_left(io);
+
+		child = ftl_alloc_io_nv_cache(io, num_lbks);
+		if (spdk_unlikely(!child)) {
+			spdk_thread_send_msg(thread, _ftl_write_nv_cache, io);
+			return;
+		}
+
+		child->md = spdk_mempool_get(dev->nv_cache.md_pool);
+		if (spdk_unlikely(!child->md)) {
+			ftl_io_free(child);
+			spdk_thread_send_msg(thread, _ftl_write_nv_cache, io);
+			break;
+		}
+
+		/* Reserve area on the write buffer cache */
+		child->ppa.ppa = ftl_reserve_nv_cache(&dev->nv_cache, &num_lbks, &phase);
+		if (child->ppa.ppa == FTL_LBA_INVALID) {
+			spdk_mempool_put(dev->nv_cache.md_pool, child->md);
+			ftl_io_free(child);
+			spdk_thread_send_msg(thread, _ftl_write_nv_cache, io);
+			break;
+		}
+
+		/* Shrink the IO if there isn't enough room in the cache to fill the whole iovec */
+		if (spdk_unlikely(num_lbks != ftl_io_iovec_len_left(io))) {
+			ftl_io_shrink_iovec(child, num_lbks);
+		}
+
+		ftl_nv_cache_fill_md(child, phase);
+		ftl_submit_nv_cache(child);
+	}
+
+	if (ftl_io_done(io)) {
+		ftl_io_complete(io);
+	}
+}
+
+static void
+ftl_write_nv_cache(struct ftl_io *parent)
+{
+	ftl_io_reset(parent);
+	parent->flags |= FTL_IO_CACHE;
+	_ftl_write_nv_cache(parent);
+}
+
+int
+ftl_nv_cache_write_header(struct ftl_nv_cache *nv_cache, bool shutdown,
+			  spdk_bdev_io_completion_cb cb_fn, void *cb_arg)
+{
+	struct spdk_ftl_dev *dev = SPDK_CONTAINEROF(nv_cache, struct spdk_ftl_dev, nv_cache);
+	struct ftl_nv_cache_header *hdr = nv_cache->dma_buf;
+	struct spdk_bdev *bdev;
+	struct ftl_io_channel *ioch;
+
+	bdev = spdk_bdev_desc_get_bdev(nv_cache->bdev_desc);
+	ioch = spdk_io_channel_get_ctx(ftl_get_io_channel(dev));
+
+	memset(hdr, 0, spdk_bdev_get_block_size(bdev));
+
+	hdr->phase = (uint8_t)nv_cache->phase;
+	hdr->size = spdk_bdev_get_num_blocks(bdev);
+	hdr->uuid = dev->uuid;
+	hdr->version = FTL_NV_CACHE_HEADER_VERSION;
+	hdr->current_addr = shutdown ? nv_cache->current_addr : FTL_LBA_INVALID;
+	hdr->checksum = spdk_crc32c_update(hdr, offsetof(struct ftl_nv_cache_header, checksum), 0);
+
+	return spdk_bdev_write_blocks(nv_cache->bdev_desc, ioch->cache_ioch, hdr, 0, 1,
+				      cb_fn, cb_arg);
+}
+
+int
+ftl_nv_cache_scrub(struct ftl_nv_cache *nv_cache, spdk_bdev_io_completion_cb cb_fn, void *cb_arg)
+{
+	struct spdk_ftl_dev *dev = SPDK_CONTAINEROF(nv_cache, struct spdk_ftl_dev, nv_cache);
+	struct ftl_io_channel *ioch;
+	struct spdk_bdev *bdev;
+
+	ioch = spdk_io_channel_get_ctx(ftl_get_io_channel(dev));
+	bdev = spdk_bdev_desc_get_bdev(nv_cache->bdev_desc);
+
+	return spdk_bdev_write_zeroes_blocks(nv_cache->bdev_desc, ioch->cache_ioch, 1,
+					     spdk_bdev_get_num_blocks(bdev) - 1,
+					     cb_fn, cb_arg);
+}
+
+static void
 ftl_write_fail(struct ftl_io *io, int status)
 {
 	struct ftl_rwb_batch *batch = io->rwb_batch;
@@ -882,12 +1336,12 @@ ftl_write_fail(struct ftl_io *io, int status)
 }
 
 static void
-ftl_write_cb(void *arg, int status)
+ftl_write_cb(struct ftl_io *io, void *arg, int status)
 {
-	struct ftl_io *io = arg;
 	struct spdk_ftl_dev *dev = io->dev;
 	struct ftl_rwb_batch *batch = io->rwb_batch;
 	struct ftl_rwb_entry *entry;
+	struct ftl_band *band;
 
 	if (status) {
 		ftl_write_fail(io, status);
@@ -896,9 +1350,15 @@ ftl_write_cb(void *arg, int status)
 
 	assert(io->lbk_cnt == dev->xfer_size);
 	ftl_rwb_foreach(entry, batch) {
+		band = entry->band;
 		if (!(io->flags & FTL_IO_MD) && !(entry->flags & FTL_IO_PAD)) {
 			/* Verify that the LBA is set for user lbks */
 			assert(entry->lba != FTL_LBA_INVALID);
+		}
+
+		if (band != NULL) {
+			assert(band->num_reloc_blocks > 0);
+			band->num_reloc_blocks--;
 		}
 
 		SPDK_DEBUGLOG(SPDK_LOG_FTL_CORE, "Write ppa:%lu, lba:%lu\n",
@@ -969,7 +1429,7 @@ ftl_update_l2p(struct spdk_ftl_dev *dev, const struct ftl_rwb_entry *entry,
 	/* the L2P as wall as metadata. The valid bits in metadata are used to */
 	/* check weak writes validity. */
 	band = ftl_band_from_ppa(dev, prev_ppa);
-	pthread_spin_lock(&band->md.lock);
+	pthread_spin_lock(&band->lba_map.lock);
 
 	valid = ftl_invalidate_addr_unlocked(dev, prev_ppa);
 
@@ -979,12 +1439,12 @@ ftl_update_l2p(struct spdk_ftl_dev *dev, const struct ftl_rwb_entry *entry,
 		ftl_l2p_set(dev, entry->lba, ppa);
 	}
 
-	pthread_spin_unlock(&band->md.lock);
+	pthread_spin_unlock(&band->lba_map.lock);
 }
 
 static struct ftl_io *
 ftl_io_init_child_write(struct ftl_io *parent, struct ftl_ppa ppa,
-			void *data, void *md, spdk_ftl_fn cb)
+			void *data, void *md, ftl_io_fn cb)
 {
 	struct ftl_io *io;
 	struct spdk_ftl_dev *dev = parent->dev;
@@ -997,9 +1457,8 @@ ftl_io_init_child_write(struct ftl_io *parent, struct ftl_ppa ppa,
 		.size		= sizeof(struct ftl_io),
 		.flags		= 0,
 		.type		= FTL_IO_WRITE,
-		.iov_cnt	= 1,
-		.req_size	= dev->xfer_size,
-		.fn		= cb,
+		.lbk_cnt	= dev->xfer_size,
+		.cb_fn		= cb,
 		.data		= data,
 		.md		= md,
 	};
@@ -1015,13 +1474,21 @@ ftl_io_init_child_write(struct ftl_io *parent, struct ftl_ppa ppa,
 }
 
 static void
-ftl_io_child_write_cb(void *ctx, int status)
+ftl_io_child_write_cb(struct ftl_io *io, void *ctx, int status)
 {
-	struct ftl_chunk *chunk;
-	struct ftl_io *io = ctx;
+	struct ftl_zone *zone;
+	struct ftl_wptr *wptr;
 
-	chunk = ftl_band_chunk_from_ppa(io->band, io->ppa);
-	chunk->busy = false;
+	zone = ftl_band_zone_from_ppa(io->band, io->ppa);
+	wptr = ftl_wptr_from_band(io->band);
+
+	zone->busy = false;
+	zone->write_offset += io->lbk_cnt;
+
+	/* If some other write on the same band failed the write pointer would already be freed */
+	if (spdk_likely(wptr)) {
+		wptr->num_outstanding--;
+	}
 }
 
 static int
@@ -1029,26 +1496,35 @@ ftl_submit_child_write(struct ftl_wptr *wptr, struct ftl_io *io, int lbk_cnt)
 {
 	struct spdk_ftl_dev	*dev = io->dev;
 	struct ftl_io		*child;
-	struct iovec		*iov = ftl_io_iovec(io);
 	int			rc;
+	struct ftl_ppa		ppa;
 
-	/* Split IO to child requests and release chunk immediately after child is completed */
-	child = ftl_io_init_child_write(io, wptr->ppa, iov[io->iov_pos].iov_base,
+	if (spdk_likely(!wptr->direct_mode)) {
+		ppa = wptr->ppa;
+	} else {
+		assert(io->flags & FTL_IO_DIRECT_ACCESS);
+		assert(io->ppa.chk == wptr->band->id);
+		ppa = io->ppa;
+	}
+
+	/* Split IO to child requests and release zone immediately after child is completed */
+	child = ftl_io_init_child_write(io, ppa, ftl_io_iovec_addr(io),
 					ftl_io_get_md(io), ftl_io_child_write_cb);
 	if (!child) {
 		return -EAGAIN;
 	}
 
+	wptr->num_outstanding++;
 	rc = spdk_nvme_ns_cmd_write_with_md(dev->ns, ftl_get_write_qpair(dev),
-					    child->iov.iov_base, child->md,
-					    ftl_ppa_addr_pack(dev, wptr->ppa),
+					    ftl_io_iovec_addr(child), child->md,
+					    ftl_ppa_addr_pack(dev, ppa),
 					    lbk_cnt, ftl_io_cmpl_cb, child, 0, 0, 0);
 	if (rc) {
+		wptr->num_outstanding--;
 		ftl_io_fail(child, rc);
 		ftl_io_complete(child);
-		SPDK_ERRLOG("spdk_nvme_ns_cmd_write failed with status:%d, ppa:%lu\n",
-			    rc, wptr->ppa.ppa);
-
+		SPDK_ERRLOG("spdk_nvme_ns_cmd_write_with_md failed with status:%d, ppa:%lu\n",
+			    rc, ppa.ppa);
 		return -EIO;
 	}
 
@@ -1062,39 +1538,31 @@ static int
 ftl_submit_write(struct ftl_wptr *wptr, struct ftl_io *io)
 {
 	struct spdk_ftl_dev	*dev = io->dev;
-	struct iovec		*iov = ftl_io_iovec(io);
 	int			rc = 0;
-	size_t			lbk_cnt;
+
+	assert(io->lbk_cnt % dev->xfer_size == 0);
 
 	while (io->iov_pos < io->iov_cnt) {
-		lbk_cnt = iov[io->iov_pos].iov_len / PAGE_SIZE;
-		assert(iov[io->iov_pos].iov_len > 0);
-		assert(lbk_cnt == dev->xfer_size);
-
 		/* There are no guarantees of the order of completion of NVMe IO submission queue */
-		/* so wait until chunk is not busy before submitting another write */
-		if (wptr->chunk->busy) {
-			wptr->current_io = io;
+		/* so wait until zone is not busy before submitting another write */
+		if (wptr->zone->busy) {
+			TAILQ_INSERT_TAIL(&wptr->pending_queue, io, retry_entry);
 			rc = -EAGAIN;
 			break;
 		}
 
-		rc = ftl_submit_child_write(wptr, io, lbk_cnt);
-
-		if (rc == -EAGAIN) {
-			wptr->current_io = io;
-			break;
-		} else if (rc) {
-			ftl_io_fail(io, rc);
+		rc = ftl_submit_child_write(wptr, io, dev->xfer_size);
+		if (spdk_unlikely(rc)) {
+			if (rc == -EAGAIN) {
+				TAILQ_INSERT_TAIL(&wptr->pending_queue, io, retry_entry);
+			} else {
+				ftl_io_fail(io, rc);
+			}
 			break;
 		}
 
-		ftl_trace_submission(dev, io, wptr->ppa, lbk_cnt);
-
-		/* Update parent iovec */
-		ftl_io_advance(io, lbk_cnt);
-
-		ftl_wptr_advance(wptr, lbk_cnt);
+		ftl_trace_submission(dev, io, wptr->ppa, dev->xfer_size);
+		ftl_wptr_advance(wptr, dev->xfer_size);
 	}
 
 	if (ftl_io_done(io)) {
@@ -1109,7 +1577,7 @@ static void
 ftl_flush_pad_batch(struct spdk_ftl_dev *dev)
 {
 	struct ftl_rwb *rwb = dev->rwb;
-	size_t size;
+	size_t size, num_entries;
 
 	size = ftl_rwb_num_acquired(rwb, FTL_RWB_TYPE_INTERNAL) +
 	       ftl_rwb_num_acquired(rwb, FTL_RWB_TYPE_USER);
@@ -1121,8 +1589,9 @@ ftl_flush_pad_batch(struct spdk_ftl_dev *dev)
 	/* Only add padding when there's less than xfer size */
 	/* entries in the buffer. Otherwise we just have to wait */
 	/* for the entries to become ready. */
-	if (size < dev->xfer_size) {
-		ftl_rwb_pad(dev, dev->xfer_size - (size % dev->xfer_size));
+	num_entries = ftl_rwb_get_active_batches(dev->rwb) * dev->xfer_size;
+	if (size < num_entries) {
+		ftl_rwb_pad(dev, num_entries - (size % num_entries));
 	}
 }
 
@@ -1135,11 +1604,13 @@ ftl_wptr_process_writes(struct ftl_wptr *wptr)
 	struct ftl_io		*io;
 	struct ftl_ppa		ppa, prev_ppa;
 
-	if (wptr->current_io) {
-		if (ftl_submit_write(wptr, wptr->current_io) == -EAGAIN) {
+	if (spdk_unlikely(!TAILQ_EMPTY(&wptr->pending_queue))) {
+		io = TAILQ_FIRST(&wptr->pending_queue);
+		TAILQ_REMOVE(&wptr->pending_queue, io, retry_entry);
+
+		if (ftl_submit_write(wptr, io) == -EAGAIN) {
 			return 0;
 		}
-		wptr->current_io = NULL;
 	}
 
 	/* Make sure the band is prepared for writing */
@@ -1148,7 +1619,11 @@ ftl_wptr_process_writes(struct ftl_wptr *wptr)
 	}
 
 	if (dev->halt) {
-		ftl_process_shutdown(dev);
+		ftl_wptr_process_shutdown(wptr);
+	}
+
+	if (spdk_unlikely(wptr->flush)) {
+		ftl_wptr_pad_band(wptr);
 	}
 
 	batch = ftl_rwb_pop(dev->rwb);
@@ -1169,8 +1644,15 @@ ftl_wptr_process_writes(struct ftl_wptr *wptr)
 
 	ppa = wptr->ppa;
 	ftl_rwb_foreach(entry, batch) {
-		entry->ppa = ppa;
+		/* Update band's relocation stats if the IO comes from reloc */
+		if (entry->flags & FTL_IO_WEAK) {
+			if (!spdk_bit_array_get(wptr->band->reloc_bitmap, entry->band->id)) {
+				spdk_bit_array_set(wptr->band->reloc_bitmap, entry->band->id);
+				entry->band->num_reloc_bands++;
+			}
+		}
 
+		entry->ppa = ppa;
 		if (entry->lba != FTL_LBA_INVALID) {
 			pthread_spin_lock(&entry->lock);
 			prev_ppa = ftl_l2p_get(dev, entry->lba);
@@ -1237,19 +1719,19 @@ ftl_process_writes(struct spdk_ftl_dev *dev)
 static void
 ftl_rwb_entry_fill(struct ftl_rwb_entry *entry, struct ftl_io *io)
 {
-	struct ftl_band *band;
-
 	memcpy(entry->data, ftl_io_iovec_addr(io), FTL_BLOCK_SIZE);
 
 	if (ftl_rwb_entry_weak(entry)) {
-		band = ftl_band_from_ppa(io->dev, io->ppa);
-		entry->ppa = ftl_band_next_ppa(band, io->ppa, io->pos);
+		entry->band = ftl_band_from_ppa(io->dev, io->ppa);
+		entry->ppa = ftl_band_next_ppa(entry->band, io->ppa, io->pos);
+		entry->band->num_reloc_blocks++;
 	}
 
 	entry->trace = io->trace;
+	entry->lba = ftl_io_current_lba(io);
 
 	if (entry->md) {
-		memcpy(entry->md, &entry->lba, sizeof(io->lba));
+		memcpy(entry->md, &entry->lba, sizeof(entry->lba));
 	}
 }
 
@@ -1260,11 +1742,9 @@ ftl_rwb_fill(struct ftl_io *io)
 	struct ftl_rwb_entry *entry;
 	struct ftl_ppa ppa = { .cached = 1 };
 	int flags = ftl_rwb_flags_from_io(io);
-	uint64_t lba;
 
 	while (io->pos < io->lbk_cnt) {
-		lba = ftl_io_current_lba(io);
-		if (lba == FTL_LBA_INVALID) {
+		if (ftl_io_current_lba(io) == FTL_LBA_INVALID) {
 			ftl_io_advance(io, 1);
 			continue;
 		}
@@ -1274,22 +1754,28 @@ ftl_rwb_fill(struct ftl_io *io)
 			return -EAGAIN;
 		}
 
-		entry->lba = lba;
 		ftl_rwb_entry_fill(entry, io);
 
 		ppa.offset = entry->pos;
 
-		ftl_io_advance(io, 1);
+		ftl_trace_rwb_fill(dev, io);
 		ftl_update_l2p(dev, entry, ppa);
+		ftl_io_advance(io, 1);
 
 		/* Needs to be done after L2P is updated to avoid race with */
 		/* write completion callback when it's processed faster than */
 		/* L2P is set in update_l2p(). */
 		ftl_rwb_push(entry);
-		ftl_trace_rwb_fill(dev, io);
 	}
 
-	ftl_io_complete(io);
+	if (ftl_io_done(io)) {
+		if (ftl_dev_has_nv_cache(dev) && !(io->flags & FTL_IO_BYPASS_CACHE)) {
+			ftl_write_nv_cache(io);
+		} else {
+			ftl_io_complete(io);
+		}
+	}
+
 	return 0;
 }
 
@@ -1302,7 +1788,7 @@ ftl_dev_needs_defrag(struct spdk_ftl_dev *dev)
 		return false;
 	}
 
-	if (dev->df_band) {
+	if (ftl_reloc_is_defrag_active(dev->reloc)) {
 		return false;
 	}
 
@@ -1325,7 +1811,7 @@ ftl_band_calc_merit(struct ftl_band *band, size_t *threshold_valid)
 		return 0.0;
 	}
 
-	valid =  threshold_valid ? (usable - *threshold_valid) : band->md.num_vld;
+	valid =  threshold_valid ? (usable - *threshold_valid) : band->lba_map.num_vld;
 	invalid = usable - valid;
 
 	/* Add one to avoid division by 0 */
@@ -1344,7 +1830,7 @@ ftl_band_needs_defrag(struct ftl_band *band, struct spdk_ftl_dev *dev)
 		return true;
 	}
 
-	thld_vld = (ftl_band_num_usable_lbks(band) * conf->defrag.invalid_thld) / 100;
+	thld_vld = (ftl_band_num_usable_lbks(band) * conf->invalid_thld) / 100;
 
 	return band->merit > ftl_band_calc_merit(band, &thld_vld);
 }
@@ -1377,10 +1863,9 @@ ftl_process_relocs(struct spdk_ftl_dev *dev)
 	struct ftl_band *band;
 
 	if (ftl_dev_needs_defrag(dev)) {
-		band = dev->df_band = ftl_select_defrag_band(dev);
-
+		band = ftl_select_defrag_band(dev);
 		if (band) {
-			ftl_reloc_add(dev->reloc, band, 0, ftl_num_band_lbks(dev), 0);
+			ftl_reloc_add(dev->reloc, band, 0, ftl_num_band_lbks(dev), 0, true);
 			ftl_trace_defrag_band(dev, band);
 		}
 	}
@@ -1401,7 +1886,10 @@ spdk_ftl_dev_get_attrs(const struct spdk_ftl_dev *dev, struct spdk_ftl_attrs *at
 	attrs->lbk_cnt = dev->num_lbas;
 	attrs->lbk_size = FTL_BLOCK_SIZE;
 	attrs->range = dev->range;
-	attrs->cache_bdev_desc = dev->cache_bdev_desc;
+	attrs->cache_bdev_desc = dev->nv_cache.bdev_desc;
+	attrs->num_zones = dev->geo.num_chk;
+	attrs->zone_size = dev->geo.clba;
+	attrs->conf = dev->conf;
 }
 
 static void
@@ -1410,50 +1898,52 @@ _ftl_io_write(void *ctx)
 	ftl_io_write((struct ftl_io *)ctx);
 }
 
-int
+static int
+ftl_rwb_fill_leaf(struct ftl_io *io)
+{
+	int rc;
+
+	rc = ftl_rwb_fill(io);
+	if (rc == -EAGAIN) {
+		spdk_thread_send_msg(spdk_io_channel_get_thread(io->ioch),
+				     _ftl_io_write, io);
+		return 0;
+	}
+
+	return rc;
+}
+
+static int
+ftl_submit_write_leaf(struct ftl_io *io)
+{
+	int rc;
+
+	rc = ftl_submit_write(ftl_wptr_from_band(io->band), io);
+	if (rc == -EAGAIN) {
+		/* EAGAIN means that the request was put on the pending queue */
+		return 0;
+	}
+
+	return rc;
+}
+
+void
 ftl_io_write(struct ftl_io *io)
 {
 	struct spdk_ftl_dev *dev = io->dev;
 
 	/* For normal IOs we just need to copy the data onto the rwb */
 	if (!(io->flags & FTL_IO_MD)) {
-		return ftl_rwb_fill(io);
+		ftl_io_call_foreach_child(io, ftl_rwb_fill_leaf);
+	} else {
+		/* Metadata has its own buffer, so it doesn't have to be copied, so just */
+		/* send it the the core thread and schedule the write immediately */
+		if (ftl_check_core_thread(dev)) {
+			ftl_io_call_foreach_child(io, ftl_submit_write_leaf);
+		} else {
+			spdk_thread_send_msg(ftl_get_core_thread(dev), _ftl_io_write, io);
+		}
 	}
-
-	/* Metadata has its own buffer, so it doesn't have to be copied, so just */
-	/* send it the the core thread and schedule the write immediately */
-	if (ftl_check_core_thread(dev)) {
-		return ftl_submit_write(ftl_wptr_from_band(io->band), io);
-	}
-
-	spdk_thread_send_msg(ftl_get_core_thread(dev), _ftl_io_write, io);
-
-	return 0;
-}
-
-static int
-_spdk_ftl_write(struct ftl_io *io)
-{
-	int rc;
-
-	rc = ftl_io_write(io);
-	if (rc == -EAGAIN) {
-		spdk_thread_send_msg(spdk_io_channel_get_thread(io->ioch),
-				     _ftl_write, io);
-		return 0;
-	}
-
-	if (rc) {
-		ftl_io_free(io);
-	}
-
-	return rc;
-}
-
-static void
-_ftl_write(void *ctx)
-{
-	_spdk_ftl_write(ctx);
 }
 
 int
@@ -1462,7 +1952,7 @@ spdk_ftl_write(struct spdk_ftl_dev *dev, struct spdk_io_channel *ch, uint64_t lb
 {
 	struct ftl_io *io;
 
-	if (iov_cnt == 0 || iov_cnt > FTL_MAX_IOV) {
+	if (iov_cnt == 0) {
 		return -EINVAL;
 	}
 
@@ -1478,39 +1968,46 @@ spdk_ftl_write(struct spdk_ftl_dev *dev, struct spdk_io_channel *ch, uint64_t lb
 		return -EBUSY;
 	}
 
-	io = ftl_io_alloc(ch);
+	io = ftl_io_user_init(ch, lba, lba_cnt, iov, iov_cnt, cb_fn, cb_arg, FTL_IO_WRITE);
 	if (!io) {
 		return -ENOMEM;
 	}
 
-	ftl_io_user_init(dev, io, lba, lba_cnt, iov, iov_cnt, cb_fn, cb_arg, FTL_IO_WRITE);
-	return _spdk_ftl_write(io);
-}
+	ftl_io_write(io);
 
-int
-ftl_io_read(struct ftl_io *io)
-{
-	struct spdk_ftl_dev *dev = io->dev;
-	ftl_next_ppa_fn	next_ppa;
-
-	if (ftl_check_read_thread(dev)) {
-		if (ftl_io_mode_ppa(io)) {
-			next_ppa = ftl_ppa_read_next_ppa;
-		} else {
-			next_ppa = ftl_lba_read_next_ppa;
-		}
-
-		return ftl_submit_read(io, next_ppa, NULL);
-	}
-
-	spdk_thread_send_msg(ftl_get_read_thread(dev), _ftl_read, io);
 	return 0;
 }
 
+static int
+ftl_io_read_leaf(struct ftl_io *io)
+{
+	int rc;
+
+	rc = ftl_submit_read(io);
+	if (rc == -ENOMEM) {
+		/* ENOMEM means that the request was put on a pending queue */
+		return 0;
+	}
+
+	return rc;
+}
+
 static void
-_ftl_read(void *arg)
+_ftl_io_read(void *arg)
 {
 	ftl_io_read((struct ftl_io *)arg);
+}
+
+void
+ftl_io_read(struct ftl_io *io)
+{
+	struct spdk_ftl_dev *dev = io->dev;
+
+	if (ftl_check_read_thread(dev)) {
+		ftl_io_call_foreach_child(io, ftl_io_read_leaf);
+	} else {
+		spdk_thread_send_msg(ftl_get_read_thread(dev), _ftl_io_read, io);
+	}
 }
 
 int
@@ -1519,7 +2016,7 @@ spdk_ftl_read(struct spdk_ftl_dev *dev, struct spdk_io_channel *ch, uint64_t lba
 {
 	struct ftl_io *io;
 
-	if (iov_cnt == 0 || iov_cnt > FTL_MAX_IOV) {
+	if (iov_cnt == 0) {
 		return -EINVAL;
 	}
 
@@ -1535,12 +2032,11 @@ spdk_ftl_read(struct spdk_ftl_dev *dev, struct spdk_io_channel *ch, uint64_t lba
 		return -EBUSY;
 	}
 
-	io = ftl_io_alloc(ch);
+	io = ftl_io_user_init(ch, lba, lba_cnt, iov, iov_cnt, cb_fn, cb_arg, FTL_IO_READ);
 	if (!io) {
 		return -ENOMEM;
 	}
 
-	ftl_io_user_init(dev, io, lba, lba_cnt, iov, iov_cnt, cb_fn, cb_arg, FTL_IO_READ);
 	ftl_io_read(io);
 	return 0;
 }
@@ -1596,13 +2092,9 @@ _ftl_flush(void *ctx)
 }
 
 int
-spdk_ftl_flush(struct spdk_ftl_dev *dev, spdk_ftl_fn cb_fn, void *cb_arg)
+ftl_flush_rwb(struct spdk_ftl_dev *dev, spdk_ftl_fn cb_fn, void *cb_arg)
 {
 	struct ftl_flush *flush;
-
-	if (!dev->initialized) {
-		return -EBUSY;
-	}
 
 	flush = ftl_flush_init(dev, cb_fn, cb_arg);
 	if (!flush) {
@@ -1613,11 +2105,53 @@ spdk_ftl_flush(struct spdk_ftl_dev *dev, spdk_ftl_fn cb_fn, void *cb_arg)
 	return 0;
 }
 
+int
+spdk_ftl_flush(struct spdk_ftl_dev *dev, spdk_ftl_fn cb_fn, void *cb_arg)
+{
+	if (!dev->initialized) {
+		return -EBUSY;
+	}
+
+	return ftl_flush_rwb(dev, cb_fn, cb_arg);
+}
+
+static void
+_ftl_process_anm_event(void *ctx)
+{
+	ftl_process_anm_event((struct ftl_anm_event *)ctx);
+}
+
 void
 ftl_process_anm_event(struct ftl_anm_event *event)
 {
-	SPDK_DEBUGLOG(SPDK_LOG_FTL_CORE, "Unconsumed ANM received for dev: %p...\n", event->dev);
+	struct spdk_ftl_dev *dev = event->dev;
+	struct ftl_band *band;
+	size_t lbkoff;
+
+	/* Drop any ANM requests until the device is initialized */
+	if (!dev->initialized) {
+		ftl_anm_event_complete(event);
+		return;
+	}
+
+	if (!ftl_check_core_thread(dev)) {
+		spdk_thread_send_msg(ftl_get_core_thread(dev), _ftl_process_anm_event, event);
+		return;
+	}
+
+	band = ftl_band_from_ppa(dev, event->ppa);
+	lbkoff = ftl_band_lbkoff_from_ppa(band, event->ppa);
+
+	ftl_reloc_add(dev->reloc, band, lbkoff, event->num_lbks, 0, false);
 	ftl_anm_event_complete(event);
+}
+
+bool
+ftl_ppa_is_written(struct ftl_band *band, struct ftl_ppa ppa)
+{
+	struct ftl_zone *zone = ftl_band_zone_from_ppa(band, ppa);
+
+	return ppa.lbk < zone->write_offset;
 }
 
 static void
@@ -1631,7 +2165,7 @@ ftl_process_retry_queue(struct spdk_ftl_dev *dev)
 
 		/* Retry only if IO is still healthy */
 		if (spdk_likely(io->status == 0)) {
-			rc = ftl_io_read(io);
+			rc = ftl_submit_read(io);
 			if (rc == -ENOMEM) {
 				break;
 			}

@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
-set -e
 
-INTEGRITY_BASE_DIR=$(readlink -f $(dirname $0))
+testdir=$(readlink -f $(dirname $0))
+rootdir=$(readlink -f $testdir/../../..)
+source $rootdir/test/common/autotest_common.sh
+source $rootdir/test/vhost/common.sh
+
 ctrl_type="spdk_vhost_scsi"
 vm_fs="ext4"
 
 function usage()
 {
-	[[ ! -z $2 ]] && ( echo "$2"; echo ""; )
+	[[ -n $2 ]] && ( echo "$2"; echo ""; )
 	echo "Shortcut script for doing automated test"
 	echo "Usage: $(basename $1) [OPTIONS]"
 	echo
 	echo "-h, --help                Print help and exit"
-	echo "    --work-dir=WORK_DIR   Workspace for the test to run"
 	echo "    --ctrl-type=TYPE      Controller type to use for test:"
 	echo "                          spdk_vhost_scsi - use spdk vhost scsi"
 	echo "    --fs=FS_LIST          Filesystems to use for test in VM:"
@@ -26,8 +28,8 @@ function usage()
 function clean_lvol_cfg()
 {
 	notice "Removing lvol bdev and lvol store"
-	$rpc_py destroy_lvol_bdev lvol_store/lvol_bdev
-	$rpc_py destroy_lvol_store -l lvol_store
+	$rpc_py bdev_lvol_delete lvol_store/lvol_bdev
+	$rpc_py bdev_lvol_delete_lvstore -l lvol_store
 }
 
 while getopts 'xh-:' optchar; do
@@ -47,8 +49,10 @@ while getopts 'xh-:' optchar; do
 	esac
 done
 
-. $(readlink -e "$(dirname $0)/../common/common.sh") || exit 1
-rpc_py="$SPDK_BUILD_DIR/scripts/rpc.py -s $(get_vhost_dir)/rpc.sock"
+vhosttestinit
+
+. $(readlink -e "$(dirname $0)/../common.sh") || exit 1
+rpc_py="$rootdir/scripts/rpc.py -s $(get_vhost_dir 0)/rpc.sock"
 
 trap 'error_exit "${FUNCNAME}" "${LINENO}"' SIGTERM SIGABRT ERR
 
@@ -56,25 +60,25 @@ trap 'error_exit "${FUNCNAME}" "${LINENO}"' SIGTERM SIGABRT ERR
 vm_kill_all
 
 notice "Starting SPDK vhost"
-spdk_vhost_run
+vhost_run 0
 notice "..."
 
 # Set up lvols and vhost controllers
 trap 'clean_lvol_cfg; error_exit "${FUNCNAME}" "${LINENO}"' SIGTERM SIGABRT ERR
-notice "Constructing lvol store and lvol bdev on top of Nvme0n1"
-lvs_uuid=$($rpc_py construct_lvol_store Nvme0n1 lvol_store)
-$rpc_py construct_lvol_bdev lvol_bdev 10000 -l lvol_store
+notice "Creating lvol store and lvol bdev on top of Nvme0n1"
+lvs_uuid=$($rpc_py bdev_lvol_create_lvstore Nvme0n1 lvol_store)
+$rpc_py bdev_lvol_create lvol_bdev 10000 -l lvol_store
 
 if [[ "$ctrl_type" == "spdk_vhost_scsi" ]]; then
-	$rpc_py construct_vhost_scsi_controller naa.Nvme0n1.0
-	$rpc_py add_vhost_scsi_lun naa.Nvme0n1.0 0 lvol_store/lvol_bdev
+	$rpc_py vhost_create_scsi_controller naa.Nvme0n1.0
+	$rpc_py vhost_scsi_controller_add_target naa.Nvme0n1.0 0 lvol_store/lvol_bdev
 elif [[ "$ctrl_type" == "spdk_vhost_blk" ]]; then
-	$rpc_py construct_vhost_blk_controller naa.Nvme0n1.0 lvol_store/lvol_bdev
+	$rpc_py vhost_create_blk_controller naa.Nvme0n1.0 lvol_store/lvol_bdev
 fi
 
 # Set up and run VM
 setup_cmd="vm_setup --disk-type=$ctrl_type --force=0"
-setup_cmd+=" --os=/home/sys_sgsw/vhost_vm_image.qcow2"
+setup_cmd+=" --os=$VM_IMAGE"
 setup_cmd+=" --disks=Nvme0n1"
 $setup_cmd
 
@@ -83,15 +87,17 @@ vm_run 0
 vm_wait_for_boot 300 0
 
 # Run tests on VM
-vm_scp 0 $INTEGRITY_BASE_DIR/integrity_vm.sh root@127.0.0.1:/root/integrity_vm.sh
-vm_ssh 0 "~/integrity_vm.sh $ctrl_type \"$vm_fs\""
+vm_scp 0 $testdir/integrity_vm.sh root@127.0.0.1:/root/integrity_vm.sh
+vm_exec 0 "/root/integrity_vm.sh $ctrl_type \"$vm_fs\""
 
 notice "Shutting down virtual machine..."
 vm_shutdown_all
 
 clean_lvol_cfg
 
-$rpc_py delete_nvme_controller Nvme0
+$rpc_py bdev_nvme_detach_controller Nvme0
 
 notice "Shutting down SPDK vhost app..."
-spdk_vhost_kill
+vhost_kill 0
+
+vhosttestfini

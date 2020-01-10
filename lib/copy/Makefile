@@ -37,6 +37,4 @@ include $(SPDK_ROOT_DIR)/mk/spdk.common.mk
 LIBNAME = copy
 C_SRCS = copy_engine.c
 
-DIRS-y = ioat
-
 include $(SPDK_ROOT_DIR)/mk/spdk.lib.mk

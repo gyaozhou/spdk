@@ -42,8 +42,9 @@
 #include "ftl_trace.h"
 
 struct ftl_rwb;
-struct spdk_ftl_conf;
 struct ftl_rwb_batch;
+struct ftl_band;
+struct spdk_ftl_conf;
 
 enum ftl_rwb_entry_type {
 	FTL_RWB_TYPE_INTERNAL,
@@ -64,6 +65,9 @@ struct ftl_rwb_entry {
 
 	/* Physical address */
 	struct ftl_ppa				ppa;
+
+	/* Band the data is moved from (only valid when relocating data) */
+	struct ftl_band				*band;
 
 	/* Position within the rwb's buffer */
 	unsigned int				pos;
@@ -90,7 +94,9 @@ struct ftl_rwb_entry {
 	LIST_ENTRY(ftl_rwb_entry)		list_entry;
 };
 
-struct ftl_rwb *ftl_rwb_init(const struct spdk_ftl_conf *conf, size_t xfer_size, size_t md_size);
+struct ftl_rwb *ftl_rwb_init(const struct spdk_ftl_conf *conf, size_t xfer_size,
+			     size_t md_size, size_t num_punits);
+size_t	ftl_rwb_get_active_batches(const struct ftl_rwb *rwb);
 void	ftl_rwb_free(struct ftl_rwb *rwb);
 void	ftl_rwb_batch_release(struct ftl_rwb_batch *batch);
 void	ftl_rwb_push(struct ftl_rwb_entry *entry);
@@ -99,6 +105,7 @@ void	ftl_rwb_set_limits(struct ftl_rwb *rwb, const size_t limit[FTL_RWB_TYPE_MAX
 void	ftl_rwb_get_limits(struct ftl_rwb *rwb, size_t limit[FTL_RWB_TYPE_MAX]);
 size_t	ftl_rwb_num_acquired(struct ftl_rwb *rwb, enum ftl_rwb_entry_type type);
 size_t	ftl_rwb_num_batches(const struct ftl_rwb *rwb);
+size_t	ftl_rwb_size(const struct ftl_rwb *rwb);
 struct ftl_rwb_entry *ftl_rwb_acquire(struct ftl_rwb *rwb, enum ftl_rwb_entry_type type);
 struct ftl_rwb_batch *ftl_rwb_pop(struct ftl_rwb *rwb);
 struct ftl_rwb_batch *ftl_rwb_first_batch(struct ftl_rwb *rwb);
@@ -110,6 +117,8 @@ void	ftl_rwb_batch_revert(struct ftl_rwb_batch *batch);
 struct ftl_rwb_entry *ftl_rwb_batch_first_entry(struct ftl_rwb_batch *batch);
 void	*ftl_rwb_batch_get_data(struct ftl_rwb_batch *batch);
 void	*ftl_rwb_batch_get_md(struct ftl_rwb_batch *batch);
+void	ftl_rwb_disable_interleaving(struct ftl_rwb *rwb);
+unsigned int ftl_rwb_num_pending(struct ftl_rwb *rwb);
 
 static inline void
 _ftl_rwb_entry_set_valid(struct ftl_rwb_entry *entry, bool valid)

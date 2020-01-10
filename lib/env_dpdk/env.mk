@@ -54,7 +54,7 @@ else
 DPDK_LIB_EXT = .so
 endif
 
-DPDK_LIB_LIST = rte_eal rte_mempool rte_ring
+DPDK_LIB_LIST = rte_eal rte_mempool rte_ring rte_mbuf
 
 # librte_mempool_ring was new added from DPDK 17.05. Link this library used for
 #   ring based mempool management API.
@@ -84,7 +84,7 @@ endif
 DPDK_FRAMEWORK=n
 ifeq ($(CONFIG_CRYPTO),y)
 DPDK_FRAMEWORK=y
-DPDK_LIB_LIST += rte_pmd_aesni_mb rte_pmd_qat rte_reorder
+DPDK_LIB_LIST += rte_pmd_aesni_mb rte_reorder
 endif
 
 ifeq ($(CONFIG_REDUCE),y)
@@ -93,7 +93,7 @@ DPDK_LIB_LIST += rte_pmd_isal_comp
 endif
 
 ifeq ($(DPDK_FRAMEWORK),y)
-DPDK_LIB_LIST += rte_cryptodev rte_compressdev rte_bus_vdev
+DPDK_LIB_LIST += rte_cryptodev rte_compressdev rte_bus_vdev rte_pmd_qat
 endif
 
 ifneq (, $(wildcard $(DPDK_ABS_DIR)/lib/librte_kvargs.*))
@@ -102,21 +102,33 @@ endif
 
 ifneq ($(CONFIG_VHOST_INTERNAL_LIB),y)
 ifneq (, $(wildcard $(DPDK_ABS_DIR)/lib/librte_vhost.*))
-DPDK_LIB_LIST += rte_vhost rte_net rte_hash rte_mbuf
+DPDK_LIB_LIST += rte_vhost rte_net rte_hash
 ifneq ($(DPDK_FRAMEWORK),y)
 DPDK_LIB_LIST += rte_cryptodev
 endif
 endif
 endif
 
-DPDK_LIB = $(DPDK_LIB_LIST:%=$(DPDK_ABS_DIR)/lib/lib%$(DPDK_LIB_EXT))
+define dpdk_lib_list_to_libs
+$(1:%=$(DPDK_ABS_DIR)/lib/lib%$(DPDK_LIB_EXT))
+endef
+
+define dpdk_env_linker_args
+$(ENV_DPDK_FILE) -Wl,--whole-archive,--no-as-needed $(call dpdk_lib_list_to_libs,$1) -Wl,--no-whole-archive
+endef
+
+DPDK_LIB = $(call dpdk_lib_list_to_libs,$(DPDK_LIB_LIST))
 
 # SPDK memory registration requires experimental (deprecated) rte_memory API for DPDK 18.05
 ENV_CFLAGS = $(DPDK_INC) -Wno-deprecated-declarations
 ENV_CXXFLAGS = $(ENV_CFLAGS)
+ifeq ($(CONFIG_SHARED),y)
+ENV_DPDK_FILE = $(call spdk_lib_list_to_shared_libs,env_dpdk)
+else
 ENV_DPDK_FILE = $(call spdk_lib_list_to_static_libs,env_dpdk)
+endif
 ENV_LIBS = $(ENV_DPDK_FILE) $(DPDK_LIB)
-ENV_LINKER_ARGS = $(ENV_DPDK_FILE) -Wl,--whole-archive $(DPDK_LIB) -Wl,--no-whole-archive
+ENV_LINKER_ARGS = $(call dpdk_env_linker_args,$(DPDK_LIB_LIST))
 
 ifeq ($(CONFIG_IPSEC_MB),y)
 ENV_LINKER_ARGS += -lIPSec_MB -L$(IPSEC_MB_DIR)

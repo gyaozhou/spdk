@@ -47,9 +47,17 @@
 extern "C" {
 #endif
 
+/**
+ * A stackless, lightweight thread.
+ */
 struct spdk_thread;
-struct spdk_io_channel_iter;
+
+/**
+ * A function repeatedly called on the same spdk_thread.
+ */
 struct spdk_poller;
+
+struct spdk_io_channel_iter;
 
 /**
  * A function that is called each time a new thread is created.
@@ -58,7 +66,7 @@ struct spdk_poller;
  *
  * \param thread The new spdk_thread.
  */
-typedef void (*spdk_new_thread_fn)(struct spdk_thread *thread);
+typedef int (*spdk_new_thread_fn)(struct spdk_thread *thread);
 
 /**
  * A function that will be called on the target thread.
@@ -212,8 +220,16 @@ void spdk_thread_lib_fini(void);
 struct spdk_thread *spdk_thread_create(const char *name, struct spdk_cpuset *cpumask);
 
 /**
- * Release any resources related to the given thread and destroy it. Execution
- * continues on the current system thread after returning.
+ * Force the current system thread to act as if executing the given SPDK thread.
+ *
+ * \param thread The thread to set.
+ */
+void spdk_set_thread(struct spdk_thread *thread);
+
+/**
+ * Mark the thread as exited, failing all future spdk_thread_poll() calls. May
+ * only be called within an spdk poller or message.
+ *
  *
  * \param thread The thread to destroy.
  *
@@ -221,6 +237,15 @@ struct spdk_thread *spdk_thread_create(const char *name, struct spdk_cpuset *cpu
  * spdk_put_io_channel() prior to calling this function.
  */
 void spdk_thread_exit(struct spdk_thread *thread);
+
+/**
+ * Destroy a thread, releasing all of its resources. May only be called
+ * on a thread previously marked as exited.
+ *
+ * \param thread The thread to destroy.
+ *
+ */
+void spdk_thread_destroy(struct spdk_thread *thread);
 
 /**
  * Return a pointer to this thread's context.
@@ -253,7 +278,8 @@ struct spdk_thread *spdk_thread_get_from_ctx(void *ctx);
 
 /**
  * Perform one iteration worth of processing on the thread. This includes
- * both expired and continuous pollers as well as messages.
+ * both expired and continuous pollers as well as messages. If the thread
+ * has exited, return immediately.
  *
  * \param thread The thread to process
  * \param max_msgs The maximum number of messages that will be processed.
@@ -261,7 +287,7 @@ struct spdk_thread *spdk_thread_get_from_ctx(void *ctx);
  * \param now The current time, in ticks. Optional. If 0 is passed, this
  *            function may call spdk_get_ticks() to get the current time.
  *
- * \return 1 if work was done. 0 if no work was done. -1 if unknown.
+ * \return 1 if work was done. 0 if no work was done.
  */
 int spdk_thread_poll(struct spdk_thread *thread, uint32_t max_msgs, uint64_t now);
 
@@ -334,7 +360,6 @@ const char *spdk_thread_get_name(const struct spdk_thread *thread);
 struct spdk_thread_stats {
 	uint64_t busy_tsc;
 	uint64_t idle_tsc;
-	uint64_t unknown_tsc;
 };
 
 /**
@@ -349,14 +374,18 @@ int spdk_thread_get_stats(struct spdk_thread_stats *stats);
 /**
  * Send a message to the given thread.
  *
- * The message may be sent asynchronously - i.e. spdk_thread_send_msg may return
+ * The message will be sent asynchronously - i.e. spdk_thread_send_msg will always return
  * prior to `fn` being called.
  *
  * \param thread The target thread.
  * \param fn This function will be called on the given thread.
  * \param ctx This context will be passed to fn when called.
+ *
+ * \return 0 on success
+ * \return -ENOMEM if the message could not be allocated
+ * \return -EIO if the message could not be sent to the destination thread
  */
-void spdk_thread_send_msg(const struct spdk_thread *thread, spdk_msg_fn fn, void *ctx);
+int spdk_thread_send_msg(const struct spdk_thread *thread, spdk_msg_fn fn, void *ctx);
 
 /**
  * Send a message to each thread, serially.
@@ -394,6 +423,26 @@ struct spdk_poller *spdk_poller_register(spdk_poller_fn fn,
  * \param ppoller The poller to unregister.
  */
 void spdk_poller_unregister(struct spdk_poller **ppoller);
+
+/**
+ * Pause a poller on the current thread.
+ *
+ * The poller is not run until it is resumed with spdk_poller_resume().  It is
+ * perfectly fine to pause an already paused poller.
+ *
+ * \param poller The poller to pause.
+ */
+void spdk_poller_pause(struct spdk_poller *poller);
+
+/**
+ * Resume a poller on the current thread.
+ *
+ * Resumes a poller paused with spdk_poller_pause().  It is perfectly fine to
+ * resume an unpaused poller.
+ *
+ * \param poller The poller to resume.
+ */
+void spdk_poller_resume(struct spdk_poller *poller);
 
 /**
  * Register the opaque io_device context as an I/O device.

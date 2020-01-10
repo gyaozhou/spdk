@@ -40,6 +40,7 @@
 
 #include <rte_config.h>
 #include <rte_eal.h>
+#include <rte_errno.h>
 
 #define SPDK_ENV_DPDK_DEFAULT_NAME		"spdk"
 #define SPDK_ENV_DPDK_DEFAULT_SHM_ID		-1
@@ -174,6 +175,75 @@ spdk_push_arg(char *args[], int *argcount, char *arg)
 	return tmp;
 }
 
+#if defined(__linux__) && defined(__x86_64__)
+
+/* TODO: Can likely get this value from rlimits in the future */
+#define SPDK_IOMMU_VA_REQUIRED_WIDTH 48
+#define VTD_CAP_MGAW_SHIFT 16
+#define VTD_CAP_MGAW_MASK (0x3F << VTD_CAP_MGAW_SHIFT)
+
+static int
+spdk_get_iommu_width(void)
+{
+	DIR *dir;
+	FILE *file;
+	struct dirent *entry;
+	char mgaw_path[64];
+	char buf[64];
+	char *end;
+	long long int val;
+	int width, tmp;
+
+	dir = opendir("/sys/devices/virtual/iommu/");
+	if (dir == NULL) {
+		return -EINVAL;
+	}
+
+	width = 0;
+
+	while ((entry = readdir(dir)) != NULL) {
+		/* Find directories named "dmar0", "dmar1", etc */
+		if (strncmp(entry->d_name, "dmar", sizeof("dmar") - 1) != 0) {
+			continue;
+		}
+
+		tmp = snprintf(mgaw_path, sizeof(mgaw_path), "/sys/devices/virtual/iommu/%s/intel-iommu/cap",
+			       entry->d_name);
+		if ((unsigned)tmp >= sizeof(mgaw_path)) {
+			continue;
+		}
+
+		file = fopen(mgaw_path, "r");
+		if (file == NULL) {
+			continue;
+		}
+
+		if (fgets(buf, sizeof(buf), file) == NULL) {
+			fclose(file);
+			continue;
+		}
+
+		val = strtoll(buf, &end, 16);
+		if (val == LLONG_MIN || val == LLONG_MAX) {
+			fclose(file);
+			continue;
+		}
+
+		tmp = ((val & VTD_CAP_MGAW_MASK) >> VTD_CAP_MGAW_SHIFT) + 1;
+		if (width == 0 || tmp < width) {
+			width = tmp;
+		}
+
+		fclose(file);
+	}
+
+	closedir(dir);
+
+	return width;
+}
+
+#endif
+
 static int
 spdk_build_eal_cmdline(const struct spdk_env_opts *opts)
 {
@@ -273,7 +343,7 @@ spdk_build_eal_cmdline(const struct spdk_env_opts *opts)
 
 #if RTE_VERSION >= RTE_VERSION_NUM(18, 05, 0, 0) && RTE_VERSION < RTE_VERSION_NUM(18, 5, 1, 0)
 	/* Dynamic memory management is buggy in DPDK 18.05.0. Don't use it. */
-	if (!opts->env_context || strcmp(opts->env_context, "--legacy-mem") != 0) {
+	if (!opts->env_context || strstr(opts->env_context, "--legacy-mem") == NULL) {
 		args = spdk_push_arg(args, &argcount, _sprintf_alloc("--legacy-mem"));
 		if (args == NULL) {
 			return -1;
@@ -298,6 +368,8 @@ spdk_build_eal_cmdline(const struct spdk_env_opts *opts)
 		}
 	}
 
+	/* The following log-level options are not understood by older DPDKs */
+#if RTE_VERSION >= RTE_VERSION_NUM(18, 05, 0, 0)
 	/* Lower default EAL loglevel to RTE_LOG_NOTICE - normal, but significant messages.
 	 * This can be overridden by specifying the same option in opts->env_context
 	 */
@@ -305,6 +377,25 @@ spdk_build_eal_cmdline(const struct spdk_env_opts *opts)
 	if (args == NULL) {
 		return -1;
 	}
+
+	/* Lower default CRYPTO loglevel to RTE_LOG_ERR to avoid a ton of init msgs.
+	 * This can be overridden by specifying the same option in opts->env_context
+	 */
+	args = spdk_push_arg(args, &argcount, strdup("--log-level=lib.cryptodev:5"));
+	if (args == NULL) {
+		return -1;
+	}
+
+	/* `user1` log type is used by rte_vhost, which prints an INFO log for each received
+	 * vhost user message. We don't want that. The same log type is also used by a couple
+	 * of other DPDK libs, but none of which we make use right now. If necessary, this can
+	 * be overridden via opts->env_context.
+	 */
+	args = spdk_push_arg(args, &argcount, strdup("--log-level=user1:6"));
+	if (args == NULL) {
+		return -1;
+	}
+#endif
 
 	if (opts->env_context) {
 		args = spdk_push_arg(args, &argcount, strdup(opts->env_context));
@@ -314,6 +405,29 @@ spdk_build_eal_cmdline(const struct spdk_env_opts *opts)
 	}
 
 #ifdef __linux__
+
+#if defined(__x86_64__)
+	/* DPDK by default guesses that it should be using iova-mode=va so that it can
+	 * support running as an unprivileged user. However, some systems (especially
+	 * virtual machines) don't have an IOMMU capable of handling the full virtual
+	 * address space and DPDK doesn't currently catch that. Add a check in SPDK
+	 * and force iova-mode=pa here. */
+	if (spdk_get_iommu_width() < SPDK_IOMMU_VA_REQUIRED_WIDTH) {
+		args = spdk_push_arg(args, &argcount, _sprintf_alloc("--iova-mode=pa"));
+		if (args == NULL) {
+			return -1;
+		}
+	}
+#elif defined(__PPC64__)
+	/* On Linux + PowerPC, DPDK doesn't support VA mode at all. Unfortunately, it doesn't correctly
+	 * auto-detect at the moment, so we'll just force it here. */
+	args = spdk_push_arg(args, &argcount, _sprintf_alloc("--iova-mode=pa"));
+	if (args == NULL) {
+		return -1;
+	}
+#endif
+
+
 	/* Set the base virtual address - it must be an address that is not in the
 	 * ASAN shadow region, otherwise ASAN-enabled builds will ignore the
 	 * mmap hint.
@@ -331,7 +445,7 @@ spdk_build_eal_cmdline(const struct spdk_env_opts *opts)
 	 * the memory for a buffer over two allocations meaning the buffer will be split over a memory region.
 	 */
 #if RTE_VERSION >= RTE_VERSION_NUM(19, 02, 0, 0)
-	if (!opts->env_context || strcmp(opts->env_context, "--legacy-mem") != 0) {
+	if (!opts->env_context || strstr(opts->env_context, "--legacy-mem") == NULL) {
 		args = spdk_push_arg(args, &argcount, _sprintf_alloc("%s", "--match-allocations"));
 		if (args == NULL) {
 			return -1;
@@ -366,17 +480,22 @@ spdk_build_eal_cmdline(const struct spdk_env_opts *opts)
 }
 
 int
-spdk_env_dpdk_post_init(void)
+spdk_env_dpdk_post_init(bool legacy_mem)
 {
+	int rc;
+
 	spdk_pci_init();
 
-	if (spdk_mem_map_init() < 0) {
+	rc = spdk_mem_map_init(legacy_mem);
+	if (rc < 0) {
 		fprintf(stderr, "Failed to allocate mem_map\n");
-		return -1;
+		return rc;
 	}
-	if (spdk_vtophys_init() < 0) {
+
+	rc = spdk_vtophys_init();
+	if (rc < 0) {
 		fprintf(stderr, "Failed to initialize vtophys\n");
-		return -1;
+		return rc;
 	}
 
 	return 0;
@@ -397,13 +516,14 @@ spdk_env_init(const struct spdk_env_opts *opts)
 	char **dpdk_args = NULL;
 	int i, rc;
 	int orig_optind;
+	bool legacy_mem;
 
 	g_external_init = false;
 
 	rc = spdk_build_eal_cmdline(opts);
 	if (rc < 0) {
 		fprintf(stderr, "Invalid arguments to initialize DPDK\n");
-		return -1;
+		return -EINVAL;
 	}
 
 	printf("Starting %s / %s initialization...\n", SPDK_VERSION_STRING, rte_version());
@@ -420,7 +540,7 @@ spdk_env_init(const struct spdk_env_opts *opts)
 	dpdk_args = calloc(g_eal_cmdline_argcount, sizeof(char *));
 	if (dpdk_args == NULL) {
 		fprintf(stderr, "Failed to allocate dpdk_args\n");
-		return -1;
+		return -ENOMEM;
 	}
 	memcpy(dpdk_args, g_eal_cmdline, sizeof(char *) * g_eal_cmdline_argcount);
 
@@ -435,8 +555,12 @@ spdk_env_init(const struct spdk_env_opts *opts)
 	free(dpdk_args);
 
 	if (rc < 0) {
-		fprintf(stderr, "Failed to initialize DPDK\n");
-		return -1;
+		if (rte_errno == EALREADY) {
+			fprintf(stderr, "DPDK already initialized\n");
+		} else {
+			fprintf(stderr, "Failed to initialize DPDK\n");
+		}
+		return -rte_errno;
 	}
 
 	if (opts->shm_id < 0 && !opts->hugepage_single_segments) {
@@ -450,7 +574,12 @@ spdk_env_init(const struct spdk_env_opts *opts)
 		spdk_env_unlink_shared_files();
 	}
 
-	return spdk_env_dpdk_post_init();
+	legacy_mem = false;
+	if (opts->env_context && strstr(opts->env_context, "--legacy-mem") != NULL) {
+		legacy_mem = true;
+	}
+
+	return spdk_env_dpdk_post_init(legacy_mem);
 }
 
 void

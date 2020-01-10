@@ -1,7 +1,6 @@
 #include "iscsi/task.h"
 #include "iscsi/iscsi.h"
 #include "iscsi/conn.h"
-#include "iscsi/acceptor.h"
 
 #include "spdk/env.h"
 #include "spdk/event.h"
@@ -15,7 +14,20 @@
 
 SPDK_LOG_REGISTER_COMPONENT("iscsi", SPDK_LOG_ISCSI)
 
-TAILQ_HEAD(, spdk_iscsi_pdu) g_write_pdu_list;
+struct spdk_trace_histories *g_trace_histories;
+DEFINE_STUB_V(spdk_trace_add_register_fn, (struct spdk_trace_register_fn *reg_fn));
+DEFINE_STUB_V(spdk_trace_register_owner, (uint8_t type, char id_prefix));
+DEFINE_STUB_V(spdk_trace_register_object, (uint8_t type, char id_prefix));
+DEFINE_STUB_V(spdk_trace_register_description, (const char *name,
+		uint16_t tpoint_id, uint8_t owner_type, uint8_t object_type, uint8_t new_object,
+		uint8_t arg1_type, const char *arg1_name));
+DEFINE_STUB_V(_spdk_trace_record, (uint64_t tsc, uint16_t tpoint_id, uint16_t poller_id,
+				   uint32_t size, uint64_t object_id, uint64_t arg1));
+
+TAILQ_HEAD(, spdk_iscsi_pdu) g_write_pdu_list = TAILQ_HEAD_INITIALIZER(g_write_pdu_list);
+
+static bool g_task_pool_is_empty = false;
+static bool g_pdu_pool_is_empty = false;
 
 struct spdk_iscsi_task *
 spdk_iscsi_task_get(struct spdk_iscsi_conn *conn,
@@ -24,10 +36,33 @@ spdk_iscsi_task_get(struct spdk_iscsi_conn *conn,
 {
 	struct spdk_iscsi_task *task;
 
+	if (g_task_pool_is_empty) {
+		return NULL;
+	}
+
 	task = calloc(1, sizeof(*task));
 	if (!task) {
 		return NULL;
 	}
+
+	task->conn = conn;
+	task->scsi.cpl_fn = cpl_fn;
+	if (parent) {
+		parent->scsi.ref++;
+		task->parent = parent;
+		task->tag = parent->tag;
+		task->lun_id = parent->lun_id;
+		task->scsi.dxfer_dir = parent->scsi.dxfer_dir;
+		task->scsi.transfer_len = parent->scsi.transfer_len;
+		task->scsi.lun = parent->scsi.lun;
+		task->scsi.cdb = parent->scsi.cdb;
+		task->scsi.target_port = parent->scsi.target_port;
+		task->scsi.initiator_port = parent->scsi.initiator_port;
+		if (conn && (task->scsi.dxfer_dir == SPDK_SCSI_DIR_FROM_DEV)) {
+			conn->data_in_cnt++;
+		}
+	}
+
 	task->scsi.iovs = &task->scsi.iov;
 	return task;
 }
@@ -64,6 +99,10 @@ spdk_get_pdu(void)
 {
 	struct spdk_iscsi_pdu *pdu;
 
+	if (g_pdu_pool_is_empty) {
+		return NULL;
+	}
+
 	pdu = malloc(sizeof(*pdu));
 	if (!pdu) {
 		return NULL;
@@ -98,62 +137,6 @@ spdk_scsi_dev_get_name(const struct spdk_scsi_dev *dev)
 	return NULL;
 }
 
-DEFINE_STUB_V(spdk_iscsi_acceptor_start, (struct spdk_iscsi_portal *p));
-
-DEFINE_STUB_V(spdk_iscsi_acceptor_stop, (struct spdk_iscsi_portal *p));
-
-struct spdk_sock *
-spdk_sock_listen(const char *ip, int port)
-{
-	static int g_sock;
-
-	return (struct spdk_sock *)&g_sock;
-}
-
-int
-spdk_sock_close(struct spdk_sock **sock)
-{
-	*sock = NULL;
-
-	return 0;
-}
-
-static struct spdk_cpuset *g_app_core_mask;
-
-struct spdk_cpuset *
-spdk_app_get_core_mask(void)
-{
-	int i;
-	if (!g_app_core_mask) {
-		g_app_core_mask = spdk_cpuset_alloc();
-		for (i = 0; i < SPDK_CPUSET_SIZE; i++) {
-			spdk_cpuset_set_cpu(g_app_core_mask, i, true);
-		}
-	}
-	return g_app_core_mask;
-}
-
-int
-spdk_app_parse_core_mask(const char *mask, struct spdk_cpuset *cpumask)
-{
-	int rc;
-
-	if (mask == NULL || cpumask == NULL) {
-		return -1;
-	}
-
-	rc = spdk_cpuset_parse(cpumask, mask);
-	if (rc < 0) {
-		return -1;
-	}
-	return 0;
-}
-
-DEFINE_STUB(spdk_env_get_current_core, uint32_t, (void), 0);
-
-DEFINE_STUB(spdk_event_allocate, struct spdk_event *,
-	    (uint32_t core, spdk_event_fn fn, void *arg1, void *arg2), NULL);
-
 DEFINE_STUB(spdk_scsi_dev_construct, struct spdk_scsi_dev *,
 	    (const char *name, const char **bdev_name_list,
 	     int *lun_id_list, int num_luns, uint8_t protocol_id,
@@ -176,7 +159,7 @@ DEFINE_STUB(spdk_scsi_dev_delete_port, int,
 
 DEFINE_STUB_V(spdk_shutdown_iscsi_conns, (void));
 
-DEFINE_STUB_V(spdk_iscsi_conns_start_exit, (struct spdk_iscsi_tgt_node *target));
+DEFINE_STUB_V(spdk_iscsi_conns_request_logout, (struct spdk_iscsi_tgt_node *target));
 
 DEFINE_STUB(spdk_iscsi_get_active_conns, int, (struct spdk_iscsi_tgt_node *target), 0);
 
@@ -187,6 +170,11 @@ spdk_iscsi_task_cpl(struct spdk_scsi_task *scsi_task)
 
 	if (scsi_task != NULL) {
 		iscsi_task = spdk_iscsi_task_from_scsi_task(scsi_task);
+		if (iscsi_task->parent && (iscsi_task->scsi.dxfer_dir == SPDK_SCSI_DIR_FROM_DEV)) {
+			assert(iscsi_task->conn->data_in_cnt > 0);
+			iscsi_task->conn->data_in_cnt--;
+		}
+
 		free(iscsi_task);
 	}
 }

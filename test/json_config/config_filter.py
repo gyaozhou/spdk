@@ -23,13 +23,13 @@ def sort_json_object(o):
 
 def filter_methods(do_remove_global_rpcs):
     global_rpcs = [
-        'set_iscsi_options',
-        'set_nvmf_target_config',
-        'set_nvmf_target_max_subsystems',
+        'iscsi_set_options',
+        'nvmf_set_config',
+        'nvmf_set_max_subsystems',
         'nvmf_create_transport',
-        'set_bdev_options',
-        'set_bdev_nvme_options',
-        'set_bdev_nvme_hotplug',
+        'bdev_set_options',
+        'bdev_nvme_set_options',
+        'bdev_nvme_set_hotplug',
     ]
 
     data = json.loads(sys.stdin.read())
@@ -60,6 +60,7 @@ def check_empty():
     for s in data['subsystems']:
         if s['config']:
             print("Config not empty")
+            print(s['config'])
             sys.exit(1)
 
 
@@ -70,9 +71,9 @@ if __name__ == "__main__":
 check_empty
     check if provided configuration is logically empty
 delete_global_parameters
-    remove pre-init configuration (pre start_subsystem_init RPC methods)
+    remove pre-init configuration (pre framework_start_init RPC methods)
 delete_configs
-    remove post-init configuration (post start_subsystem_init RPC methods)
+    remove post-init configuration (post framework_start_init RPC methods)
 sort
     remove nothing - just sort JSON objects (and subobjects but not arrays)
     in lexicographical order. This can be used to do plain text diff.""")
@@ -86,7 +87,7 @@ sort
         check_empty()
     elif args.method == "sort":
         """ Wrap input into JSON object so any input is possible here
-        like output from get_bdevs RPC method"""
+        like output from bdev_get_bdevs RPC method"""
         o = json.loads('{ "the_object": ' + sys.stdin.read() + ' }')
         print(json.dumps(sort_json_object(o)['the_object'], indent=2))
     else:

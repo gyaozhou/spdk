@@ -47,6 +47,7 @@ static char *g_persistent_pm_buf;
 static size_t g_persistent_pm_buf_len;
 static char *g_backing_dev_buf;
 static char g_path[REDUCE_PATH_MAX];
+static char *g_decomp_buf;
 
 #define TEST_MD_PATH "/tmp"
 
@@ -107,16 +108,18 @@ get_pm_file_size(void)
 	expected_pm_size = sizeof(struct spdk_reduce_vol_superblock);
 	/* 100 chunks in logical map * 8 bytes per chunk */
 	expected_pm_size += 100 * sizeof(uint64_t);
-	/* 100 chunks * 4 backing io units per chunk * 8 bytes per backing io unit */
-	expected_pm_size += 100 * 4 * sizeof(uint64_t);
+	/* 100 chunks * (chunk stuct size + 4 backing io units per chunk * 8 bytes per backing io unit) */
+	expected_pm_size += 100 * (sizeof(struct spdk_reduce_chunk_map) + 4 * sizeof(uint64_t));
 	/* reduce allocates some extra chunks too for in-flight writes when logical map
-	 * is full.  REDUCE_EXTRA_CHUNKS is a private #ifdef in reduce.c.
+	 * is full.  REDUCE_EXTRA_CHUNKS is a private #ifdef in reduce.c Here we need the num chunks
+	 * times (chunk struct size + 4 backing io units per chunk * 8 bytes per backing io unit).
 	 */
-	expected_pm_size += REDUCE_NUM_EXTRA_CHUNKS * 4 * sizeof(uint64_t);
+	expected_pm_size += REDUCE_NUM_EXTRA_CHUNKS *
+			    (sizeof(struct spdk_reduce_chunk_map) + 4 * sizeof(uint64_t));
 	/* reduce will add some padding so numbers may not match exactly.  Make sure
 	 * they are close though.
 	 */
-	CU_ASSERT((pm_size - expected_pm_size) < REDUCE_PM_SIZE_ALIGNMENT);
+	CU_ASSERT((pm_size - expected_pm_size) <= REDUCE_PM_SIZE_ALIGNMENT);
 }
 
 static void
@@ -474,15 +477,22 @@ backing_dev_compress(struct spdk_reduce_backing_dev *backing_dev,
 		     struct spdk_reduce_vol_cb_args *args)
 {
 	uint32_t compressed_len;
-	int rc;
+	uint64_t total_length = 0;
+	char *buf = g_decomp_buf;
+	int rc, i;
 
-	CU_ASSERT(src_iovcnt == 1);
 	CU_ASSERT(dst_iovcnt == 1);
-	CU_ASSERT(src_iov[0].iov_len == dst_iov[0].iov_len);
+
+	for (i = 0; i < src_iovcnt; i++) {
+		memcpy(buf, src_iov[i].iov_base, src_iov[i].iov_len);
+		buf += src_iov[i].iov_len;
+		total_length += src_iov[i].iov_len;
+	}
 
 	compressed_len = dst_iov[0].iov_len;
 	rc = ut_compress(dst_iov[0].iov_base, &compressed_len,
-			 src_iov[0].iov_base, src_iov[0].iov_len);
+			 g_decomp_buf, total_length);
+
 	args->cb_fn(args->cb_arg, rc ? rc : (int)compressed_len);
 }
 
@@ -492,15 +502,24 @@ backing_dev_decompress(struct spdk_reduce_backing_dev *backing_dev,
 		       struct iovec *dst_iov, int dst_iovcnt,
 		       struct spdk_reduce_vol_cb_args *args)
 {
-	uint32_t decompressed_len;
-	int rc;
+	uint32_t decompressed_len = 0;
+	char *buf = g_decomp_buf;
+	int rc, i;
 
 	CU_ASSERT(src_iovcnt == 1);
-	CU_ASSERT(dst_iovcnt == 1);
 
-	decompressed_len = dst_iov[0].iov_len;
-	rc = ut_decompress(dst_iov[0].iov_base, &decompressed_len,
+	for (i = 0; i < dst_iovcnt; i++) {
+		decompressed_len += dst_iov[i].iov_len;
+	}
+
+	rc = ut_decompress(g_decomp_buf, &decompressed_len,
 			   src_iov[0].iov_base, src_iov[0].iov_len);
+
+	for (i = 0; i < dst_iovcnt; i++) {
+		memcpy(dst_iov[i].iov_base, buf, dst_iov[i].iov_len);
+		buf += dst_iov[i].iov_len;
+	}
+
 	args->cb_fn(args->cb_arg, rc ? rc : (int)decompressed_len);
 }
 
@@ -511,6 +530,7 @@ backing_dev_destroy(struct spdk_reduce_backing_dev *backing_dev)
 	 *  scenarios.
 	 */
 	free(g_backing_dev_buf);
+	free(g_decomp_buf);
 	g_backing_dev_buf = NULL;
 }
 
@@ -528,6 +548,9 @@ backing_dev_init(struct spdk_reduce_backing_dev *backing_dev, struct spdk_reduce
 	backing_dev->unmap = backing_dev_unmap;
 	backing_dev->compress = backing_dev_compress;
 	backing_dev->decompress = backing_dev_decompress;
+
+	g_decomp_buf = calloc(1, params->chunk_size);
+	SPDK_CU_ASSERT_FATAL(g_decomp_buf != NULL);
 
 	g_backing_dev_buf = calloc(1, size);
 	SPDK_CU_ASSERT_FATAL(g_backing_dev_buf != NULL);
@@ -963,6 +986,45 @@ read_write(void)
 }
 
 static void
+_readv_writev(uint32_t backing_blocklen)
+{
+	struct spdk_reduce_vol_params params = {};
+	struct spdk_reduce_backing_dev backing_dev = {};
+	struct iovec iov[REDUCE_MAX_IOVECS + 1];
+
+	params.chunk_size = 16 * 1024;
+	params.backing_io_unit_size = 4096;
+	params.logical_block_size = 512;
+	spdk_uuid_generate(&params.uuid);
+
+	backing_dev_init(&backing_dev, &params, backing_blocklen);
+
+	g_vol = NULL;
+	g_reduce_errno = -1;
+	spdk_reduce_vol_init(&params, &backing_dev, TEST_MD_PATH, init_cb, NULL);
+	CU_ASSERT(g_reduce_errno == 0);
+	SPDK_CU_ASSERT_FATAL(g_vol != NULL);
+
+	g_reduce_errno = -1;
+	spdk_reduce_vol_writev(g_vol, iov, REDUCE_MAX_IOVECS + 1, 2, REDUCE_MAX_IOVECS + 1, write_cb, NULL);
+	CU_ASSERT(g_reduce_errno == -EINVAL);
+
+	g_reduce_errno = -1;
+	spdk_reduce_vol_unload(g_vol, unload_cb, NULL);
+	CU_ASSERT(g_reduce_errno == 0);
+
+	persistent_pm_buf_destroy();
+	backing_dev_destroy(&backing_dev);
+}
+
+static void
+readv_writev(void)
+{
+	_readv_writev(512);
+	_readv_writev(4096);
+}
+
+static void
 destroy_cb(void *ctx, int reduce_errno)
 {
 	g_reduce_errno = reduce_errno;
@@ -1002,7 +1064,6 @@ destroy(void)
 	CU_ASSERT(g_reduce_errno == 0);
 
 	g_reduce_errno = -1;
-	MOCK_CLEAR(spdk_dma_zmalloc);
 	MOCK_CLEAR(spdk_malloc);
 	MOCK_CLEAR(spdk_zmalloc);
 	spdk_reduce_vol_destroy(&backing_dev, destroy_cb, NULL);
@@ -1235,6 +1296,7 @@ main(int argc, char **argv)
 		CU_add_test(suite, "load", load) == NULL ||
 		CU_add_test(suite, "write_maps", write_maps) == NULL ||
 		CU_add_test(suite, "read_write", read_write) == NULL ||
+		CU_add_test(suite, "readv_writev", readv_writev) == NULL ||
 		CU_add_test(suite, "destroy", destroy) == NULL ||
 		CU_add_test(suite, "defer_bdev_io", defer_bdev_io) == NULL ||
 		CU_add_test(suite, "overlapped", overlapped) == NULL ||

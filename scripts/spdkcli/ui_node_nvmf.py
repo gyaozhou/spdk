@@ -20,7 +20,7 @@ class UINVMfTransports(UINode):
 
     def refresh(self):
         self._children = set([])
-        for transport in self.get_root().get_nvmf_transports():
+        for transport in self.get_root().nvmf_get_transports():
             UINVMfTransport(transport, self)
 
     def ui_command_create(self, trtype, max_queue_depth=None, max_qpairs_per_ctrlr=None, in_capsule_data_size=None,
@@ -68,11 +68,11 @@ class UINVMfSubsystems(UINode):
 
     def refresh(self):
         self._children = set([])
-        for subsystem in self.get_root().get_nvmf_subsystems():
+        for subsystem in self.get_root().nvmf_get_subsystems():
             UINVMfSubsystem(subsystem, self)
 
     def delete(self, subsystem_nqn):
-        self.get_root().delete_nvmf_subsystem(nqn=subsystem_nqn)
+        self.get_root().nvmf_delete_subsystem(nqn=subsystem_nqn)
 
     def ui_command_create(self, nqn, serial_number=None,
                           max_namespaces=None, allow_any_host="false"):
@@ -129,7 +129,7 @@ class UINVMfSubsystem(UINode):
             UINVMfSubsystemNamespaces(self.subsystem.namespaces, self)
 
     def refresh_node(self):
-        for subsystem in self.get_root().get_nvmf_subsystems():
+        for subsystem in self.get_root().nvmf_get_subsystems():
             if subsystem.nqn == self.subsystem.nqn:
                 self.subsystem = subsystem
         self.refresh()
@@ -173,7 +173,7 @@ class UINVMfSubsystemListeners(UINode):
             UINVMfSubsystemListener(address, self)
 
     def refresh_node(self):
-        for subsystem in self.get_root().get_nvmf_subsystems():
+        for subsystem in self.get_root().nvmf_get_subsystems():
             if subsystem.nqn == self.parent.subsystem.nqn:
                 self.listen_addresses = subsystem.listen_addresses
         self.refresh()
@@ -244,7 +244,7 @@ class UINVMfSubsystemHosts(UINode):
             UINVMfSubsystemHost(host, self)
 
     def refresh_node(self):
-        for subsystem in self.get_root().get_nvmf_subsystems():
+        for subsystem in self.get_root().nvmf_get_subsystems():
             if subsystem.nqn == self.parent.subsystem.nqn:
                 self.hosts = subsystem.hosts
         self.refresh()
@@ -303,7 +303,7 @@ class UINVMfSubsystemNamespaces(UINode):
             UINVMfSubsystemNamespace(namespace, self)
 
     def refresh_node(self):
-        for subsystem in self.get_root().get_nvmf_subsystems():
+        for subsystem in self.get_root().nvmf_get_subsystems():
             if subsystem.nqn == self.parent.subsystem.nqn:
                 self.namespaces = subsystem.namespaces
         self.refresh()

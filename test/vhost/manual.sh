@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-rootdir=$(readlink -f $(dirname $0))/../..
-source "$rootdir/test/common/autotest_common.sh"
 
-set -e
+testdir=$(readlink -f $(dirname $0))
+rootdir=$(readlink -f $testdir/../..)
+source $rootdir/test/common/autotest_common.sh
+source $rootdir/test/vhost/common.sh
 
-DEFAULT_VM_IMAGE="/home/sys_sgsw/vhost_vm_image.qcow2"
 CENTOS_VM_IMAGE="/home/sys_sgsw/spdk_vhost_CentOS_vm_image.qcow2"
 DEFAULT_FIO_BIN="/home/sys_sgsw/fio_ubuntu"
 CENTOS_FIO_BIN="/home/sys_sgsw/fio_ubuntu_bak"
@@ -21,7 +21,7 @@ case $1 in
 		echo "  -h |--help                           prints this message"
 		echo ""
 		echo "Environment:"
-		echo "  VM_IMAGE        path to QCOW2 VM image used during test (default: $DEFAULT_VM_IMAGE)"
+		echo "  VM_IMAGE        path to QCOW2 VM image used during test (default: $HOME/vhost_vm_image.qcow2)"
 		echo ""
 		echo "Tests are performed only on Linux machine. For other OS no action is performed."
 		echo ""
@@ -37,7 +37,6 @@ if [[ $(uname -s) != Linux ]]; then
 	exit 0
 fi
 
-: ${VM_IMAGE="$DEFAULT_VM_IMAGE"}
 : ${FIO_BIN="$DEFAULT_FIO_BIN"}
 
 if [[ ! -r "${VM_IMAGE}" ]]; then
@@ -47,30 +46,14 @@ if [[ ! -r "${VM_IMAGE}" ]]; then
 	exit 1
 fi
 
-DISKS_NUMBER=`lspci -mm -n | grep 0108 | tr -d '"' | awk -F " " '{print "0000:"$1}'| wc -l`
+DISKS_NUMBER=$(lspci -mm -n | grep 0108 | tr -d '"' | awk -F " " '{print "0000:"$1}'| wc -l)
 
 WORKDIR=$(readlink -f $(dirname $0))
 
 case $1 in
-	-p|--performance)
-		echo 'Running performance suite...'
-		run_test case $WORKDIR/fiotest/autotest.sh --fio-bin=$FIO_BIN \
-		--vm=0,$VM_IMAGE,Nvme0n1p0 \
-		--test-type=spdk_vhost_scsi \
-		--fio-job=$WORKDIR/common/fio_jobs/default_performance.job
-		report_test_completion "vhost_perf"
-		;;
-	-pb|--performance-blk)
-		echo 'Running blk performance suite...'
-		run_test case $WORKDIR/fiotest/autotest.sh --fio-bin=$FIO_BIN \
-		--vm=0,$VM_IMAGE,Nvme0n1p0 \
-		--test-type=spdk_vhost_blk \
-		--fio-job=$WORKDIR/common/fio_jobs/default_performance.job
-		report_test_completion "vhost_perf_blk"
-		;;
 	-hp|--hotplug)
 		echo 'Running hotplug tests suite...'
-		run_test case $WORKDIR/hotplug/scsi_hotplug.sh --fio-bin=$FIO_BIN \
+		run_test "vhost_hotplug" $WORKDIR/hotplug/scsi_hotplug.sh --fio-bin=$FIO_BIN \
 			--vm=0,$VM_IMAGE,Nvme0n1p0:Nvme0n1p1 \
 			--vm=1,$VM_IMAGE,Nvme0n1p2:Nvme0n1p3 \
 			--vm=2,$VM_IMAGE,Nvme0n1p4:Nvme0n1p5 \
@@ -81,7 +64,7 @@ case $1 in
 		;;
 	-shr|--scsi-hot-remove)
 		echo 'Running scsi hotremove tests suite...'
-		run_test case $WORKDIR/hotplug/scsi_hotplug.sh --fio-bin=$FIO_BIN \
+		run_test "vhost_scsi_hot_remove" $WORKDIR/hotplug/scsi_hotplug.sh --fio-bin=$FIO_BIN \
 			--vm=0,$VM_IMAGE,Nvme0n1p0:Nvme0n1p1 \
 			--vm=1,$VM_IMAGE,Nvme0n1p2:Nvme0n1p3 \
 			--test-type=spdk_vhost_scsi \
@@ -90,13 +73,13 @@ case $1 in
 		;;
 	-bhr|--blk-hot-remove)
 		echo 'Running blk hotremove tests suite...'
-		run_test case $WORKDIR/hotplug/scsi_hotplug.sh --fio-bin=$FIO_BIN \
+		run_test "vhost_blk_hot_remove" $WORKDIR/hotplug/scsi_hotplug.sh --fio-bin=$FIO_BIN \
 			--vm=0,$VM_IMAGE,Nvme0n1p0:Nvme0n1p1 \
 			--vm=1,$VM_IMAGE,Nvme0n1p2:Nvme0n1p3 \
 			--test-type=spdk_vhost_blk \
 			--blk-hotremove-test \
 			--fio-jobs=$WORKDIR/hotplug/fio_jobs/default_integrity.job
-	;;
+		;;
 	*)
 		echo "unknown test type: $1"
 		exit 1

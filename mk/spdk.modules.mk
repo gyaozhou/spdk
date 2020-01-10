@@ -31,9 +31,10 @@
 #  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
 
-BLOCKDEV_MODULES_LIST = bdev_lvol blobfs blob blob_bdev lvol
-BLOCKDEV_MODULES_LIST += bdev_malloc bdev_null bdev_nvme nvme bdev_passthru bdev_error bdev_gpt bdev_split
-BLOCKDEV_MODULES_LIST += bdev_raid
+BLOCKDEV_MODULES_LIST = bdev_malloc bdev_null bdev_nvme bdev_passthru bdev_lvol
+BLOCKDEV_MODULES_LIST += bdev_raid bdev_error bdev_gpt bdev_split bdev_delay
+BLOCKDEV_MODULES_LIST += bdev_zone_block
+BLOCKDEV_MODULES_LIST += blobfs blob_bdev blob lvol vmd nvme
 
 ifeq ($(CONFIG_CRYPTO),y)
 BLOCKDEV_MODULES_LIST += bdev_crypto
@@ -91,11 +92,9 @@ SOCK_MODULES_LIST = sock_posix
 ifeq ($(CONFIG_VPP),y)
 SYS_LIBS += -Wl,--whole-archive
 ifneq ($(CONFIG_VPP_DIR),)
-SYS_LIBS += -l:libvppinfra.a -l:libsvm.a -l:libvapiclient.a
-SYS_LIBS += -l:libvppcom.a -l:libvlibmemoryclient.a
-else
-SYS_LIBS += -lvppcom
+SYS_LIBS += -L$(CONFIG_VPP_DIR)/lib
 endif
+SYS_LIBS += -lvppinfra -lsvm -lvlibmemoryclient
 SYS_LIBS += -Wl,--no-whole-archive
 SOCK_MODULES_LIST += sock_vpp
 endif

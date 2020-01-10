@@ -25,8 +25,10 @@ VM_SETUP_PATH=$(readlink -f ${BASH_SOURCE%/*})
 UPGRADE=false
 INSTALL=false
 CONF="librxe,iscsi,rocksdb,fio,flamegraph,tsocks,qemu,vpp,libiscsi,nvmecli,qat,ocf"
+LIBRXE_INSTALL=true
 
 OSID=$(source /etc/os-release && echo $ID)
+OSVERSION=$(source /etc/os-release && echo $VERSION_ID)
 PACKAGEMNG='undefined'
 
 function install_rxe_cfg()
@@ -74,7 +76,7 @@ function install_iscsi_adm()
                 git -C open-iscsi-install/open-iscsi config user.email none
 
                 git -C open-iscsi-install/open-iscsi checkout 86e8892
-                for patch in `ls open-iscsi-install/patches`; do
+                for patch in $(ls open-iscsi-install/patches); do
                     git -C open-iscsi-install/open-iscsi am ../patches/$patch
                 done
                 sed -i '427s/.*/-1);/' open-iscsi-install/open-iscsi/usr/session_info.c
@@ -89,6 +91,13 @@ function install_iscsi_adm()
 
 function install_qat()
 {
+
+    if [ "$PACKAGEMNG" = "dnf" ]; then
+        sudo dnf install -y libudev-devel
+    elif [ "$PACKAGEMNG" = "apt-get" ]; then
+        sudo apt-get install -y libudev-dev
+    fi
+
     if echo $CONF | grep -q qat; then
         qat_tarball=$(basename $DRIVER_LOCATION_QAT)
         kernel_maj=$(uname -r | cut -d'.' -f1)
@@ -141,6 +150,14 @@ function install_fio()
     if echo $CONF | grep -q fio; then
         # This version of fio is installed in /usr/src/fio to enable
         # building the spdk fio plugin.
+        local fio_version="fio-3.15"
+
+        # Change version on Arch Linux, 3.3 does not compile
+        # with gcc 9
+        if [ $PACKAGEMNG == 'pacman' ]; then
+            fio_version="fio-3.15"
+        fi
+
         if [ ! -d /usr/src/fio ]; then
             if [ ! -d fio ]; then
                 git clone "${GIT_REPO_FIO}"
@@ -151,7 +168,7 @@ function install_fio()
             (
                 git -C /usr/src/fio checkout master &&
                 git -C /usr/src/fio pull &&
-                git -C /usr/src/fio checkout fio-3.3 &&
+                git -C /usr/src/fio checkout $fio_version &&
                 make -C /usr/src/fio -j${jobs} &&
                 sudo make -C /usr/src/fio install
             )
@@ -178,7 +195,20 @@ function install_flamegraph()
 function install_qemu()
 {
     if echo $CONF | grep -q qemu; then
-        # Qemu is used in the vhost tests.
+        # Two versions of QEMU are used in the tests.
+        # Stock QEMU is used for vhost. A special fork
+        # is used to test OCSSDs. Install both.
+
+        # Packaged QEMU
+        if [ "$PACKAGEMNG" = "dnf" ]; then
+                sudo dnf install -y qemu-system-x86 qemu-img
+        elif [ "$PACKAGEMNG" = "apt-get" ]; then
+                sudo apt-get install -y qemu-system-x86 qemu-img
+        elif [ "$PACKAGEMNG" = "pacman" ]; then
+                sudo pacman -Sy --needed --noconfirm qemu
+        fi
+
+        # Forked QEMU
         SPDK_QEMU_BRANCH=spdk-3.0.0
         mkdir -p qemu
         if [ ! -d "qemu/$SPDK_QEMU_BRANCH" ]; then
@@ -188,12 +218,17 @@ function install_qemu()
         fi
 
         declare -a opt_params=("--prefix=/usr/local/qemu/$SPDK_QEMU_BRANCH")
+        if [ "$PACKAGEMNG" = "pacman" ]; then
+            # GCC 9 on ArchLinux fails to compile Qemu due to some old warnings which were not detected by older versions.
+            opt_params+=("--extra-cflags='-Wno-error=stringop-truncation -Wno-error=deprecated-declarations -Wno-error=incompatible-pointer-types -Wno-error=format-truncation'")
+            opt_params+=("--disable-glusterfs")
+        fi
 
         # Most tsocks proxies rely on a configuration file in /etc/tsocks.conf.
         # If using tsocks, please make sure to complete this config before trying to build qemu.
         if echo $CONF | grep -q tsocks; then
             if hash tsocks 2> /dev/null; then
-                opt_params+=(--with-git='tsocks git')
+                opt_params+=("--with-git='tsocks git'")
             fi
         fi
 
@@ -208,64 +243,32 @@ function install_qemu()
 function install_vpp()
 {
     if echo $CONF | grep -q vpp; then
-        # Vector packet processing (VPP) is installed for use with iSCSI tests.
-        # At least on fedora 28, the yum setup that vpp uses is deprecated and fails.
-        # The actions taken under the vpp_setup script are necessary to fix this issue.
-        if [ -d vpp_setup ]; then
-            echo "vpp setup already done."
-        elif [ "$PACKAGEMNG" = "dnf" ]; then
-            echo "%_topdir  $HOME/vpp_setup/src/rpm" >> ~/.rpmmacros
-            sudo dnf install -y perl-generators
-            mkdir -p ~/vpp_setup/src/rpm
-            mkdir -p vpp_setup/src/rpm/BUILD vpp_setup/src/rpm/RPMS vpp_setup/src/rpm/SOURCES \
-            vpp_setup/src/rpm/SPECS vpp_setup/src/rpm/SRPMS
-            dnf download --downloaddir=./vpp_setup/src/rpm --source redhat-rpm-config
-            rpm -ivh ~/vpp_setup/src/rpm/redhat-rpm-config*
-            sed -i s/"Requires: (annobin if gcc)"//g ~/vpp_setup/src/rpm/SPECS/redhat-rpm-config.spec
-            rpmbuild -ba ~/vpp_setup/src/rpm/SPECS/*.spec
-            sudo dnf remove -y --noautoremove redhat-rpm-config
-            sudo rpm -Uvh ~/vpp_setup/src/rpm/RPMS/noarch/*
-        fi
-
-        if [ -d vpp ]; then
+        if [ -d /usr/local/src/vpp ]; then
             echo "vpp already cloned."
-            if [ ! -d vpp/build-root ]; then
+            if [ ! -d /usr/local/src/vpp/build-root ]; then
                 echo "build-root has not been done"
-                echo "remove the `pwd` and start again"
+                echo "remove the $(pwd) and start again"
                 exit 1
             fi
         else
             git clone "${GIT_REPO_VPP}"
-            git -C ./vpp checkout v18.01.1
-            if [ "$PACKAGEMNG" = "dnf" ]; then
-                # VPP 18.01.1 does not support OpenSSL 1.1.
-                # For compilation, a compatibility package is used temporarily.
-                sudo dnf install -y --allowerasing compat-openssl10-devel
-                # Installing required dependencies for building VPP
-                yes | make -C ./vpp install-dep
+            git -C ./vpp checkout v19.04.2
 
-                make -C ./vpp pkg-rpm -j${jobs}
-                # Reinstall latest OpenSSL devel package.
-                sudo dnf install -y --allowerasing openssl-devel
-                sudo dnf install -y \
-                    ./vpp/build_root/vpp-lib-18.01.1-release.x86_64.rpm \
-                    ./vpp/build_root/vpp-devel-18.01.1-release.x86_64.rpm \
-                    ./vpp/build_root/vpp-18.01.1-release.x86_64.rpm
-                # Since hugepage configuration is done via spdk/scripts/setup.sh,
-                # this default config is not needed.
-                #
-                # NOTE: Parameters kernel.shmmax and vm.max_map_count are set to
-                # very low count and cause issues with hugepage total sizes above 1GB.
-                sudo rm -f /etc/sysctl.d/80-vpp.conf
-            elif [ "$PACKAGEMNG" = "apt-get" ]; then
-                yes | make -C ./vpp install-dep
-                make -C ./vpp bootstrap -j${jobs}
-                make -C ./vpp pkg-deb -j${jobs}
-                yes | sudo dpkg -i vpp/build-root/vpp-lib_18.01.1-release_amd64.deb \
-                    vpp/build-root/vpp-dev_18.01.1-release_amd64.deb \
-                    vpp/build-root/vpp_18.01.1-release_amd64.deb
-                sudo rm -f /etc/sysctl.d/80-vpp.conf
+            if [ "${OSID}" == 'fedora' ]; then
+                if [ ${OSVERSION} -eq 29 ]; then
+                    git -C ./vpp apply ${VM_SETUP_PATH}/patch/vpp/fedora29-fix.patch
+                fi
+                if [ ${OSVERSION} -eq 30 ]; then
+                    git -C ./vpp apply ${VM_SETUP_PATH}/patch/vpp/fedora30-fix.patch
+                fi
             fi
+
+            # Installing required dependencies for building VPP
+            yes | make -C ./vpp install-dep
+
+            make -C ./vpp build -j${jobs}
+
+            sudo mv ./vpp /usr/local/src/vpp-19.04
         fi
     fi
 }
@@ -279,8 +282,15 @@ function install_nvmecli()
         else
             echo "nvme-cli already checked out. Skipping"
         fi
+	if [ ! -d "/usr/local/src/nvme-cli" ]; then
+            git clone "https://review.gerrithub.io/spdk/nvme-cli" "nvme-cli-cuse"
+            git -C ./nvme-cli-cuse checkout nvme-cuse
+            make -C ./nvme-cli-cuse
+            sudo mv ./nvme-cli-cuse /usr/local/src/nvme-cli
+	fi
     fi
 }
+
 
 function install_libiscsi()
 {
@@ -331,6 +341,8 @@ if hash dnf &>/dev/null; then
     PACKAGEMNG=dnf
 elif hash apt-get &>/dev/null; then
     PACKAGEMNG=apt-get
+elif hash pacman &>/dev/null; then
+    PACKAGEMNG=pacman
 else
     echo 'Supported package manager not found. Script supports "dnf" and "apt-get".'
 fi
@@ -366,7 +378,7 @@ while getopts 'iuht:c:-:' optchar; do
     esac
 done
 
-if [ ! -z "$CONF_PATH" ]; then
+if [ -n "$CONF_PATH" ]; then
     if [ ! -f "$CONF_PATH" ]; then
         echo Configuration file does not exist: "$CONF_PATH"
         exit 1
@@ -377,7 +389,7 @@ fi
 
 cd ~
 
-: ${GIT_REPO_SPDK=https://review.gerrithub.io/spdk/spdk}; export GIT_REPO_SPDK
+: ${GIT_REPO_SPDK=https://github.com/spdk/spdk.git}; export GIT_REPO_SPDK
 : ${GIT_REPO_DPDK=https://github.com/spdk/dpdk.git}; export GIT_REPO_DPDK
 : ${GIT_REPO_LIBRXE=https://github.com/SoftRoCE/librxe-dev.git}; export GIT_REPO_LIBRXE
 : ${GIT_REPO_OPEN_ISCSI=https://github.com/open-iscsi/open-iscsi}; export GIT_REPO_OPEN_ISCSI
@@ -389,20 +401,28 @@ cd ~
 : ${GIT_REPO_LIBISCSI=https://github.com/sahlberg/libiscsi}; export GIT_REPO_LIBISCSI
 : ${GIT_REPO_SPDK_NVME_CLI=https://github.com/spdk/nvme-cli}; export GIT_REPO_SPDK_NVME_CLI
 : ${GIT_REPO_INTEL_IPSEC_MB=https://github.com/spdk/intel-ipsec-mb.git}; export GIT_REPO_INTEL_IPSEC_MB
-: ${DRIVER_LOCATION_QAT=https://01.org/sites/default/files/downloads/intelr-quickassist-technology/qat1.7.l.4.3.0-00033.tar.gz}; export DRIVER_LOCATION_QAT
+: ${DRIVER_LOCATION_QAT=https://01.org/sites/default/files/downloads//qat1.7.l.4.6.0-00025.tar.gz}; export DRIVER_LOCATION_QAT
 : ${GIT_REPO_OCF=https://github.com/Open-CAS/ocf}; export GIT_REPO_OCF
 
 jobs=$(($(nproc)*2))
 
 if $UPGRADE; then
-    if [ $PACKAGEMNG == 'apt-get' ]; then
+    if [ $PACKAGEMNG == 'dnf' ]; then
+        sudo $PACKAGEMNG upgrade -y
+    elif [ $PACKAGEMNG == 'apt-get' ]; then
         sudo $PACKAGEMNG update
+        sudo $PACKAGEMNG upgrade -y
+    elif [ $PACKAGEMNG == 'pacman' ]; then
+        sudo $PACKAGEMNG -Syu --noconfirm --needed
     fi
-    sudo $PACKAGEMNG upgrade -y
 fi
 
 if $INSTALL; then
-    sudo $PACKAGEMNG install -y git
+    if [ $PACKAGEMNG == 'pacman' ]; then
+        sudo $PACKAGEMNG -Sy --needed --noconfirm git
+    else
+        sudo $PACKAGEMNG install -y git
+    fi
 fi
 
 mkdir -p spdk_repo/output
@@ -462,7 +482,11 @@ if $INSTALL; then
         python3-pandas \
         btrfs-progs \
         rpm-build \
-        iptables
+        iptables \
+        clang-analyzer \
+        bc \
+        kernel-modules-extra \
+        systemd-devel
 
     elif [ $PACKAGEMNG == 'apt-get' ]; then
         echo "Package perl-open is not available at Ubuntu repositories" >&2
@@ -480,11 +504,20 @@ if $INSTALL; then
             sudo apt-get install -y libasan2
             sudo apt-get install -y libubsan0
         fi
-
+        if ! sudo apt-get install -y rdma-core; then
+            echo "Package rdma-core is avaliable at Ubuntu 18 [universe] repositorium" >&2
+            sudo apt-get install -y rdmacm-utils
+            sudo apt-get install -y ibverbs-utils
+        else
+            LIBRXE_INSTALL=false
+        fi
         if ! sudo apt-get install -y libpmempool1; then
             echo "Package libpmempool1 is available at Ubuntu 18 [universe] repositorium" >&2
         fi
-        if ! sudo apt-get install -y open-isns-utils; then
+        if ! sudo apt-get install -y clang-tools; then
+            echo "Package clang-tools is available at Ubuntu 18 [universe] repositorium" >&2
+        fi
+        if ! sudo apt-get install -y --no-install-suggests --no-install-recommends open-isns-utils; then
             echo "Package open-isns-utils is available at Ubuntu 18 [universe] repositorium" >&2
         fi
 
@@ -516,17 +549,62 @@ if $INSTALL; then
         flex \
         bison \
         libswitch-perl \
-        rdmacm-utils \
-        ibverbs-utils \
         gdisk \
         socat \
         sshfs \
         sshpass \
         python3-pandas \
-        btrfs-tools
+        btrfs-tools \
+        bc
 
         # rpm-build is not used
         # iptables installed by default
+
+    elif [ $PACKAGEMNG == 'pacman' ]; then
+        if echo $CONF | grep -q tsocks; then
+            sudo pacman -Sy --noconfirm --needed tsocks
+        fi
+
+        sudo pacman -Sy --noconfirm --needed valgrind \
+            jq \
+            nvme-cli \
+            ceph \
+            gdb \
+            fio \
+            linux-headers \
+            gflags \
+            autoconf \
+            automake \
+            libtool \
+            libutil-linux \
+            libiscsi \
+            open-isns \
+            glib2 \
+            pixman \
+            flex \
+            bison \
+            elfutils \
+            libelf \
+            astyle \
+            gptfdisk \
+            socat \
+            sshfs \
+            sshpass \
+            python-pandas \
+            btrfs-progs \
+            iptables \
+            clang \
+            bc \
+            perl-switch \
+            open-iscsi
+
+        # TODO:
+        # These are either missing or require some other installation method
+        # than pacman:
+
+        # librbd-devel
+        # perl-open
+        # targetcli
 
     else
         echo "Package manager is undefined, skipping INSTALL step"
@@ -535,7 +613,11 @@ fi
 
 sudo mkdir -p /usr/src
 
-install_rxe_cfg&
+if [ $LIBRXE_INSTALL = true ]; then
+    #Ubuntu18 integrates librxe to rdma-core, libibverbs-dev no longer ships infiniband/driver.h.
+    #Don't compile librxe on ubuntu18 or later version, install package rdma-core instead.
+    install_rxe_cfg&
+fi
 install_iscsi_adm&
 install_rocksdb&
 install_fio&

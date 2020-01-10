@@ -34,7 +34,8 @@
 #include "nvme_internal.h"
 #include "spdk/nvme_ocssd.h"
 
-static void nvme_qpair_fail(struct spdk_nvme_qpair *qpair);
+static void nvme_qpair_abort_reqs(struct spdk_nvme_qpair *qpair, uint32_t dnr);
+static int nvme_qpair_resubmit_request(struct spdk_nvme_qpair *qpair, struct nvme_request *req);
 
 struct nvme_string {
 	uint16_t	value;
@@ -151,7 +152,7 @@ nvme_io_qpair_print_command(struct spdk_nvme_qpair *qpair,
 }
 
 void
-nvme_qpair_print_command(struct spdk_nvme_qpair *qpair, struct spdk_nvme_cmd *cmd)
+spdk_nvme_qpair_print_command(struct spdk_nvme_qpair *qpair, struct spdk_nvme_cmd *cmd)
 {
 	assert(qpair != NULL);
 	assert(cmd != NULL);
@@ -239,7 +240,7 @@ static const struct nvme_string command_specific_status[] = {
 	{ SPDK_NVME_SC_INVALID_RESOURCE_ID, "INVALID RESOURCE IDENTIFIER" },
 	{ SPDK_NVME_SC_CONFLICTING_ATTRIBUTES, "CONFLICTING ATTRIBUTES" },
 	{ SPDK_NVME_SC_INVALID_PROTECTION_INFO, "INVALID PROTECTION INFO" },
-	{ SPDK_NVME_SC_ATTEMPTED_WRITE_TO_RO_PAGE, "WRITE TO RO PAGE" },
+	{ SPDK_NVME_SC_ATTEMPTED_WRITE_TO_RO_RANGE, "WRITE TO RO RANGE" },
 	{ 0xFFFF, "COMMAND SPECIFIC" }
 };
 
@@ -297,8 +298,8 @@ spdk_nvme_cpl_get_status_string(const struct spdk_nvme_status *status)
 }
 
 void
-nvme_qpair_print_completion(struct spdk_nvme_qpair *qpair,
-			    struct spdk_nvme_cpl *cpl)
+spdk_nvme_qpair_print_completion(struct spdk_nvme_qpair *qpair,
+				 struct spdk_nvme_cpl *cpl)
 {
 	SPDK_NOTICELOG("%s (%02x/%02x) sqid:%d cid:%d cdw0:%x sqhd:%04x p:%x m:%x dnr:%x\n",
 		       spdk_nvme_cpl_get_status_string(&cpl->status),
@@ -364,7 +365,7 @@ nvme_completion_is_retry(const struct spdk_nvme_cpl *cpl)
 static void
 nvme_qpair_manual_complete_request(struct spdk_nvme_qpair *qpair,
 				   struct nvme_request *req, uint32_t sct, uint32_t sc,
-				   bool print_on_error)
+				   uint32_t dnr, bool print_on_error)
 {
 	struct spdk_nvme_cpl	cpl;
 	bool			error;
@@ -373,28 +374,87 @@ nvme_qpair_manual_complete_request(struct spdk_nvme_qpair *qpair,
 	cpl.sqid = qpair->id;
 	cpl.status.sct = sct;
 	cpl.status.sc = sc;
+	cpl.status.dnr = dnr;
 
 	error = spdk_nvme_cpl_is_error(&cpl);
 
-	if (error && print_on_error) {
+	if (error && print_on_error && !qpair->ctrlr->opts.disable_error_logging) {
 		SPDK_NOTICELOG("Command completed manually:\n");
-		nvme_qpair_print_command(qpair, &req->cmd);
-		nvme_qpair_print_completion(qpair, &cpl);
+		spdk_nvme_qpair_print_command(qpair, &req->cmd);
+		spdk_nvme_qpair_print_completion(qpair, &cpl);
 	}
 
-	nvme_complete_request(req->cb_fn, req->cb_arg, req, &cpl);
+	nvme_complete_request(req->cb_fn, req->cb_arg, qpair, req, &cpl);
 	nvme_free_request(req);
+}
+
+static void
+nvme_qpair_abort_queued_reqs(struct spdk_nvme_qpair *qpair, uint32_t dnr)
+{
+	struct nvme_request		*req;
+
+	while (!STAILQ_EMPTY(&qpair->queued_req)) {
+		req = STAILQ_FIRST(&qpair->queued_req);
+		STAILQ_REMOVE_HEAD(&qpair->queued_req, stailq);
+		if (!qpair->ctrlr->opts.disable_error_logging) {
+			SPDK_ERRLOG("aborting queued i/o\n");
+		}
+		nvme_qpair_manual_complete_request(qpair, req, SPDK_NVME_SCT_GENERIC,
+						   SPDK_NVME_SC_ABORTED_BY_REQUEST, dnr, true);
+	}
+}
+
+static inline bool
+nvme_qpair_check_enabled(struct spdk_nvme_qpair *qpair)
+{
+	struct nvme_request *req;
+
+	/*
+	 * Either during initial connect or reset, the qpair should follow the given state machine.
+	 * QPAIR_DISABLED->QPAIR_CONNECTING->QPAIR_CONNECTED->QPAIR_ENABLING->QPAIR_ENABLED. In the
+	 * reset case, once the qpair is properly connected, we need to abort any outstanding requests
+	 * from the old transport connection and encourage the application to retry them. We also need
+	 * to submit any queued requests that built up while we were in the connected or enabling state.
+	 */
+	if (nvme_qpair_get_state(qpair) == NVME_QPAIR_CONNECTED && !qpair->ctrlr->is_resetting) {
+		nvme_qpair_set_state(qpair, NVME_QPAIR_ENABLING);
+		nvme_qpair_complete_error_reqs(qpair);
+		nvme_transport_qpair_abort_reqs(qpair, 0 /* retry */);
+		nvme_qpair_set_state(qpair, NVME_QPAIR_ENABLED);
+		while (!STAILQ_EMPTY(&qpair->queued_req)) {
+			req = STAILQ_FIRST(&qpair->queued_req);
+			STAILQ_REMOVE_HEAD(&qpair->queued_req, stailq);
+			if (nvme_qpair_resubmit_request(qpair, req)) {
+				break;
+			}
+		}
+	}
+
+	return nvme_qpair_get_state(qpair) == NVME_QPAIR_ENABLED;
 }
 
 int32_t
 spdk_nvme_qpair_process_completions(struct spdk_nvme_qpair *qpair, uint32_t max_completions)
 {
 	int32_t ret;
+	int32_t resubmit_rc;
+	int32_t i;
 	struct nvme_request *req, *tmp;
 
-	if (qpair->ctrlr->is_failed) {
-		nvme_qpair_fail(qpair);
-		return 0;
+	if (spdk_unlikely(qpair->ctrlr->is_failed)) {
+		if (qpair->ctrlr->is_removed) {
+			nvme_qpair_abort_reqs(qpair, 1 /* Do not retry */);
+		}
+		return -ENXIO;
+	}
+
+	if (spdk_unlikely(!nvme_qpair_check_enabled(qpair) &&
+			  !(nvme_qpair_get_state(qpair) == NVME_QPAIR_CONNECTING))) {
+		/*
+		 * qpair is not enabled, likely because a controller reset is
+		 *  in progress.
+		 */
+		return -ENXIO;
 	}
 
 	/* error injection for those queued error requests */
@@ -404,13 +464,19 @@ spdk_nvme_qpair_process_completions(struct spdk_nvme_qpair *qpair, uint32_t max_
 				STAILQ_REMOVE(&qpair->err_req_head, req, nvme_request, stailq);
 				nvme_qpair_manual_complete_request(qpair, req,
 								   req->cpl.status.sct,
-								   req->cpl.status.sc, true);
+								   req->cpl.status.sc, 0, true);
 			}
 		}
 	}
 
 	qpair->in_completion_context = 1;
 	ret = nvme_transport_qpair_process_completions(qpair, max_completions);
+	if (ret < 0) {
+		SPDK_ERRLOG("CQ error, abort requests after transport retry counter exceeded\n");
+		if (nvme_qpair_is_admin_queue(qpair)) {
+			nvme_ctrlr_fail(qpair->ctrlr, false);
+		}
+	}
 	qpair->in_completion_context = 0;
 	if (qpair->delete_after_completion_context) {
 		/*
@@ -418,8 +484,32 @@ spdk_nvme_qpair_process_completions(struct spdk_nvme_qpair *qpair, uint32_t max_
 		 *  routine - so it is safe to delete it now.
 		 */
 		spdk_nvme_ctrlr_free_io_qpair(qpair);
+		return ret;
 	}
+
+	/*
+	 * At this point, ret must represent the number of completions we reaped.
+	 * submit as many queued requests as we completed.
+	 */
+	i = 0;
+	while (i < ret && !STAILQ_EMPTY(&qpair->queued_req) && !qpair->ctrlr->is_resetting) {
+		req = STAILQ_FIRST(&qpair->queued_req);
+		STAILQ_REMOVE_HEAD(&qpair->queued_req, stailq);
+		resubmit_rc = nvme_qpair_resubmit_request(qpair, req);
+		if (spdk_unlikely(resubmit_rc != 0)) {
+			SPDK_ERRLOG("Unable to resubmit as many requests as we completed.\n");
+			break;
+		}
+		i++;
+	}
+
 	return ret;
+}
+
+spdk_nvme_qp_failure_reason
+spdk_nvme_qpair_get_failure_reason(struct spdk_nvme_qpair *qpair)
+{
+	return qpair->transport_failure_reason;
 }
 
 int
@@ -459,6 +549,7 @@ nvme_qpair_init(struct spdk_nvme_qpair *qpair, uint16_t id,
 	for (i = 0; i < num_requests; i++) {
 		struct nvme_request *req = qpair->req_buf + i * req_size_padded;
 
+		req->qpair = qpair;
 		STAILQ_INSERT_HEAD(&qpair->free_req, req, stailq);
 	}
 
@@ -466,30 +557,36 @@ nvme_qpair_init(struct spdk_nvme_qpair *qpair, uint16_t id,
 }
 
 void
-nvme_qpair_deinit(struct spdk_nvme_qpair *qpair)
+nvme_qpair_complete_error_reqs(struct spdk_nvme_qpair *qpair)
 {
-	struct nvme_request *req;
-	struct nvme_error_cmd *cmd, *entry;
+	struct nvme_request		*req;
 
 	while (!STAILQ_EMPTY(&qpair->err_req_head)) {
 		req = STAILQ_FIRST(&qpair->err_req_head);
 		STAILQ_REMOVE_HEAD(&qpair->err_req_head, stailq);
 		nvme_qpair_manual_complete_request(qpair, req,
 						   req->cpl.status.sct,
-						   req->cpl.status.sc, true);
+						   req->cpl.status.sc, 0, true);
 	}
+}
+
+void
+nvme_qpair_deinit(struct spdk_nvme_qpair *qpair)
+{
+	struct nvme_error_cmd *cmd, *entry;
+
+	nvme_qpair_complete_error_reqs(qpair);
 
 	TAILQ_FOREACH_SAFE(cmd, &qpair->err_cmd_head, link, entry) {
 		TAILQ_REMOVE(&qpair->err_cmd_head, cmd, link);
-		spdk_dma_free(cmd);
+		spdk_free(cmd);
 	}
 
-	spdk_dma_free(qpair->req_buf);
+	spdk_free(qpair->req_buf);
 }
 
-// zhou:
-int
-nvme_qpair_submit_request(struct spdk_nvme_qpair *qpair, struct nvme_request *req)
+static inline int
+_nvme_qpair_submit_request(struct spdk_nvme_qpair *qpair, struct nvme_request *req)
 {
 	int			rc = 0;
 	struct nvme_request	*child_req, *tmp;
@@ -497,10 +594,7 @@ nvme_qpair_submit_request(struct spdk_nvme_qpair *qpair, struct nvme_request *re
 	struct spdk_nvme_ctrlr	*ctrlr = qpair->ctrlr;
 	bool			child_req_failed = false;
 
-	if (ctrlr->is_failed) {
-		nvme_free_request(req);
-		return -ENXIO;
-	}
+	nvme_qpair_check_enabled(qpair);
 
 	if (req->num_children) {
 		/*
@@ -508,15 +602,26 @@ nvme_qpair_submit_request(struct spdk_nvme_qpair *qpair, struct nvme_request *re
 		 * request itself, since the parent is the original unsplit request.
 		 */
 		TAILQ_FOREACH_SAFE(child_req, &req->children, child_tailq, tmp) {
-			if (!child_req_failed) {
+			if (spdk_likely(!child_req_failed)) {
 				rc = nvme_qpair_submit_request(qpair, child_req);
-				if (rc != 0) {
+				if (spdk_unlikely(rc != 0)) {
 					child_req_failed = true;
 				}
 			} else { /* free remaining child_reqs since one child_req fails */
 				nvme_request_remove_child(req, child_req);
+				nvme_request_free_children(child_req);
 				nvme_free_request(child_req);
 			}
+		}
+
+		if (spdk_unlikely(child_req_failed)) {
+			/* part of children requests have been submitted,
+			 * return success for this case.
+			 */
+			if (req->num_children) {
+				return 0;
+			}
+			goto error;
 		}
 
 		return rc;
@@ -542,6 +647,11 @@ nvme_qpair_submit_request(struct spdk_nvme_qpair *qpair, struct nvme_request *re
 		}
 	}
 
+	if (spdk_unlikely(ctrlr->is_failed)) {
+		rc = -ENXIO;
+		goto error;
+	}
+
 	/* assign submit_tick before submitting req to specific transport */
 	if (spdk_unlikely(ctrlr->timeout_enabled)) {
 		if (req->submit_tick == 0) { /* req submitted for the first time */
@@ -552,64 +662,99 @@ nvme_qpair_submit_request(struct spdk_nvme_qpair *qpair, struct nvme_request *re
 		req->submit_tick = 0;
 	}
 
-	return nvme_transport_qpair_submit_request(qpair, req);
+	/* Allow two cases:
+	 * 1. NVMe qpair is enabled.
+	 * 2. Always allow fabrics commands through - these get
+	 * the controller out of reset state.
+	 */
+	if (spdk_likely(nvme_qpair_get_state(qpair) == NVME_QPAIR_ENABLED) ||
+	    (req->cmd.opc == SPDK_NVME_OPC_FABRIC &&
+	     nvme_qpair_get_state(qpair) == NVME_QPAIR_CONNECTING)) {
+		rc = nvme_transport_qpair_submit_request(qpair, req);
+	} else {
+		/* The controller is being reset - queue this request and
+		 *  submit it later when the reset is completed.
+		 */
+		return -EAGAIN;
+	}
+
+	if (spdk_likely(rc == 0)) {
+		req->queued = false;
+		return 0;
+	}
+
+	if (rc == -EAGAIN) {
+		return -EAGAIN;
+	}
+
+error:
+	if (req->parent != NULL) {
+		nvme_request_remove_child(req->parent, req);
+	}
+
+	/* The request is from queued_req list we should trigger the callback from caller */
+	if (spdk_unlikely(req->queued)) {
+		nvme_qpair_manual_complete_request(qpair, req, SPDK_NVME_SCT_GENERIC,
+						   SPDK_NVME_SC_INTERNAL_DEVICE_ERROR, true, true);
+		return rc;
+	}
+
+	nvme_free_request(req);
+
+	return rc;
+}
+
+int
+nvme_qpair_submit_request(struct spdk_nvme_qpair *qpair, struct nvme_request *req)
+{
+	int rc;
+
+	if (spdk_unlikely(!STAILQ_EMPTY(&qpair->queued_req) && req->num_children == 0)) {
+		/*
+		 * requests that have no children should be sent to the transport after all
+		 * currently queued requests. Requests with chilren will be split and go back
+		 * through this path.
+		 */
+		STAILQ_INSERT_TAIL(&qpair->queued_req, req, stailq);
+		req->queued = true;
+		return 0;
+	}
+
+	rc = _nvme_qpair_submit_request(qpair, req);
+	if (rc == -EAGAIN) {
+		STAILQ_INSERT_TAIL(&qpair->queued_req, req, stailq);
+		req->queued = true;
+		rc = 0;
+	}
+
+	return rc;
+}
+
+static int
+nvme_qpair_resubmit_request(struct spdk_nvme_qpair *qpair, struct nvme_request *req)
+{
+	int rc;
+
+	/*
+	 * We should never have a request with children on the queue.
+	 * This is necessary to preserve the 1:1 relationship between
+	 * completions and resubmissions.
+	 */
+	assert(req->num_children == 0);
+	assert(req->queued);
+	rc = _nvme_qpair_submit_request(qpair, req);
+	if (spdk_unlikely(rc == -EAGAIN)) {
+		STAILQ_INSERT_HEAD(&qpair->queued_req, req, stailq);
+	}
+
+	return rc;
 }
 
 static void
-_nvme_io_qpair_enable(struct spdk_nvme_qpair *qpair)
+nvme_qpair_abort_reqs(struct spdk_nvme_qpair *qpair, uint32_t dnr)
 {
-	struct nvme_request		*req;
-
-	/* Manually abort each queued I/O. */
-	while (!STAILQ_EMPTY(&qpair->queued_req)) {
-		req = STAILQ_FIRST(&qpair->queued_req);
-		STAILQ_REMOVE_HEAD(&qpair->queued_req, stailq);
-		SPDK_ERRLOG("aborting queued i/o\n");
-		nvme_qpair_manual_complete_request(qpair, req, SPDK_NVME_SCT_GENERIC,
-						   SPDK_NVME_SC_ABORTED_BY_REQUEST, true);
-	}
-}
-
-void
-nvme_qpair_enable(struct spdk_nvme_qpair *qpair)
-{
-	if (nvme_qpair_is_io_queue(qpair)) {
-		_nvme_io_qpair_enable(qpair);
-	}
-
-	nvme_transport_qpair_enable(qpair);
-}
-
-void
-nvme_qpair_disable(struct spdk_nvme_qpair *qpair)
-{
-	struct nvme_request		*req;
-
-	while (!STAILQ_EMPTY(&qpair->err_req_head)) {
-		req = STAILQ_FIRST(&qpair->err_req_head);
-		STAILQ_REMOVE_HEAD(&qpair->err_req_head, stailq);
-		nvme_qpair_manual_complete_request(qpair, req,
-						   req->cpl.status.sct,
-						   req->cpl.status.sc, true);
-	}
-
-	nvme_transport_qpair_disable(qpair);
-}
-
-static void
-nvme_qpair_fail(struct spdk_nvme_qpair *qpair)
-{
-	struct nvme_request		*req;
-
-	while (!STAILQ_EMPTY(&qpair->queued_req)) {
-		req = STAILQ_FIRST(&qpair->queued_req);
-		STAILQ_REMOVE_HEAD(&qpair->queued_req, stailq);
-		SPDK_ERRLOG("failing queued i/o\n");
-		nvme_qpair_manual_complete_request(qpair, req, SPDK_NVME_SCT_GENERIC,
-						   SPDK_NVME_SC_ABORTED_BY_REQUEST, true);
-	}
-
-	nvme_transport_qpair_fail(qpair);
+	nvme_qpair_abort_queued_reqs(qpair, dnr);
+	nvme_transport_qpair_abort_reqs(qpair, dnr);
 }
 
 int
@@ -634,7 +779,7 @@ spdk_nvme_qpair_add_cmd_error_injection(struct spdk_nvme_ctrlr *ctrlr,
 	}
 
 	if (cmd == NULL) {
-		cmd = spdk_dma_zmalloc(sizeof(*cmd), 64, NULL);
+		cmd = spdk_zmalloc(sizeof(*cmd), 64, NULL, SPDK_ENV_LCORE_ID_ANY, SPDK_MALLOC_DMA);
 		if (!cmd) {
 			return -ENOMEM;
 		}
@@ -665,7 +810,7 @@ spdk_nvme_qpair_remove_cmd_error_injection(struct spdk_nvme_ctrlr *ctrlr,
 	TAILQ_FOREACH_SAFE(cmd, &qpair->err_cmd_head, link, entry) {
 		if (cmd->opc == opc) {
 			TAILQ_REMOVE(&qpair->err_cmd_head, cmd, link);
-			spdk_dma_free(cmd);
+			spdk_free(cmd);
 			return;
 		}
 	}

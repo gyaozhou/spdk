@@ -168,16 +168,25 @@ nvme_transport_ctrlr_delete_io_qpair(struct spdk_nvme_ctrlr *ctrlr, struct spdk_
 	return 0;
 }
 
-int
-nvme_transport_ctrlr_reinit_io_qpair(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_qpair *qpair)
+void
+nvme_transport_ctrlr_disconnect_qpair(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_qpair *qpair)
 {
-	return 0;
 }
 
 int
 nvme_transport_qpair_reset(struct spdk_nvme_qpair *qpair)
 {
 	return 0;
+}
+
+void
+nvme_transport_admin_qpair_abort_aers(struct spdk_nvme_qpair *qpair)
+{
+}
+
+void
+nvme_transport_qpair_abort_reqs(struct spdk_nvme_qpair *qpair, uint32_t dnr)
+{
 }
 
 int
@@ -253,14 +262,10 @@ spdk_nvme_qpair_process_completions(struct spdk_nvme_qpair *qpair, uint32_t max_
 }
 
 void
-nvme_qpair_disable(struct spdk_nvme_qpair *qpair)
+nvme_qpair_complete_error_reqs(struct spdk_nvme_qpair *qpair)
 {
 }
 
-void
-nvme_qpair_enable(struct spdk_nvme_qpair *qpair)
-{
-}
 
 void
 nvme_completion_poll_cb(void *arg, const struct spdk_nvme_cpl *cpl)
@@ -505,7 +510,7 @@ test_nvme_ctrlr_init_en_1_rdy_0(void)
 	 */
 	g_ut_nvme_regs.csts.bits.rdy = 1;
 	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
-	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE_ADMIN_QUEUE);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_RESET_ADMIN_QUEUE);
 
 	/*
 	 * Transition to READY.
@@ -559,7 +564,7 @@ test_nvme_ctrlr_init_en_1_rdy_1(void)
 	 */
 	g_ut_nvme_regs.csts.bits.rdy = 1;
 	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
-	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE_ADMIN_QUEUE);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_RESET_ADMIN_QUEUE);
 
 	/*
 	 * Transition to READY.
@@ -734,7 +739,7 @@ test_nvme_ctrlr_init_en_0_rdy_0_ams_rr(void)
 	 */
 	g_ut_nvme_regs.csts.bits.rdy = 1;
 	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
-	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE_ADMIN_QUEUE);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_RESET_ADMIN_QUEUE);
 
 	/*
 	 * Transition to READY.
@@ -911,7 +916,7 @@ test_nvme_ctrlr_init_en_0_rdy_0_ams_wrr(void)
 	 */
 	g_ut_nvme_regs.csts.bits.rdy = 1;
 	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
-	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE_ADMIN_QUEUE);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_RESET_ADMIN_QUEUE);
 
 	/*
 	 * Transition to READY.
@@ -1087,7 +1092,7 @@ test_nvme_ctrlr_init_en_0_rdy_0_ams_vs(void)
 	 */
 	g_ut_nvme_regs.csts.bits.rdy = 1;
 	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
-	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE_ADMIN_QUEUE);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_RESET_ADMIN_QUEUE);
 
 	/*
 	 * Transition to READY.
@@ -1133,7 +1138,7 @@ test_nvme_ctrlr_init_en_0_rdy_0(void)
 	 */
 	g_ut_nvme_regs.csts.bits.rdy = 1;
 	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
-	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE_ADMIN_QUEUE);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_RESET_ADMIN_QUEUE);
 
 	/*
 	 * Transition to READY.
@@ -1185,7 +1190,7 @@ test_nvme_ctrlr_init_en_0_rdy_1(void)
 	 */
 	g_ut_nvme_regs.csts.bits.rdy = 1;
 	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
-	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE_ADMIN_QUEUE);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_RESET_ADMIN_QUEUE);
 
 	/*
 	 * Transition to READY.
@@ -1411,6 +1416,69 @@ test_alloc_io_qpair_wrr_2(void)
 	SPDK_CU_ASSERT_FATAL(spdk_nvme_ctrlr_free_io_qpair(q3) == 0);
 
 	cleanup_qpairs(&ctrlr);
+}
+
+bool g_connect_qpair_called = false;
+int g_connect_qpair_return_code = 0;
+int nvme_transport_ctrlr_connect_qpair(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_qpair *qpair)
+{
+	g_connect_qpair_called = true;
+	return g_connect_qpair_return_code;
+}
+
+static void
+test_spdk_nvme_ctrlr_reconnect_io_qpair(void)
+{
+	struct spdk_nvme_ctrlr	ctrlr = {};
+	struct spdk_nvme_qpair	qpair = {};
+	int rc;
+
+	/* Various states of controller disconnect. */
+	qpair.id = 1;
+	qpair.ctrlr = &ctrlr;
+	ctrlr.is_removed = 1;
+	ctrlr.is_failed = 0;
+	ctrlr.is_resetting = 0;
+	rc = spdk_nvme_ctrlr_reconnect_io_qpair(&qpair);
+	CU_ASSERT(rc == -ENODEV)
+
+	ctrlr.is_removed = 0;
+	ctrlr.is_failed = 1;
+	rc = spdk_nvme_ctrlr_reconnect_io_qpair(&qpair);
+	CU_ASSERT(rc == -ENXIO)
+
+	ctrlr.is_failed = 0;
+	ctrlr.is_resetting = 1;
+	rc = spdk_nvme_ctrlr_reconnect_io_qpair(&qpair);
+	CU_ASSERT(rc == -EAGAIN)
+
+	/* Confirm precedence for controller states: removed > resetting > failed */
+	ctrlr.is_removed = 1;
+	ctrlr.is_failed = 1;
+	rc = spdk_nvme_ctrlr_reconnect_io_qpair(&qpair);
+	CU_ASSERT(rc == -ENODEV)
+
+	ctrlr.is_removed = 0;
+	rc = spdk_nvme_ctrlr_reconnect_io_qpair(&qpair);
+	CU_ASSERT(rc == -EAGAIN)
+
+	ctrlr.is_resetting = 0;
+	rc = spdk_nvme_ctrlr_reconnect_io_qpair(&qpair);
+	CU_ASSERT(rc == -ENXIO)
+
+	/* qpair not failed. Make sure we don't call down to the transport */
+	ctrlr.is_failed = 0;
+	qpair.state = NVME_QPAIR_CONNECTED;
+	g_connect_qpair_called = false;
+	rc = spdk_nvme_ctrlr_reconnect_io_qpair(&qpair);
+	CU_ASSERT(g_connect_qpair_called == false);
+	CU_ASSERT(rc == 0)
+
+	/* transport qpair is failed. make sure we call down to the transport */
+	qpair.state = NVME_QPAIR_DISABLED;
+	rc = spdk_nvme_ctrlr_reconnect_io_qpair(&qpair);
+	CU_ASSERT(g_connect_qpair_called == true);
+	CU_ASSERT(rc == 0)
 }
 
 static void
@@ -1693,8 +1761,6 @@ test_spdk_nvme_ctrlr_doorbell_buffer_config(void)
 	ctrlr.page_size = 0x1000;
 	MOCK_CLEAR(spdk_malloc);
 	MOCK_CLEAR(spdk_zmalloc);
-	MOCK_CLEAR(spdk_dma_malloc);
-	MOCK_CLEAR(spdk_dma_zmalloc);
 	ret = nvme_ctrlr_set_doorbell_buffer_config(&ctrlr);
 	CU_ASSERT(ret == 0);
 	nvme_ctrlr_free_doorbell_buffer(&ctrlr);
@@ -1761,6 +1827,101 @@ test_nvme_ctrlr_test_active_ns(void)
 	}
 }
 
+static void
+test_nvme_ctrlr_init_delay(void)
+{
+	DECLARE_AND_CONSTRUCT_CTRLR();
+
+	memset(&g_ut_nvme_regs, 0, sizeof(g_ut_nvme_regs));
+
+	/*
+	 * Initial state: CC.EN = 0, CSTS.RDY = 0
+	 * init() should set CC.EN = 1.
+	 */
+	g_ut_nvme_regs.cc.bits.en = 0;
+	g_ut_nvme_regs.csts.bits.rdy = 0;
+
+	SPDK_CU_ASSERT_FATAL(nvme_ctrlr_construct(&ctrlr) == 0);
+	/* Test that the initialization delay works correctly.  We only
+	 * do the initialization delay on SSDs that require it, so
+	 * set that quirk here.
+	 */
+	ctrlr.quirks = NVME_QUIRK_DELAY_BEFORE_INIT;
+	ctrlr.cdata.nn = 1;
+	ctrlr.page_size = 0x1000;
+	ctrlr.state = NVME_CTRLR_STATE_INIT_DELAY;
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_INIT);
+	CU_ASSERT(ctrlr.sleep_timeout_tsc != 0);
+
+	/* delay 1s, just return as sleep time isn't enough */
+	spdk_delay_us(1 * spdk_get_ticks_hz());
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_INIT);
+	CU_ASSERT(ctrlr.sleep_timeout_tsc != 0);
+
+	/* sleep timeout, start to initialize */
+	spdk_delay_us(2 * spdk_get_ticks_hz());
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_DISABLE_WAIT_FOR_READY_0);
+
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE);
+
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_ENABLE_WAIT_FOR_READY_1);
+	CU_ASSERT(g_ut_nvme_regs.cc.bits.en == 1);
+
+	/*
+	 * Transition to CSTS.RDY = 1.
+	 */
+	g_ut_nvme_regs.csts.bits.rdy = 1;
+	CU_ASSERT(nvme_ctrlr_process_init(&ctrlr) == 0);
+	CU_ASSERT(ctrlr.state == NVME_CTRLR_STATE_RESET_ADMIN_QUEUE);
+
+	/*
+	 * Transition to READY.
+	 */
+	while (ctrlr.state != NVME_CTRLR_STATE_READY) {
+		nvme_ctrlr_process_init(&ctrlr);
+	}
+
+	g_ut_nvme_regs.csts.bits.shst = SPDK_NVME_SHST_COMPLETE;
+	nvme_ctrlr_destruct(&ctrlr);
+}
+
+static void
+test_spdk_nvme_ctrlr_set_trid(void)
+{
+	struct spdk_nvme_ctrlr	ctrlr = {0};
+	struct spdk_nvme_transport_id	new_trid = {0};
+
+	ctrlr.is_failed = false;
+	ctrlr.trid.trtype = SPDK_NVME_TRANSPORT_RDMA;
+	snprintf(ctrlr.trid.subnqn, SPDK_NVMF_NQN_MAX_LEN, "%s", "nqn.2016-06.io.spdk:cnode1");
+	snprintf(ctrlr.trid.traddr, SPDK_NVMF_TRADDR_MAX_LEN, "%s", "192.168.100.8");
+	snprintf(ctrlr.trid.trsvcid, SPDK_NVMF_TRSVCID_MAX_LEN, "%s", "4420");
+	CU_ASSERT(spdk_nvme_ctrlr_set_trid(&ctrlr, &new_trid) == -EPERM);
+
+	ctrlr.is_failed = true;
+	new_trid.trtype = SPDK_NVME_TRANSPORT_TCP;
+	CU_ASSERT(spdk_nvme_ctrlr_set_trid(&ctrlr, &new_trid) == -EINVAL);
+	CU_ASSERT(ctrlr.trid.trtype = SPDK_NVME_TRANSPORT_RDMA);
+
+	new_trid.trtype = SPDK_NVME_TRANSPORT_RDMA;
+	snprintf(new_trid.subnqn, SPDK_NVMF_NQN_MAX_LEN, "%s", "nqn.2016-06.io.spdk:cnode2");
+	CU_ASSERT(spdk_nvme_ctrlr_set_trid(&ctrlr, &new_trid) == -EINVAL);
+	CU_ASSERT(strncmp(ctrlr.trid.subnqn, "nqn.2016-06.io.spdk:cnode1", SPDK_NVMF_NQN_MAX_LEN) == 0);
+
+
+	snprintf(new_trid.subnqn, SPDK_NVMF_NQN_MAX_LEN, "%s", "nqn.2016-06.io.spdk:cnode1");
+	snprintf(new_trid.traddr, SPDK_NVMF_TRADDR_MAX_LEN, "%s", "192.168.100.9");
+	snprintf(new_trid.trsvcid, SPDK_NVMF_TRSVCID_MAX_LEN, "%s", "4421");
+	CU_ASSERT(spdk_nvme_ctrlr_set_trid(&ctrlr, &new_trid) == 0);
+	CU_ASSERT(strncmp(ctrlr.trid.traddr, "192.168.100.9", SPDK_NVMF_TRADDR_MAX_LEN) == 0);
+	CU_ASSERT(strncmp(ctrlr.trid.trsvcid, "4421", SPDK_NVMF_TRSVCID_MAX_LEN) == 0);
+}
+
 int main(int argc, char **argv)
 {
 	CU_pSuite	suite = NULL;
@@ -1791,6 +1952,8 @@ int main(int argc, char **argv)
 			       test_nvme_ctrlr_init_en_0_rdy_0_ams_wrr) == NULL
 		|| CU_add_test(suite, "test nvme_ctrlr init CC.EN = 0 CSTS.RDY = 0 AMS = VS",
 			       test_nvme_ctrlr_init_en_0_rdy_0_ams_vs) == NULL
+		|| CU_add_test(suite, "test_nvme_ctrlr_init_delay",
+			       test_nvme_ctrlr_init_delay) == NULL
 		|| CU_add_test(suite, "alloc_io_qpair_rr 1", test_alloc_io_qpair_rr_1) == NULL
 		|| CU_add_test(suite, "get_default_ctrlr_opts", test_ctrlr_get_default_ctrlr_opts) == NULL
 		|| CU_add_test(suite, "get_default_io_qpair_opts", test_ctrlr_get_default_io_qpair_opts) == NULL
@@ -1811,6 +1974,9 @@ int main(int argc, char **argv)
 #endif
 		|| CU_add_test(suite, "test nvme ctrlr function test_nvme_ctrlr_test_active_ns",
 			       test_nvme_ctrlr_test_active_ns) == NULL
+		|| CU_add_test(suite, "test_spdk_nvme_ctrlr_reconnect_io_qpair",
+			       test_spdk_nvme_ctrlr_reconnect_io_qpair) == NULL
+		|| CU_add_test(suite, "test_spdk_nvme_ctrlr_set_trid", test_spdk_nvme_ctrlr_set_trid) == NULL
 	) {
 		CU_cleanup_registry();
 		return CU_get_error();

@@ -1,8 +1,8 @@
 /*-
  *   BSD LICENSE
  *
- *   Copyright (c) Intel Corporation.
- *   All rights reserved.
+ *   Copyright (c) Intel Corporation.  All rights reserved.
+ *   Copyright (c) 2019 Mellanox Technologies LTD. All rights reserved.
  *
  *   Redistribution and use in source and binary forms, with or without
  *   modification, are permitted provided that the following conditions
@@ -165,6 +165,12 @@ struct spdk_app_opts {
 
 	/** Opaque context for use of the env implementation. */
 	void			*env_context;
+
+	/**
+	 * for passing user-provided log call
+	 */
+	logfunc         *log;
+
 };
 
 /**
@@ -256,7 +262,7 @@ int spdk_app_parse_core_mask(const char *mask, struct spdk_cpuset *cpumask);
 struct spdk_cpuset *spdk_app_get_core_mask(void);
 
 // zhou: SPDK support CLI options.
-#define SPDK_APP_GETOPT_STRING "c:de:ghi:m:n:p:r:s:uB:L:RW:"
+#define SPDK_APP_GETOPT_STRING "c:de:ghi:m:n:p:r:s:uvB:L:RW:"
 
 enum spdk_app_parse_args_rvals {
 	SPDK_APP_PARSE_ARGS_HELP = 0,
@@ -317,14 +323,14 @@ void spdk_event_call(struct spdk_event *event);
  *
  * \param enabled True to enable, false to disable.
  */
-void spdk_reactor_enable_context_switch_monitor(bool enabled);
+void spdk_framework_enable_context_switch_monitor(bool enabled);
 
 /**
  * Return whether context switch monitoring is enabled.
  *
  * \return true if enabled or false otherwise.
  */
-bool spdk_reactor_context_switch_monitor_enabled(void);
+bool spdk_framework_context_switch_monitor_enabled(void);
 
 #ifdef __cplusplus
 }

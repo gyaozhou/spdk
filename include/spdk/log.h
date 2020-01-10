@@ -46,10 +46,23 @@ extern "C" {
 #endif
 
 /**
+ * for passing user-provided log call
+ *
+ * \param level Log level threshold.
+ * \param file Name of the current source file.
+ * \param line Current source file line.
+ * \param func Current source function name.
+ * \param format Format string to the message.
+ * \param args Additional arguments for format string.
+ */
+typedef void logfunc(int level, const char *file, const int line,
+		     const char *func, const char *format, va_list args);
+
+/**
  * Initialize the logging module. Messages prior
  * to this call will be dropped.
  */
-void spdk_log_open(void);
+void spdk_log_open(logfunc *logf);
 
 /**
  * Close the currently active log. Messages after this call

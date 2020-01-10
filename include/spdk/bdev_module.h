@@ -43,6 +43,7 @@
 #include "spdk/stdinc.h"
 
 #include "spdk/bdev.h"
+#include "spdk/bdev_zone.h"
 #include "spdk/queue.h"
 #include "spdk/scsi_spec.h"
 #include "spdk/thread.h"
@@ -226,6 +227,7 @@ struct spdk_bdev_fn_table {
 
 /** bdev I/O completion status */
 enum spdk_bdev_io_status {
+	SPDK_BDEV_IO_STATUS_MISCOMPARE = -5,
 	/*
 	 * NOMEM should be returned when a bdev module cannot start an I/O because of
 	 *  some lack of resources.  It may not be returned for RESET I/O.  I/O completed
@@ -279,6 +281,9 @@ struct spdk_bdev {
 	/** Number of blocks */
 	uint64_t blockcnt;
 
+	/** Number of blocks required for write */
+	uint32_t write_unit_size;
+
     // zhou: buffer memory should align with this value.
     //       Just like fields in structure, in order to access efficient.
     //       This is set by underlying disk, according some performance consideration.
@@ -288,6 +293,7 @@ struct spdk_bdev {
     //       Align with 8 bytes is reasonable, I suppose some HBA or DMA controller will
     //       be benefit with it.
     //       I will mention using Memory Requirement.
+
 	/**
 	 * Specifies an alignment requirement for data buffers associated with an spdk_bdev_io.
 	 * 0 = no alignment requirement
@@ -328,7 +334,8 @@ struct spdk_bdev {
 	/**
 	 * UUID for this bdev.
 	 *
-	 * Fill with zeroes if no uuid is available.
+	 * Fill with zeroes if no uuid is available. The bdev layer
+	 * will automatically populate this if necessary.
 	 */
 	struct spdk_uuid uuid;
 
@@ -366,6 +373,31 @@ struct spdk_bdev {
 	uint32_t dif_check_flags;
 
     // zhou: which kind of bdev subsystem. e.g. "aio_if"
+	/**
+	 * Specify whether bdev is zoned device.
+	 */
+	bool zoned;
+
+	/**
+	 * Default size of each zone (in blocks).
+	 */
+	uint64_t zone_size;
+
+	/**
+	 * Maximum number of open zones.
+	 */
+	uint32_t max_open_zones;
+
+	/**
+	 * Optimal number of open zones.
+	 */
+	uint32_t optimal_open_zones;
+
+	/**
+	 * Specifies whether bdev supports media management events.
+	 */
+	bool media_events;
+
 	/**
 	 * Pointer to the bdev module that registered this bdev.
 	 */
@@ -494,10 +526,13 @@ struct spdk_bdev_io {
 			/** For SG buffer cases, number of iovecs in iovec array. */
 			int iovcnt;
 
+			/* Metadata buffer */
+			void *md_buf;
 
             // zhou: Target Info, "num_blocks" and "offset_blocks" used to describe LBA
             //       in disk.
             //       These values are original value before split.
+
 			/** Total size of data to be transferred. */
 			uint64_t num_blocks;
 			/** Starting offset (in blocks) of the bdev for this I/O. */
@@ -556,6 +591,20 @@ struct spdk_bdev_io {
 			size_t md_len;
 		} nvme_passthru;
 
+		struct {
+			/* First logical block of a zone */
+			uint64_t zone_id;
+
+			/* Number of zones */
+			uint32_t num_zones;
+
+			/* Used to change zoned device zone state */
+			enum spdk_bdev_zone_action zone_action;
+
+			/* The data buffer */
+			void *buf;
+		} zone_mgmt;
+
 	} u;
 
 	/** It may be used by modules to put the bdev_io into its own list. */
@@ -595,8 +644,9 @@ struct spdk_bdev_io {
         // zhou: "spdk_bdev_io.internal.error"
 		/** Error information from a device */
 		union {
-			/** Only valid when status is SPDK_BDEV_IO_STATUS_NVME_ERROR */
 			struct {
+				/** NVMe completion queue entry DW0 */
+				uint32_t cdw0;
 				/** NVMe status code type */
 				uint8_t sct;
 				/** NVMe status code */
@@ -645,6 +695,7 @@ struct spdk_bdev_io {
 		struct iovec  bounce_iov;
 		struct iovec *orig_iovs;
 		int           orig_iovcnt;
+		void	     *orig_md_buf;
 
 		/** Callback for when buf is allocated */
 		spdk_bdev_io_get_buf_cb get_buf_cb;
@@ -656,6 +707,9 @@ struct spdk_bdev_io {
         //       available.
 		/** Entry to the list need_buf of struct spdk_bdev. */
 		STAILQ_ENTRY(spdk_bdev_io) buf_link;
+
+		/** Entry to the list io_submitted of struct spdk_bdev_channel */
+		TAILQ_ENTRY(spdk_bdev_io) ch_link;
 
 		/** Enables queuing parent I/O when no bdev_ios available for split children. */
 		struct spdk_bdev_io_wait_entry waitq_entry;
@@ -848,6 +902,15 @@ void spdk_bdev_io_get_buf(struct spdk_bdev_io *bdev_io, spdk_bdev_io_get_buf_cb 
 void spdk_bdev_io_set_buf(struct spdk_bdev_io *bdev_io, void *buf, size_t len);
 
 /**
+ * Set the given buffer as metadata buffer described by this bdev_io.
+ *
+ * \param bdev_io I/O to set the buffer on.
+ * \param md_buf The buffer to set as the active metadata buffer.
+ * \param len The length of the metadata buffer.
+ */
+void spdk_bdev_io_set_md_buf(struct spdk_bdev_io *bdev_io, void *md_buf, size_t len);
+
+/**
  * Complete a bdev_io
  *
  * \param bdev_io I/O to complete.
@@ -857,13 +920,15 @@ void spdk_bdev_io_complete(struct spdk_bdev_io *bdev_io,
 			   enum spdk_bdev_io_status status);
 
 /**
- * Complete a bdev_io with an NVMe status code.
+ * Complete a bdev_io with an NVMe status code and DW0 completion queue entry
  *
  * \param bdev_io I/O to complete.
+ * \param cdw0 NVMe Completion Queue DW0 value (set to 0 if not applicable)
  * \param sct NVMe Status Code Type.
  * \param sc NVMe Status Code.
  */
-void spdk_bdev_io_complete_nvme_status(struct spdk_bdev_io *bdev_io, int sct, int sc);
+void spdk_bdev_io_complete_nvme_status(struct spdk_bdev_io *bdev_io, uint32_t cdw0, int sct,
+				       int sc);
 
 /**
  * Complete a bdev_io with a SCSI status code.
@@ -952,6 +1017,15 @@ struct spdk_bdev_part_base;
  * \return A pointer to the base's spdk_bdev struct.
  */
 struct spdk_bdev *spdk_bdev_part_base_get_bdev(struct spdk_bdev_part_base *part_base);
+
+/**
+ * Returns a spdk_bdev name of the corresponding spdk_bdev_part_base
+ *
+ * \param part_base A pointer to an spdk_bdev_part_base object.
+ *
+ * \return A text string representing the name of the base bdev.
+ */
+const char *spdk_bdev_part_base_get_bdev_name(struct spdk_bdev_part_base *part_base);
 
 /**
  * Returns a pointer to the spdk_bdev_descriptor associated with an spdk_bdev_part_base
@@ -1134,6 +1208,28 @@ struct spdk_bdev *spdk_bdev_part_get_base_bdev(struct spdk_bdev_part *part);
  * \return the block offset of this part from it's underlying bdev.
  */
 uint64_t spdk_bdev_part_get_offset_blocks(struct spdk_bdev_part *part);
+
+/**
+ * Push media management events.  To send the notification that new events are
+ * available, spdk_bdev_notify_media_management needs to be called.
+ *
+ * \param bdev Block device
+ * \param events Array of media events
+ * \param num_events Size of the events array
+ *
+ * \return number of events pushed or negative errno in case of failure
+ */
+int spdk_bdev_push_media_events(struct spdk_bdev *bdev, const struct spdk_bdev_media_event *events,
+				size_t num_events);
+
+/**
+ * Send SPDK_BDEV_EVENT_MEDIA_MANAGEMENT to all open descriptors that have
+ * pending media events.
+ *
+ * \param bdev Block device
+ */
+void spdk_bdev_notify_media_management(struct spdk_bdev *bdev);
+
 
 // zhou: will be run before bdev init.
 /*
