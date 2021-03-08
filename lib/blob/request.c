@@ -39,10 +39,10 @@
 #include "spdk/thread.h"
 #include "spdk/queue.h"
 
-#include "spdk_internal/log.h"
+#include "spdk/log.h"
 
 void
-spdk_bs_call_cpl(struct spdk_bs_cpl *cpl, int bserrno)
+bs_call_cpl(struct spdk_bs_cpl *cpl, int bserrno)
 {
 	switch (cpl->type) {
 	case SPDK_BS_CPL_TYPE_BS_BASIC:
@@ -82,7 +82,7 @@ spdk_bs_call_cpl(struct spdk_bs_cpl *cpl, int bserrno)
 // zhou: invoke Client's Request Set completion Callback function, which obviously
 //       shared with both Sequnce and Batch mode..
 static void
-spdk_bs_request_set_complete(struct spdk_bs_request_set *set)
+bs_request_set_complete(struct spdk_bs_request_set *set)
 {
 	struct spdk_bs_cpl cpl = set->cpl;
 	int bserrno = set->bserrno;
@@ -91,13 +91,13 @@ spdk_bs_request_set_complete(struct spdk_bs_request_set *set)
 	TAILQ_INSERT_TAIL(&set->channel->reqs, set, link);
 
     // zhou: invoke client's Request Set Completion function.
-	spdk_bs_call_cpl(&cpl, bserrno);
+	bs_call_cpl(&cpl, bserrno);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 
 static void
-spdk_bs_sequence_completion(struct spdk_io_channel *channel, void *cb_arg, int bserrno)
+bs_sequence_completion(struct spdk_io_channel *channel, void *cb_arg, int bserrno)
 {
 	struct spdk_bs_request_set *set = cb_arg;
 
@@ -118,8 +118,8 @@ spdk_bs_sequence_completion(struct spdk_io_channel *channel, void *cb_arg, int b
 //       data, the channel always is current thread. For metadata, always specify
 //       "md_channel".
 spdk_bs_sequence_t *
-spdk_bs_sequence_start(struct spdk_io_channel *_channel,
-		       struct spdk_bs_cpl *cpl)
+bs_sequence_start(struct spdk_io_channel *_channel,
+		  struct spdk_bs_cpl *cpl)
 {
 	struct spdk_bs_channel		*channel;
 	struct spdk_bs_request_set	*set;
@@ -137,8 +137,7 @@ spdk_bs_sequence_start(struct spdk_io_channel *_channel,
 	set->channel = channel;
 
     // zhou: not init "set->u.sequence.cb_fn" and "set->u.sequence.cb_arg"
-
-	set->cb_args.cb_fn = spdk_bs_sequence_completion;
+	set->cb_args.cb_fn = bs_sequence_completion;
 	set->cb_args.cb_arg = set;
 	set->cb_args.channel = channel->dev_channel;
 
@@ -146,14 +145,14 @@ spdk_bs_sequence_start(struct spdk_io_channel *_channel,
 }
 
 void
-spdk_bs_sequence_read_bs_dev(spdk_bs_sequence_t *seq, struct spdk_bs_dev *bs_dev,
-			     void *payload, uint64_t lba, uint32_t lba_count,
-			     spdk_bs_sequence_cpl cb_fn, void *cb_arg)
+bs_sequence_read_bs_dev(spdk_bs_sequence_t *seq, struct spdk_bs_dev *bs_dev,
+			void *payload, uint64_t lba, uint32_t lba_count,
+			spdk_bs_sequence_cpl cb_fn, void *cb_arg)
 {
 	struct spdk_bs_request_set      *set = (struct spdk_bs_request_set *)seq;
 	struct spdk_bs_channel       *channel = set->channel;
 
-	SPDK_DEBUGLOG(SPDK_LOG_BLOB_RW, "Reading %" PRIu32 " blocks from LBA %" PRIu64 "\n", lba_count,
+	SPDK_DEBUGLOG(blob_rw, "Reading %" PRIu32 " blocks from LBA %" PRIu64 "\n", lba_count,
 		      lba);
 
 	set->u.sequence.cb_fn = cb_fn;
@@ -165,14 +164,14 @@ spdk_bs_sequence_read_bs_dev(spdk_bs_sequence_t *seq, struct spdk_bs_dev *bs_dev
 
 // zhou: same function with spdk_bs_sequence_read_bs_dev(), just with less parameter.
 void
-spdk_bs_sequence_read_dev(spdk_bs_sequence_t *seq, void *payload,
-			  uint64_t lba, uint32_t lba_count,
-			  spdk_bs_sequence_cpl cb_fn, void *cb_arg)
+bs_sequence_read_dev(spdk_bs_sequence_t *seq, void *payload,
+		     uint64_t lba, uint32_t lba_count,
+		     spdk_bs_sequence_cpl cb_fn, void *cb_arg)
 {
 	struct spdk_bs_request_set      *set = (struct spdk_bs_request_set *)seq;
 	struct spdk_bs_channel       *channel = set->channel;
 
-	SPDK_DEBUGLOG(SPDK_LOG_BLOB_RW, "Reading %" PRIu32 " blocks from LBA %" PRIu64 "\n", lba_count,
+	SPDK_DEBUGLOG(blob_rw, "Reading %" PRIu32 " blocks from LBA %" PRIu64 "\n", lba_count,
 		      lba);
 
 	set->u.sequence.cb_fn = cb_fn;
@@ -185,14 +184,14 @@ spdk_bs_sequence_read_dev(spdk_bs_sequence_t *seq, void *payload,
 //       "lba",       write target begining, block/sector Index;
 //       "lba_count", number of block/sectgor.
 void
-spdk_bs_sequence_write_dev(spdk_bs_sequence_t *seq, void *payload,
-			   uint64_t lba, uint32_t lba_count,
-			   spdk_bs_sequence_cpl cb_fn, void *cb_arg)
+bs_sequence_write_dev(spdk_bs_sequence_t *seq, void *payload,
+		      uint64_t lba, uint32_t lba_count,
+		      spdk_bs_sequence_cpl cb_fn, void *cb_arg)
 {
 	struct spdk_bs_request_set      *set = (struct spdk_bs_request_set *)seq;
 	struct spdk_bs_channel       *channel = set->channel;
 
-	SPDK_DEBUGLOG(SPDK_LOG_BLOB_RW, "Writing %" PRIu32 " blocks from LBA %" PRIu64 "\n", lba_count,
+	SPDK_DEBUGLOG(blob_rw, "Writing %" PRIu32 " blocks from LBA %" PRIu64 "\n", lba_count,
 		      lba);
 
 	set->u.sequence.cb_fn = cb_fn;
@@ -205,14 +204,14 @@ spdk_bs_sequence_write_dev(spdk_bs_sequence_t *seq, void *payload,
 
 // zhou: same function with spdk_bs_sequence_read_bs_dev(), just with IO Vector.
 void
-spdk_bs_sequence_readv_bs_dev(spdk_bs_sequence_t *seq, struct spdk_bs_dev *bs_dev,
-			      struct iovec *iov, int iovcnt, uint64_t lba, uint32_t lba_count,
-			      spdk_bs_sequence_cpl cb_fn, void *cb_arg)
+bs_sequence_readv_bs_dev(spdk_bs_sequence_t *seq, struct spdk_bs_dev *bs_dev,
+			 struct iovec *iov, int iovcnt, uint64_t lba, uint32_t lba_count,
+			 spdk_bs_sequence_cpl cb_fn, void *cb_arg)
 {
 	struct spdk_bs_request_set      *set = (struct spdk_bs_request_set *)seq;
 	struct spdk_bs_channel       *channel = set->channel;
 
-	SPDK_DEBUGLOG(SPDK_LOG_BLOB_RW, "Reading %" PRIu32 " blocks from LBA %" PRIu64 "\n", lba_count,
+	SPDK_DEBUGLOG(blob_rw, "Reading %" PRIu32 " blocks from LBA %" PRIu64 "\n", lba_count,
 		      lba);
 
 	set->u.sequence.cb_fn = cb_fn;
@@ -224,13 +223,13 @@ spdk_bs_sequence_readv_bs_dev(spdk_bs_sequence_t *seq, struct spdk_bs_dev *bs_de
 
 // zhou: same function with spdk_bs_sequence_readv_bs_dev(), just with less parameter.
 void
-spdk_bs_sequence_readv_dev(spdk_bs_sequence_t *seq, struct iovec *iov, int iovcnt,
-			   uint64_t lba, uint32_t lba_count, spdk_bs_sequence_cpl cb_fn, void *cb_arg)
+bs_sequence_readv_dev(spdk_bs_sequence_t *seq, struct iovec *iov, int iovcnt,
+		      uint64_t lba, uint32_t lba_count, spdk_bs_sequence_cpl cb_fn, void *cb_arg)
 {
 	struct spdk_bs_request_set      *set = (struct spdk_bs_request_set *)seq;
 	struct spdk_bs_channel       *channel = set->channel;
 
-	SPDK_DEBUGLOG(SPDK_LOG_BLOB_RW, "Reading %" PRIu32 " blocks from LBA %" PRIu64 "\n", lba_count,
+	SPDK_DEBUGLOG(blob_rw, "Reading %" PRIu32 " blocks from LBA %" PRIu64 "\n", lba_count,
 		      lba);
 
 	set->u.sequence.cb_fn = cb_fn;
@@ -241,14 +240,14 @@ spdk_bs_sequence_readv_dev(spdk_bs_sequence_t *seq, struct iovec *iov, int iovcn
 
 // zhou: same function with spdk_bs_sequence_write_dev(), just with IO Vector.
 void
-spdk_bs_sequence_writev_dev(spdk_bs_sequence_t *seq, struct iovec *iov, int iovcnt,
-			    uint64_t lba, uint32_t lba_count,
-			    spdk_bs_sequence_cpl cb_fn, void *cb_arg)
+bs_sequence_writev_dev(spdk_bs_sequence_t *seq, struct iovec *iov, int iovcnt,
+		       uint64_t lba, uint32_t lba_count,
+		       spdk_bs_sequence_cpl cb_fn, void *cb_arg)
 {
 	struct spdk_bs_request_set      *set = (struct spdk_bs_request_set *)seq;
 	struct spdk_bs_channel       *channel = set->channel;
 
-	SPDK_DEBUGLOG(SPDK_LOG_BLOB_RW, "Writing %" PRIu32 " blocks from LBA %" PRIu64 "\n", lba_count,
+	SPDK_DEBUGLOG(blob_rw, "Writing %" PRIu32 " blocks from LBA %" PRIu64 "\n", lba_count,
 		      lba);
 
 	set->u.sequence.cb_fn = cb_fn;
@@ -258,35 +257,16 @@ spdk_bs_sequence_writev_dev(spdk_bs_sequence_t *seq, struct iovec *iov, int iovc
 			     &set->cb_args);
 }
 
-// zhou: unmap in Sequence Request Set, nobody use it.
-void
-spdk_bs_sequence_unmap_dev(spdk_bs_sequence_t *seq,
-			   uint64_t lba, uint32_t lba_count,
-			   spdk_bs_sequence_cpl cb_fn, void *cb_arg)
-{
-	struct spdk_bs_request_set      *set = (struct spdk_bs_request_set *)seq;
-	struct spdk_bs_channel       *channel = set->channel;
-
-	SPDK_DEBUGLOG(SPDK_LOG_BLOB_RW, "Unmapping %" PRIu32 " blocks at LBA %" PRIu64 "\n", lba_count,
-		      lba);
-
-	set->u.sequence.cb_fn = cb_fn;
-	set->u.sequence.cb_arg = cb_arg;
-
-	channel->dev->unmap(channel->dev, channel->dev_channel, lba, lba_count,
-			    &set->cb_args);
-}
-
 // zhou: write zero in Sequence Request Set
 void
-spdk_bs_sequence_write_zeroes_dev(spdk_bs_sequence_t *seq,
-				  uint64_t lba, uint32_t lba_count,
-				  spdk_bs_sequence_cpl cb_fn, void *cb_arg)
+bs_sequence_write_zeroes_dev(spdk_bs_sequence_t *seq,
+			     uint64_t lba, uint32_t lba_count,
+			     spdk_bs_sequence_cpl cb_fn, void *cb_arg)
 {
 	struct spdk_bs_request_set      *set = (struct spdk_bs_request_set *)seq;
 	struct spdk_bs_channel       *channel = set->channel;
 
-	SPDK_DEBUGLOG(SPDK_LOG_BLOB_RW, "writing zeroes to %" PRIu32 " blocks at LBA %" PRIu64 "\n",
+	SPDK_DEBUGLOG(blob_rw, "writing zeroes to %" PRIu32 " blocks at LBA %" PRIu64 "\n",
 		      lba_count, lba);
 
 	set->u.sequence.cb_fn = cb_fn;
@@ -297,27 +277,27 @@ spdk_bs_sequence_write_zeroes_dev(spdk_bs_sequence_t *seq,
 }
 
 void
-spdk_bs_sequence_finish(spdk_bs_sequence_t *seq, int bserrno)
+bs_sequence_finish(spdk_bs_sequence_t *seq, int bserrno)
 {
 	if (bserrno != 0) {
 		seq->bserrno = bserrno;
 	}
-	spdk_bs_request_set_complete((struct spdk_bs_request_set *)seq);
+	bs_request_set_complete((struct spdk_bs_request_set *)seq);
 }
 
 void
-spdk_bs_user_op_sequence_finish(void *cb_arg, int bserrno)
+bs_user_op_sequence_finish(void *cb_arg, int bserrno)
 {
 	spdk_bs_sequence_t *seq = cb_arg;
 
-	spdk_bs_sequence_finish(seq, bserrno);
+	bs_sequence_finish(seq, bserrno);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 // zhou: will be invoked when completion of each one task in Batch Request Set.
 static void
-spdk_bs_batch_completion(struct spdk_io_channel *_channel,
-			 void *cb_arg, int bserrno)
+bs_batch_completion(struct spdk_io_channel *_channel,
+		    void *cb_arg, int bserrno)
 {
 	struct spdk_bs_request_set	*set = cb_arg;
 
@@ -333,11 +313,10 @@ spdk_bs_batch_completion(struct spdk_io_channel *_channel,
         //       converted from Sequence Mode. Because Sequence Mode need submit
         //       next IO request in completion.
 		if (set->u.batch.cb_fn) {
-			set->cb_args.cb_fn = spdk_bs_sequence_completion;
-
+			set->cb_args.cb_fn = bs_sequence_completion;
 			set->u.batch.cb_fn((spdk_bs_sequence_t *)set, set->u.batch.cb_arg, bserrno);
 		} else {
-			spdk_bs_request_set_complete(set);
+			bs_request_set_complete(set);
 		}
 
 	}
@@ -347,8 +326,8 @@ spdk_bs_batch_completion(struct spdk_io_channel *_channel,
 //       each IO completion, just take care about all submited IO completed.
 //
 spdk_bs_batch_t *
-spdk_bs_batch_open(struct spdk_io_channel *_channel,
-		   struct spdk_bs_cpl *cpl)
+bs_batch_open(struct spdk_io_channel *_channel,
+	      struct spdk_bs_cpl *cpl)
 {
 	struct spdk_bs_channel		*channel;
 	struct spdk_bs_request_set	*set;
@@ -370,7 +349,7 @@ spdk_bs_batch_open(struct spdk_io_channel *_channel,
 	set->u.batch.outstanding_ops = 0;
 	set->u.batch.batch_closed = 0;
 
-	set->cb_args.cb_fn = spdk_bs_batch_completion;
+	set->cb_args.cb_fn = bs_batch_completion;
 	set->cb_args.cb_arg = set;
 	set->cb_args.channel = channel->dev_channel;
 
@@ -379,13 +358,13 @@ spdk_bs_batch_open(struct spdk_io_channel *_channel,
 
 // zhou: read data, used in batch
 void
-spdk_bs_batch_read_bs_dev(spdk_bs_batch_t *batch, struct spdk_bs_dev *bs_dev,
-			  void *payload, uint64_t lba, uint32_t lba_count)
+bs_batch_read_bs_dev(spdk_bs_batch_t *batch, struct spdk_bs_dev *bs_dev,
+		     void *payload, uint64_t lba, uint32_t lba_count)
 {
 	struct spdk_bs_request_set	*set = (struct spdk_bs_request_set *)batch;
 	struct spdk_bs_channel		*channel = set->channel;
 
-	SPDK_DEBUGLOG(SPDK_LOG_BLOB_RW, "Reading %" PRIu32 " blocks from LBA %" PRIu64 "\n", lba_count,
+	SPDK_DEBUGLOG(blob_rw, "Reading %" PRIu32 " blocks from LBA %" PRIu64 "\n", lba_count,
 		      lba);
 
 	set->u.batch.outstanding_ops++;
@@ -395,13 +374,13 @@ spdk_bs_batch_read_bs_dev(spdk_bs_batch_t *batch, struct spdk_bs_dev *bs_dev,
 
 // zhou: read data, used in batch
 void
-spdk_bs_batch_read_dev(spdk_bs_batch_t *batch, void *payload,
-		       uint64_t lba, uint32_t lba_count)
+bs_batch_read_dev(spdk_bs_batch_t *batch, void *payload,
+		  uint64_t lba, uint32_t lba_count)
 {
 	struct spdk_bs_request_set	*set = (struct spdk_bs_request_set *)batch;
 	struct spdk_bs_channel		*channel = set->channel;
 
-	SPDK_DEBUGLOG(SPDK_LOG_BLOB_RW, "Reading %" PRIu32 " blocks from LBA %" PRIu64 "\n", lba_count,
+	SPDK_DEBUGLOG(blob_rw, "Reading %" PRIu32 " blocks from LBA %" PRIu64 "\n", lba_count,
 		      lba);
 
 	set->u.batch.outstanding_ops++;
@@ -411,13 +390,13 @@ spdk_bs_batch_read_dev(spdk_bs_batch_t *batch, void *payload,
 
 // zhou: write data, used in batch
 void
-spdk_bs_batch_write_dev(spdk_bs_batch_t *batch, void *payload,
-			uint64_t lba, uint32_t lba_count)
+bs_batch_write_dev(spdk_bs_batch_t *batch, void *payload,
+		   uint64_t lba, uint32_t lba_count)
 {
 	struct spdk_bs_request_set	*set = (struct spdk_bs_request_set *)batch;
 	struct spdk_bs_channel		*channel = set->channel;
 
-	SPDK_DEBUGLOG(SPDK_LOG_BLOB_RW, "Writing %" PRIu32 " blocks to LBA %" PRIu64 "\n", lba_count, lba);
+	SPDK_DEBUGLOG(blob_rw, "Writing %" PRIu32 " blocks to LBA %" PRIu64 "\n", lba_count, lba);
 
 	set->u.batch.outstanding_ops++;
     // zhou: bdev_blob_write()
@@ -427,13 +406,13 @@ spdk_bs_batch_write_dev(spdk_bs_batch_t *batch, void *payload,
 
 // zhou: unmap all other sectors, used in batch
 void
-spdk_bs_batch_unmap_dev(spdk_bs_batch_t *batch,
-			uint64_t lba, uint32_t lba_count)
+bs_batch_unmap_dev(spdk_bs_batch_t *batch,
+		   uint64_t lba, uint32_t lba_count)
 {
 	struct spdk_bs_request_set	*set = (struct spdk_bs_request_set *)batch;
 	struct spdk_bs_channel		*channel = set->channel;
 
-	SPDK_DEBUGLOG(SPDK_LOG_BLOB_RW, "Unmapping %" PRIu32 " blocks at LBA %" PRIu64 "\n", lba_count,
+	SPDK_DEBUGLOG(blob_rw, "Unmapping %" PRIu32 " blocks at LBA %" PRIu64 "\n", lba_count,
 		      lba);
 
 	set->u.batch.outstanding_ops++;
@@ -443,13 +422,13 @@ spdk_bs_batch_unmap_dev(spdk_bs_batch_t *batch,
 
 // zhou: write zero, used in batch
 void
-spdk_bs_batch_write_zeroes_dev(spdk_bs_batch_t *batch,
-			       uint64_t lba, uint32_t lba_count)
+bs_batch_write_zeroes_dev(spdk_bs_batch_t *batch,
+			  uint64_t lba, uint32_t lba_count)
 {
 	struct spdk_bs_request_set	*set = (struct spdk_bs_request_set *)batch;
 	struct spdk_bs_channel		*channel = set->channel;
 
-	SPDK_DEBUGLOG(SPDK_LOG_BLOB_RW, "Zeroing %" PRIu32 " blocks at LBA %" PRIu64 "\n", lba_count, lba);
+	SPDK_DEBUGLOG(blob_rw, "Zeroing %" PRIu32 " blocks at LBA %" PRIu64 "\n", lba_count, lba);
 
 	set->u.batch.outstanding_ops++;
     // zhou: bdev_blob_write_zeroes()
@@ -459,7 +438,7 @@ spdk_bs_batch_write_zeroes_dev(spdk_bs_batch_t *batch,
 
 // zhou: no more task will be added into batch.
 void
-spdk_bs_batch_close(spdk_bs_batch_t *batch)
+bs_batch_close(spdk_bs_batch_t *batch)
 {
 	struct spdk_bs_request_set	*set = (struct spdk_bs_request_set *)batch;
 
@@ -470,10 +449,10 @@ spdk_bs_batch_close(spdk_bs_batch_t *batch)
         // zhou: once "u.batch.cb_fn" be set, which means this Request Set was
         //       converted from Sequence Mode.
 		if (set->u.batch.cb_fn) {
-			set->cb_args.cb_fn = spdk_bs_sequence_completion;
+			set->cb_args.cb_fn = bs_sequence_completion;
 			set->u.batch.cb_fn((spdk_bs_sequence_t *)set, set->u.batch.cb_arg, set->bserrno);
 		} else {
-			spdk_bs_request_set_complete(set);
+			bs_request_set_complete(set);
 		}
 	}
 }
@@ -488,7 +467,7 @@ spdk_bs_batch_close(spdk_bs_batch_t *batch)
 //       IO submit-one IO completion ...
 //       Then make batch IO be keep sequence with other sequence.
 spdk_bs_batch_t *
-spdk_bs_sequence_to_batch(spdk_bs_sequence_t *seq, spdk_bs_sequence_cpl cb_fn, void *cb_arg)
+bs_sequence_to_batch(spdk_bs_sequence_t *seq, spdk_bs_sequence_cpl cb_fn, void *cb_arg)
 {
 	struct spdk_bs_request_set *set = (struct spdk_bs_request_set *)seq;
 
@@ -500,35 +479,15 @@ spdk_bs_sequence_to_batch(spdk_bs_sequence_t *seq, spdk_bs_sequence_cpl cb_fn, v
 	set->u.batch.outstanding_ops = 0;
 	set->u.batch.batch_closed = 0;
 
-	set->cb_args.cb_fn = spdk_bs_batch_completion;
+	set->cb_args.cb_fn = bs_batch_completion;
 
 	return set;
 }
 
-// zhou: no one use it.
-spdk_bs_sequence_t *
-spdk_bs_batch_to_sequence(spdk_bs_batch_t *batch)
-{
-	struct spdk_bs_request_set *set = (struct spdk_bs_request_set *)batch;
-
-	set->u.batch.outstanding_ops++;
-
-	set->cpl.type = SPDK_BS_CPL_TYPE_BLOB_BASIC;
-	set->cpl.u.blob_basic.cb_fn = spdk_bs_sequence_to_batch_completion;
-	set->cpl.u.blob_basic.cb_arg = set;
-	set->bserrno = 0;
-
-	set->cb_args.cb_fn = spdk_bs_sequence_completion;
-	set->cb_args.cb_arg = set;
-	set->cb_args.channel = set->channel->dev_channel;
-
-	return (spdk_bs_sequence_t *)set;
-}
-
 spdk_bs_user_op_t *
-spdk_bs_user_op_alloc(struct spdk_io_channel *_channel, struct spdk_bs_cpl *cpl,
-		      enum spdk_blob_op_type op_type, struct spdk_blob *blob,
-		      void *payload, int iovcnt, uint64_t offset, uint64_t length)
+bs_user_op_alloc(struct spdk_io_channel *_channel, struct spdk_bs_cpl *cpl,
+		 enum spdk_blob_op_type op_type, struct spdk_blob *blob,
+		 void *payload, int iovcnt, uint64_t offset, uint64_t length)
 {
 	struct spdk_bs_channel		*channel;
 	struct spdk_bs_request_set	*set;
@@ -558,7 +517,7 @@ spdk_bs_user_op_alloc(struct spdk_io_channel *_channel, struct spdk_bs_cpl *cpl,
 }
 
 void
-spdk_bs_user_op_execute(spdk_bs_user_op_t *op)
+bs_user_op_execute(spdk_bs_user_op_t *op)
 {
 	struct spdk_bs_request_set	*set;
 	struct spdk_bs_user_op_args	*args;
@@ -600,7 +559,7 @@ spdk_bs_user_op_execute(spdk_bs_user_op_t *op)
 }
 
 void
-spdk_bs_user_op_abort(spdk_bs_user_op_t *op)
+bs_user_op_abort(spdk_bs_user_op_t *op)
 {
 	struct spdk_bs_request_set	*set;
 
@@ -612,7 +571,7 @@ spdk_bs_user_op_abort(spdk_bs_user_op_t *op)
 
 // zhou: spdk_bs_batch_to_sequence() will register this function.
 void
-spdk_bs_sequence_to_batch_completion(void *cb_arg, int bserrno)
+bs_sequence_to_batch_completion(void *cb_arg, int bserrno)
 {
 	struct spdk_bs_request_set *set = (struct spdk_bs_request_set *)cb_arg;
 
@@ -625,8 +584,4 @@ spdk_bs_sequence_to_batch_completion(void *cb_arg, int bserrno)
 	}
 }
 
-
-////////////////////////////////////////////////////////////////////////////////
-
-
-SPDK_LOG_REGISTER_COMPONENT("blob_rw", SPDK_LOG_BLOB_RW)
+SPDK_LOG_REGISTER_COMPONENT(blob_rw)

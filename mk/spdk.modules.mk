@@ -34,7 +34,16 @@
 BLOCKDEV_MODULES_LIST = bdev_malloc bdev_null bdev_nvme bdev_passthru bdev_lvol
 BLOCKDEV_MODULES_LIST += bdev_raid bdev_error bdev_gpt bdev_split bdev_delay
 BLOCKDEV_MODULES_LIST += bdev_zone_block
-BLOCKDEV_MODULES_LIST += blobfs blob_bdev blob lvol vmd nvme
+BLOCKDEV_MODULES_LIST += blobfs blobfs_bdev blob_bdev blob lvol vmd nvme
+
+# Some bdev modules don't have pollers, so they can directly run in interrupt mode
+INTR_BLOCKDEV_MODULES_LIST = bdev_malloc bdev_passthru bdev_error bdev_gpt bdev_split bdev_raid
+# Logical volume, blobstore and blobfs can directly run in both interrupt mode and poll mode.
+INTR_BLOCKDEV_MODULES_LIST += bdev_lvol blobfs blobfs_bdev blob_bdev blob lvol
+
+ifeq ($(CONFIG_VFIO_USER),y)
+BLOCKDEV_MODULES_LIST += vfio_user
+endif
 
 ifeq ($(CONFIG_CRYPTO),y)
 BLOCKDEV_MODULES_LIST += bdev_crypto
@@ -47,58 +56,65 @@ endif
 
 ifeq ($(CONFIG_REDUCE),y)
 BLOCKDEV_MODULES_LIST += bdev_compress reduce
-SYS_LIBS += -lpmem
+BLOCKDEV_MODULES_PRIVATE_LIBS += -lpmem
 endif
 
 ifeq ($(CONFIG_RDMA),y)
-SYS_LIBS += -libverbs -lrdmacm
+BLOCKDEV_MODULES_LIST += rdma
+BLOCKDEV_MODULES_PRIVATE_LIBS += -libverbs -lrdmacm
+ifeq ($(CONFIG_RDMA_PROV),mlx5_dv)
+BLOCKDEV_MODULES_PRIVATE_LIBS += -lmlx5
+endif
 endif
 
 ifeq ($(OS),Linux)
-BLOCKDEV_MODULES_LIST += ftl
+BLOCKDEV_MODULES_LIST += bdev_ftl ftl
 BLOCKDEV_MODULES_LIST += bdev_aio
-SYS_LIBS += -laio
+BLOCKDEV_MODULES_PRIVATE_LIBS += -laio
+INTR_BLOCKDEV_MODULES_LIST += bdev_aio
 ifeq ($(CONFIG_VIRTIO),y)
 BLOCKDEV_MODULES_LIST += bdev_virtio virtio
 endif
 ifeq ($(CONFIG_ISCSI_INITIATOR),y)
 BLOCKDEV_MODULES_LIST += bdev_iscsi
 # Fedora installs libiscsi to /usr/lib64/iscsi for some reason.
-SYS_LIBS += -L/usr/lib64/iscsi -liscsi
+BLOCKDEV_MODULES_PRIVATE_LIBS += -L/usr/lib64/iscsi -liscsi
 endif
 endif
 
 ifeq ($(CONFIG_URING),y)
 BLOCKDEV_MODULES_LIST += bdev_uring
-SYS_LIBS += -luring
+BLOCKDEV_MODULES_PRIVATE_LIBS += -luring
 ifneq ($(strip $(CONFIG_URING_PATH)),)
 CFLAGS += -I$(CONFIG_URING_PATH)
-LDFLAGS += -L$(CONFIG_URING_PATH)
+BLOCKDEV_MODULES_PRIVATE_LIBS += -L$(CONFIG_URING_PATH)
 endif
 endif
 
 ifeq ($(CONFIG_RBD),y)
 BLOCKDEV_MODULES_LIST += bdev_rbd
-SYS_LIBS += -lrados -lrbd
+BLOCKDEV_MODULES_PRIVATE_LIBS += -lrados -lrbd
 endif
 
 ifeq ($(CONFIG_PMDK),y)
 BLOCKDEV_MODULES_LIST += bdev_pmem
-SYS_LIBS += -lpmemblk
+BLOCKDEV_MODULES_PRIVATE_LIBS += -lpmemblk -lpmem
 endif
 
 SOCK_MODULES_LIST = sock_posix
 
-ifeq ($(CONFIG_VPP),y)
-SYS_LIBS += -Wl,--whole-archive
-ifneq ($(CONFIG_VPP_DIR),)
-SYS_LIBS += -L$(CONFIG_VPP_DIR)/lib
+ifeq ($(OS), Linux)
+ifeq ($(CONFIG_URING),y)
+SOCK_MODULES_LIST += sock_uring
 endif
-SYS_LIBS += -lvppinfra -lsvm -lvlibmemoryclient
-SYS_LIBS += -Wl,--no-whole-archive
-SOCK_MODULES_LIST += sock_vpp
 endif
 
-COPY_MODULES_LIST = copy_ioat ioat
+ACCEL_MODULES_LIST = accel_ioat ioat
+ifeq ($(CONFIG_IDXD),y)
+ACCEL_MODULES_LIST += accel_idxd idxd
+endif
 
-ALL_MODULES_LIST = $(BLOCKDEV_MODULES_LIST) $(COPY_MODULES_LIST) $(SOCK_MODULES_LIST)
+EVENT_BDEV_SUBSYSTEM = event_bdev event_accel event_vmd event_sock
+
+ALL_MODULES_LIST = $(BLOCKDEV_MODULES_LIST) $(ACCEL_MODULES_LIST) $(SOCK_MODULES_LIST)
+SYS_LIBS += $(BLOCKDEV_MODULES_PRIVATE_LIBS)

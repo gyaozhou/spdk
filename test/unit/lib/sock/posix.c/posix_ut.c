@@ -40,7 +40,7 @@
 
 #include "sock/posix/posix.c"
 
-DEFINE_STUB_V(spdk_net_impl_register, (struct spdk_net_impl *impl));
+DEFINE_STUB_V(spdk_net_impl_register, (struct spdk_net_impl *impl, int priority));
 DEFINE_STUB(spdk_sock_close, int, (struct spdk_sock **s), 0);
 
 static void
@@ -156,21 +156,12 @@ main(int argc, char **argv)
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	if (CU_initialize_registry() != CUE_SUCCESS) {
-		return CU_get_error();
-	}
+	CU_set_error_action(CUEA_ABORT);
+	CU_initialize_registry();
 
 	suite = CU_add_suite("posix", NULL, NULL);
-	if (suite == NULL) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
 
-	if (
-		CU_add_test(suite, "flush", flush) == NULL) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
+	CU_ADD_TEST(suite, flush);
 
 	CU_basic_set_mode(CU_BRM_VERBOSE);
 

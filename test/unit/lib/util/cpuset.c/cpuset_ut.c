@@ -180,6 +180,15 @@ test_cpuset_parse(void)
 	rc = spdk_cpuset_parse(core_mask, "[184467440737095516150]");
 	CU_ASSERT(rc < 0);
 
+	/* Test mask with cores 4-7 and 168-171 set. */
+	rc = spdk_cpuset_parse(core_mask, "0xF0000000000000000000000000000000000000000F0");
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(cpuset_check_range(core_mask, 0, 3, false) == 0);
+	CU_ASSERT(cpuset_check_range(core_mask, 4, 7, true) == 0);
+	CU_ASSERT(cpuset_check_range(core_mask, 8, 167, false) == 0);
+	CU_ASSERT(cpuset_check_range(core_mask, 168, 171, true) == 0);
+	CU_ASSERT(cpuset_check_range(core_mask, 172, SPDK_CPUSET_SIZE - 1, false) == 0);
+
 	spdk_cpuset_free(core_mask);
 }
 
@@ -242,23 +251,14 @@ main(int argc, char **argv)
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	if (CU_initialize_registry() != CUE_SUCCESS) {
-		return CU_get_error();
-	}
+	CU_set_error_action(CUEA_ABORT);
+	CU_initialize_registry();
 
 	suite = CU_add_suite("cpuset", NULL, NULL);
-	if (suite == NULL) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
 
-	if (
-		CU_add_test(suite, "test_cpuset", test_cpuset) == NULL ||
-		CU_add_test(suite, "test_cpuset_parse", test_cpuset_parse) == NULL ||
-		CU_add_test(suite, "test_cpuset_fmt", test_cpuset_fmt) == NULL) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
+	CU_ADD_TEST(suite, test_cpuset);
+	CU_ADD_TEST(suite, test_cpuset_parse);
+	CU_ADD_TEST(suite, test_cpuset_fmt);
 
 	CU_basic_set_mode(CU_BRM_VERBOSE);
 

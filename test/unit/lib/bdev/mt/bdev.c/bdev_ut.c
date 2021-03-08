@@ -44,12 +44,6 @@
 
 #define BDEV_UT_NUM_THREADS 3
 
-DEFINE_STUB(spdk_conf_find_section, struct spdk_conf_section *, (struct spdk_conf *cp,
-		const char *name), NULL);
-DEFINE_STUB(spdk_conf_section_get_nmval, char *,
-	    (struct spdk_conf_section *sp, const char *key, int idx1, int idx2), NULL);
-DEFINE_STUB(spdk_conf_section_get_intval, int, (struct spdk_conf_section *sp, const char *key), -1);
-
 struct spdk_trace_histories *g_trace_histories;
 DEFINE_STUB_V(spdk_trace_add_register_fn, (struct spdk_trace_register_fn *reg_fn));
 DEFINE_STUB_V(spdk_trace_register_owner, (uint8_t type, char id_prefix));
@@ -62,6 +56,8 @@ DEFINE_STUB_V(_spdk_trace_record, (uint64_t tsc, uint16_t tpoint_id, uint16_t po
 				   uint32_t size, uint64_t object_id, uint64_t arg1));
 DEFINE_STUB(spdk_notify_send, uint64_t, (const char *type, const char *ctx), 0);
 DEFINE_STUB(spdk_notify_type_register, struct spdk_notify_type *, (const char *type), NULL);
+DEFINE_STUB_V(spdk_scsi_nvme_translate, (const struct spdk_bdev_io *bdev_io, int *sc, int *sk,
+		int *asc, int *ascq));
 
 struct ut_bdev {
 	struct spdk_bdev	bdev;
@@ -134,17 +130,31 @@ static void
 stub_submit_request(struct spdk_io_channel *_ch, struct spdk_bdev_io *bdev_io)
 {
 	struct ut_bdev_channel *ch = spdk_io_channel_get_ctx(_ch);
+	struct spdk_bdev_io *io;
 
 	if (bdev_io->type == SPDK_BDEV_IO_TYPE_RESET) {
-		struct spdk_bdev_io *io;
-
 		while (!TAILQ_EMPTY(&ch->outstanding_io)) {
 			io = TAILQ_FIRST(&ch->outstanding_io);
 			TAILQ_REMOVE(&ch->outstanding_io, io, module_link);
 			ch->outstanding_cnt--;
-			spdk_bdev_io_complete(io, SPDK_BDEV_IO_STATUS_FAILED);
+			spdk_bdev_io_complete(io, SPDK_BDEV_IO_STATUS_ABORTED);
 			ch->avail_cnt++;
 		}
+	} else if (bdev_io->type == SPDK_BDEV_IO_TYPE_ABORT) {
+		TAILQ_FOREACH(io, &ch->outstanding_io, module_link) {
+			if (io == bdev_io->u.abort.bio_to_abort) {
+				TAILQ_REMOVE(&ch->outstanding_io, io, module_link);
+				ch->outstanding_cnt--;
+				spdk_bdev_io_complete(io, SPDK_BDEV_IO_STATUS_ABORTED);
+				ch->avail_cnt++;
+
+				spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_SUCCESS);
+				return;
+			}
+		}
+
+		spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_FAILED);
+		return;
 	}
 
 	if (ch->avail_cnt > 0) {
@@ -181,10 +191,17 @@ stub_complete_io(void *io_target, uint32_t num_to_complete)
 	return num_completed;
 }
 
+static bool
+stub_io_type_supported(void *ctx, enum spdk_bdev_io_type type)
+{
+	return true;
+}
+
 static struct spdk_bdev_fn_table fn_table = {
 	.get_io_channel =	stub_get_io_channel,
 	.destruct =		stub_destruct,
 	.submit_request =	stub_submit_request,
+	.io_type_supported =	stub_io_type_supported,
 };
 
 struct spdk_bdev_module bdev_ut_if;
@@ -256,17 +273,34 @@ bdev_init_cb(void *done, int rc)
 }
 
 static void
+_bdev_event_cb(enum spdk_bdev_event_type type, struct spdk_bdev *bdev,
+	       void *event_ctx)
+{
+	switch (type) {
+	case SPDK_BDEV_EVENT_REMOVE:
+		if (event_ctx != NULL) {
+			*(bool *)event_ctx = true;
+		}
+		break;
+	default:
+		CU_ASSERT(false);
+		break;
+	}
+}
+
+static void
 setup_test(void)
 {
 	bool done = false;
 
+	allocate_cores(BDEV_UT_NUM_THREADS);
 	allocate_threads(BDEV_UT_NUM_THREADS);
 	set_thread(0);
 	spdk_bdev_initialize(bdev_init_cb, &done);
 	spdk_io_device_register(&g_io_device, stub_create_ch, stub_destroy_ch,
 				sizeof(struct ut_bdev_channel), NULL);
 	register_bdev(&g_bdev, "ut_bdev", &g_io_device);
-	spdk_bdev_open(&g_bdev.bdev, true, NULL, NULL, &g_desc);
+	spdk_bdev_open_ext("ut_bdev", true, _bdev_event_cb, NULL, &g_desc);
 }
 
 static void
@@ -290,6 +324,7 @@ teardown_test(void)
 	CU_ASSERT(g_teardown_done == true);
 	g_teardown_done = false;
 	free_threads();
+	free_cores();
 }
 
 static uint32_t
@@ -335,12 +370,6 @@ basic(void)
 }
 
 static void
-_bdev_removed(void *done)
-{
-	*(bool *)done = true;
-}
-
-static void
 _bdev_unregistered(void *done, int rc)
 {
 	CU_ASSERT(rc == 0);
@@ -363,8 +392,8 @@ unregister_and_close(void)
 	poll_threads();
 
 	/* Try hotremoving a bdev with descriptors which don't provide
-	 * the notification callback */
-	spdk_bdev_open(&g_bdev.bdev, true, NULL, NULL, &desc);
+	 * any context to the notification callback */
+	spdk_bdev_open_ext("ut_bdev", true, _bdev_event_cb, NULL, &desc);
 	SPDK_CU_ASSERT_FATAL(desc != NULL);
 
 	/* There is an open descriptor on the device. Unregister it,
@@ -391,7 +420,7 @@ unregister_and_close(void)
 	register_bdev(&g_bdev, "ut_bdev", &g_io_device);
 
 	remove_notify = false;
-	spdk_bdev_open(&g_bdev.bdev, true, _bdev_removed, &remove_notify, &desc);
+	spdk_bdev_open_ext("ut_bdev", true, _bdev_event_cb, &remove_notify, &desc);
 	SPDK_CU_ASSERT_FATAL(desc != NULL);
 	CU_ASSERT(remove_notify == false);
 
@@ -418,7 +447,7 @@ unregister_and_close(void)
 
 	/* Restore the original g_bdev so that we can use teardown_test(). */
 	register_bdev(&g_bdev, "ut_bdev", &g_io_device);
-	spdk_bdev_open(&g_bdev.bdev, true, NULL, NULL, &g_desc);
+	spdk_bdev_open_ext("ut_bdev", true, _bdev_event_cb, NULL, &g_desc);
 	teardown_test();
 }
 
@@ -527,7 +556,7 @@ io_during_io_done(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
 {
 	enum spdk_bdev_io_status *status = cb_arg;
 
-	*status = success ? SPDK_BDEV_IO_STATUS_SUCCESS : SPDK_BDEV_IO_STATUS_FAILED;
+	*status = bdev_io->internal.status;
 	spdk_bdev_free_io(bdev_io);
 }
 
@@ -600,13 +629,13 @@ io_during_reset(void)
 	CU_ASSERT(rc == 0);
 
 	/*
-	 * A reset is in progress so these read I/O should complete with failure.  Note that we
+	 * A reset is in progress so these read I/O should complete with aborted.  Note that we
 	 *  need to poll_threads() since I/O completed inline have their completion deferred.
 	 */
 	poll_threads();
 	CU_ASSERT(status_reset == SPDK_BDEV_IO_STATUS_PENDING);
-	CU_ASSERT(status0 == SPDK_BDEV_IO_STATUS_FAILED);
-	CU_ASSERT(status1 == SPDK_BDEV_IO_STATUS_FAILED);
+	CU_ASSERT(status0 == SPDK_BDEV_IO_STATUS_ABORTED);
+	CU_ASSERT(status1 == SPDK_BDEV_IO_STATUS_ABORTED);
 
 	/*
 	 * Complete the reset
@@ -641,7 +670,7 @@ basic_qos(void)
 	struct spdk_io_channel *io_ch[2];
 	struct spdk_bdev_channel *bdev_ch[2];
 	struct spdk_bdev *bdev;
-	enum spdk_bdev_io_status status;
+	enum spdk_bdev_io_status status, abort_status;
 	int rc;
 
 	setup_test();
@@ -706,6 +735,48 @@ basic_qos(void)
 	poll_threads();
 	CU_ASSERT(status == SPDK_BDEV_IO_STATUS_SUCCESS);
 
+	/* Reset rate limit for the next test cases. */
+	spdk_delay_us(SPDK_BDEV_QOS_TIMESLICE_IN_USEC);
+	poll_threads();
+
+	/*
+	 * Test abort request when QoS is enabled.
+	 */
+
+	/* Send an I/O on thread 0, which is where the QoS thread is running. */
+	set_thread(0);
+	status = SPDK_BDEV_IO_STATUS_PENDING;
+	rc = spdk_bdev_read_blocks(g_desc, io_ch[0], NULL, 0, 1, io_during_io_done, &status);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(status == SPDK_BDEV_IO_STATUS_PENDING);
+	/* Send an abort to the I/O on the same thread. */
+	abort_status = SPDK_BDEV_IO_STATUS_PENDING;
+	rc = spdk_bdev_abort(g_desc, io_ch[0], &status, io_during_io_done, &abort_status);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(abort_status == SPDK_BDEV_IO_STATUS_PENDING);
+	poll_threads();
+	CU_ASSERT(abort_status == SPDK_BDEV_IO_STATUS_SUCCESS);
+	CU_ASSERT(status == SPDK_BDEV_IO_STATUS_ABORTED);
+
+	/* Send an I/O on thread 1. The QoS thread is not running here. */
+	status = SPDK_BDEV_IO_STATUS_PENDING;
+	set_thread(1);
+	rc = spdk_bdev_read_blocks(g_desc, io_ch[1], NULL, 0, 1, io_during_io_done, &status);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(status == SPDK_BDEV_IO_STATUS_PENDING);
+	poll_threads();
+	/* Send an abort to the I/O on the same thread. */
+	abort_status = SPDK_BDEV_IO_STATUS_PENDING;
+	rc = spdk_bdev_abort(g_desc, io_ch[1], &status, io_during_io_done, &abort_status);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(abort_status == SPDK_BDEV_IO_STATUS_PENDING);
+	poll_threads();
+	/* Complete the I/O with failure and the abort with success on thread 1. */
+	CU_ASSERT(abort_status == SPDK_BDEV_IO_STATUS_SUCCESS);
+	CU_ASSERT(status == SPDK_BDEV_IO_STATUS_ABORTED);
+
+	set_thread(0);
+
 	/*
 	 * Close the descriptor only, which should stop the qos channel as
 	 * the last descriptor removed.
@@ -718,7 +789,7 @@ basic_qos(void)
 	 * Open the bdev again which shall setup the qos channel as the
 	 * channels are valid.
 	 */
-	spdk_bdev_open(bdev, true, NULL, NULL, &g_desc);
+	spdk_bdev_open_ext("ut_bdev", true, _bdev_event_cb, NULL, &g_desc);
 	poll_threads();
 	CU_ASSERT(bdev->internal.qos->ch != NULL);
 
@@ -736,7 +807,7 @@ basic_qos(void)
 	CU_ASSERT(bdev->internal.qos->ch == NULL);
 
 	/* Open the bdev again, no qos channel setup without valid channels. */
-	spdk_bdev_open(bdev, true, NULL, NULL, &g_desc);
+	spdk_bdev_open_ext("ut_bdev", true, _bdev_event_cb, NULL, &g_desc);
 	poll_threads();
 	CU_ASSERT(bdev->internal.qos->ch == NULL);
 
@@ -939,8 +1010,8 @@ io_during_qos_reset(void)
 	poll_threads();
 
 	CU_ASSERT(reset_status == SPDK_BDEV_IO_STATUS_SUCCESS);
-	CU_ASSERT(status0 == SPDK_BDEV_IO_STATUS_FAILED);
-	CU_ASSERT(status1 == SPDK_BDEV_IO_STATUS_FAILED);
+	CU_ASSERT(status0 == SPDK_BDEV_IO_STATUS_ABORTED);
+	CU_ASSERT(status1 == SPDK_BDEV_IO_STATUS_ABORTED);
 
 	/* Tear down the channels */
 	set_thread(1);
@@ -1080,7 +1151,7 @@ enomem_multi_bdev(void)
 	second_bdev = calloc(1, sizeof(*second_bdev));
 	SPDK_CU_ASSERT_FATAL(second_bdev != NULL);
 	register_bdev(second_bdev, "ut_bdev2", g_bdev.io_target);
-	spdk_bdev_open(&second_bdev->bdev, true, NULL, NULL, &second_desc);
+	spdk_bdev_open_ext("ut_bdev2", true, _bdev_event_cb, NULL, &second_desc);
 	SPDK_CU_ASSERT_FATAL(second_desc != NULL);
 
 	set_thread(0);
@@ -1156,7 +1227,7 @@ enomem_multi_io_target(void)
 	second_bdev = calloc(1, sizeof(*second_bdev));
 	SPDK_CU_ASSERT_FATAL(second_bdev != NULL);
 	register_bdev(second_bdev, "ut_bdev2", &new_io_device);
-	spdk_bdev_open(&second_bdev->bdev, true, NULL, NULL, &second_desc);
+	spdk_bdev_open_ext("ut_bdev2", true, _bdev_event_cb, NULL, &second_desc);
 	SPDK_CU_ASSERT_FATAL(second_desc != NULL);
 
 	set_thread(0);
@@ -1544,9 +1615,12 @@ bdev_channel_io_timeout_cb(void *cb_arg, struct spdk_bdev_io *bdev_io)
 	ctx->iov.iov_len = bdev_io->iov.iov_len;
 }
 
+static bool g_io_done;
+
 static void
 io_done(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
 {
+	g_io_done = true;
 	spdk_bdev_free_io(bdev_io);
 }
 
@@ -1608,7 +1682,7 @@ bdev_set_io_timeout_mt(void)
 	set_thread(2);
 	CU_ASSERT(spdk_bdev_read_blocks(g_desc, ch[2], (void *)0xF000, 14, 8, io_done, NULL) == 0);
 	bdev_ch[2] = spdk_io_channel_get_ctx(ch[2]);
-	CU_ASSERT(bdev_channel_count_submitted_io(bdev_ch[2]) == 1);
+	CU_ASSERT(bdev_channel_count_submitted_io(bdev_ch[2]) == 3);
 
 	set_thread(0);
 	memset(&cb_arg, 0, sizeof(cb_arg));
@@ -1643,7 +1717,7 @@ bdev_set_io_timeout_mt(void)
 	CU_ASSERT(cb_arg.iov.iov_base == (void *)0xF000);
 	CU_ASSERT(cb_arg.iov.iov_len == 8 * g_bdev.bdev.blocklen);
 	stub_complete_io(g_bdev.io_target, 1);
-	CU_ASSERT(bdev_channel_count_submitted_io(bdev_ch[2]) == 1);
+	CU_ASSERT(bdev_channel_count_submitted_io(bdev_ch[2]) == 2);
 	stub_complete_io(g_bdev.io_target, 1);
 	CU_ASSERT(bdev_channel_count_submitted_io(bdev_ch[2]) == 0);
 
@@ -1719,6 +1793,176 @@ bdev_set_io_timeout_mt(void)
 	CU_ASSERT(g_teardown_done == true);
 	g_teardown_done = false;
 	free_threads();
+	free_cores();
+}
+
+static bool g_io_done2;
+static bool g_lock_lba_range_done;
+static bool g_unlock_lba_range_done;
+
+static void
+io_done2(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
+{
+	g_io_done2 = true;
+	spdk_bdev_free_io(bdev_io);
+}
+
+static void
+lock_lba_range_done(void *ctx, int status)
+{
+	g_lock_lba_range_done = true;
+}
+
+static void
+unlock_lba_range_done(void *ctx, int status)
+{
+	g_unlock_lba_range_done = true;
+}
+
+static uint32_t
+stub_channel_outstanding_cnt(void *io_target)
+{
+	struct spdk_io_channel *_ch = spdk_get_io_channel(io_target);
+	struct ut_bdev_channel *ch = spdk_io_channel_get_ctx(_ch);
+	uint32_t outstanding_cnt;
+
+	outstanding_cnt = ch->outstanding_cnt;
+
+	spdk_put_io_channel(_ch);
+	return outstanding_cnt;
+}
+
+static void
+lock_lba_range_then_submit_io(void)
+{
+	struct spdk_bdev_desc *desc = NULL;
+	void *io_target;
+	struct spdk_io_channel *io_ch[3];
+	struct spdk_bdev_channel *bdev_ch[3];
+	struct lba_range *range;
+	char buf[4096];
+	int ctx0, ctx1, ctx2;
+	int rc;
+
+	setup_test();
+
+	io_target = g_bdev.io_target;
+	desc = g_desc;
+
+	set_thread(0);
+	io_ch[0] = spdk_bdev_get_io_channel(desc);
+	bdev_ch[0] = spdk_io_channel_get_ctx(io_ch[0]);
+	CU_ASSERT(io_ch[0] != NULL);
+
+	set_thread(1);
+	io_ch[1] = spdk_bdev_get_io_channel(desc);
+	bdev_ch[1] = spdk_io_channel_get_ctx(io_ch[1]);
+	CU_ASSERT(io_ch[1] != NULL);
+
+	set_thread(0);
+	g_lock_lba_range_done = false;
+	rc = bdev_lock_lba_range(desc, io_ch[0], 20, 10, lock_lba_range_done, &ctx0);
+	CU_ASSERT(rc == 0);
+	poll_threads();
+
+	/* The lock should immediately become valid, since there are no outstanding
+	 * write I/O.
+	 */
+	CU_ASSERT(g_lock_lba_range_done == true);
+	range = TAILQ_FIRST(&bdev_ch[0]->locked_ranges);
+	SPDK_CU_ASSERT_FATAL(range != NULL);
+	CU_ASSERT(range->offset == 20);
+	CU_ASSERT(range->length == 10);
+	CU_ASSERT(range->owner_ch == bdev_ch[0]);
+
+	g_io_done = false;
+	CU_ASSERT(TAILQ_EMPTY(&bdev_ch[0]->io_locked));
+	rc = spdk_bdev_read_blocks(desc, io_ch[0], buf, 20, 1, io_done, &ctx0);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(stub_channel_outstanding_cnt(io_target) == 1);
+
+	stub_complete_io(io_target, 1);
+	poll_threads();
+	CU_ASSERT(g_io_done == true);
+	CU_ASSERT(TAILQ_EMPTY(&bdev_ch[0]->io_locked));
+
+	/* Try a write I/O.  This should actually be allowed to execute, since the channel
+	 * holding the lock is submitting the write I/O.
+	 */
+	g_io_done = false;
+	CU_ASSERT(TAILQ_EMPTY(&bdev_ch[0]->io_locked));
+	rc = spdk_bdev_write_blocks(desc, io_ch[0], buf, 20, 1, io_done, &ctx0);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(stub_channel_outstanding_cnt(io_target) == 1);
+
+	stub_complete_io(io_target, 1);
+	poll_threads();
+	CU_ASSERT(g_io_done == true);
+	CU_ASSERT(TAILQ_EMPTY(&bdev_ch[0]->io_locked));
+
+	/* Try a write I/O.  This should get queued in the io_locked tailq. */
+	set_thread(1);
+	g_io_done = false;
+	CU_ASSERT(TAILQ_EMPTY(&bdev_ch[1]->io_locked));
+	rc = spdk_bdev_write_blocks(desc, io_ch[1], buf, 20, 1, io_done, &ctx1);
+	CU_ASSERT(rc == 0);
+	poll_threads();
+	CU_ASSERT(stub_channel_outstanding_cnt(io_target) == 0);
+	CU_ASSERT(!TAILQ_EMPTY(&bdev_ch[1]->io_locked));
+	CU_ASSERT(g_io_done == false);
+
+	/* Try to unlock the lba range using thread 1's io_ch.  This should fail. */
+	rc = bdev_unlock_lba_range(desc, io_ch[1], 20, 10, unlock_lba_range_done, &ctx1);
+	CU_ASSERT(rc == -EINVAL);
+
+	/* Now create a new channel and submit a write I/O with it.  This should also be queued.
+	 * The new channel should inherit the active locks from the bdev's internal list.
+	 */
+	set_thread(2);
+	io_ch[2] = spdk_bdev_get_io_channel(desc);
+	bdev_ch[2] = spdk_io_channel_get_ctx(io_ch[2]);
+	CU_ASSERT(io_ch[2] != NULL);
+
+	g_io_done2 = false;
+	CU_ASSERT(TAILQ_EMPTY(&bdev_ch[2]->io_locked));
+	rc = spdk_bdev_write_blocks(desc, io_ch[2], buf, 22, 2, io_done2, &ctx2);
+	CU_ASSERT(rc == 0);
+	poll_threads();
+	CU_ASSERT(stub_channel_outstanding_cnt(io_target) == 0);
+	CU_ASSERT(!TAILQ_EMPTY(&bdev_ch[2]->io_locked));
+	CU_ASSERT(g_io_done2 == false);
+
+	set_thread(0);
+	rc = bdev_unlock_lba_range(desc, io_ch[0], 20, 10, unlock_lba_range_done, &ctx0);
+	CU_ASSERT(rc == 0);
+	poll_threads();
+	CU_ASSERT(TAILQ_EMPTY(&bdev_ch[0]->locked_ranges));
+
+	/* The LBA range is unlocked, so the write IOs should now have started execution. */
+	CU_ASSERT(TAILQ_EMPTY(&bdev_ch[1]->io_locked));
+	CU_ASSERT(TAILQ_EMPTY(&bdev_ch[2]->io_locked));
+
+	set_thread(1);
+	CU_ASSERT(stub_channel_outstanding_cnt(io_target) == 1);
+	stub_complete_io(io_target, 1);
+	set_thread(2);
+	CU_ASSERT(stub_channel_outstanding_cnt(io_target) == 1);
+	stub_complete_io(io_target, 1);
+
+	poll_threads();
+	CU_ASSERT(g_io_done == true);
+	CU_ASSERT(g_io_done2 == true);
+
+	/* Tear down the channels */
+	set_thread(0);
+	spdk_put_io_channel(io_ch[0]);
+	set_thread(1);
+	spdk_put_io_channel(io_ch[1]);
+	set_thread(2);
+	spdk_put_io_channel(io_ch[2]);
+	poll_threads();
+	set_thread(0);
+	teardown_test();
 }
 
 int
@@ -1727,35 +1971,26 @@ main(int argc, char **argv)
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	if (CU_initialize_registry() != CUE_SUCCESS) {
-		return CU_get_error();
-	}
+	CU_set_error_action(CUEA_ABORT);
+	CU_initialize_registry();
 
 	suite = CU_add_suite("bdev", NULL, NULL);
-	if (suite == NULL) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
 
-	if (
-		CU_add_test(suite, "basic", basic) == NULL ||
-		CU_add_test(suite, "unregister_and_close", unregister_and_close) == NULL ||
-		CU_add_test(suite, "basic_qos", basic_qos) == NULL ||
-		CU_add_test(suite, "put_channel_during_reset", put_channel_during_reset) == NULL ||
-		CU_add_test(suite, "aborted_reset", aborted_reset) == NULL ||
-		CU_add_test(suite, "io_during_reset", io_during_reset) == NULL ||
-		CU_add_test(suite, "io_during_qos_queue", io_during_qos_queue) == NULL ||
-		CU_add_test(suite, "io_during_qos_reset", io_during_qos_reset) == NULL ||
-		CU_add_test(suite, "enomem", enomem) == NULL ||
-		CU_add_test(suite, "enomem_multi_bdev", enomem_multi_bdev) == NULL ||
-		CU_add_test(suite, "enomem_multi_io_target", enomem_multi_io_target) == NULL ||
-		CU_add_test(suite, "qos_dynamic_enable", qos_dynamic_enable) == NULL ||
-		CU_add_test(suite, "bdev_histograms_mt", bdev_histograms_mt) == NULL ||
-		CU_add_test(suite, "bdev_set_io_timeout_mt", bdev_set_io_timeout_mt) == NULL
-	) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
+	CU_ADD_TEST(suite, basic);
+	CU_ADD_TEST(suite, unregister_and_close);
+	CU_ADD_TEST(suite, basic_qos);
+	CU_ADD_TEST(suite, put_channel_during_reset);
+	CU_ADD_TEST(suite, aborted_reset);
+	CU_ADD_TEST(suite, io_during_reset);
+	CU_ADD_TEST(suite, io_during_qos_queue);
+	CU_ADD_TEST(suite, io_during_qos_reset);
+	CU_ADD_TEST(suite, enomem);
+	CU_ADD_TEST(suite, enomem_multi_bdev);
+	CU_ADD_TEST(suite, enomem_multi_io_target);
+	CU_ADD_TEST(suite, qos_dynamic_enable);
+	CU_ADD_TEST(suite, bdev_histograms_mt);
+	CU_ADD_TEST(suite, bdev_set_io_timeout_mt);
+	CU_ADD_TEST(suite, lock_lba_range_then_submit_io);
 
 	CU_basic_set_mode(CU_BRM_VERBOSE);
 	CU_basic_run_tests();

@@ -34,7 +34,7 @@
 #include "spdk/stdinc.h"
 
 #include "spdk/bdev.h"
-#include "spdk/copy_engine.h"
+#include "spdk/accel_engine.h"
 #include "spdk/env.h"
 #include "spdk/log.h"
 #include "spdk/thread.h"
@@ -57,6 +57,7 @@ static struct spdk_thread *g_thread_ut;
 static struct spdk_thread *g_thread_io;
 static bool g_wait_for_tests = false;
 static int g_num_failures = 0;
+static bool g_shutdown = false;
 
 struct io_target {
 	struct spdk_bdev	*bdev;
@@ -67,10 +68,13 @@ struct io_target {
 
 struct bdevio_request {
 	char *buf;
+	char *fused_buf;
 	int data_len;
 	uint64_t offset;
 	struct iovec iov[BUFFER_IOVS];
 	int iovcnt;
+	struct iovec fused_iov[BUFFER_IOVS];
+	int fused_iovcnt;
 	struct io_target *target;
 };
 
@@ -105,6 +109,12 @@ __get_io_channel(void *arg)
 	wake_ut_thread();
 }
 
+static void
+bdevio_construct_target_open_cb(enum spdk_bdev_event_type type, struct spdk_bdev *bdev,
+				void *event_ctx)
+{
+}
+
 static int
 bdevio_construct_target(struct spdk_bdev *bdev)
 {
@@ -118,7 +128,8 @@ bdevio_construct_target(struct spdk_bdev *bdev)
 		return -ENOMEM;
 	}
 
-	rc = spdk_bdev_open(bdev, true, NULL, NULL, &target->bdev_desc);
+	rc = spdk_bdev_open_ext(spdk_bdev_get_name(bdev), true, bdevio_construct_target_open_cb, NULL,
+				&target->bdev_desc);
 	if (rc != 0) {
 		free(target);
 		SPDK_ERRLOG("Could not open leaf bdev %s, error=%d\n", spdk_bdev_get_name(bdev), rc);
@@ -242,6 +253,22 @@ __blockdev_write_zeroes(void *arg)
 }
 
 static void
+__blockdev_compare_and_write(void *arg)
+{
+	struct bdevio_request *req = arg;
+	struct io_target *target = req->target;
+	int rc;
+
+	rc = spdk_bdev_comparev_and_writev_blocks(target->bdev_desc, target->ch, req->iov, req->iovcnt,
+			req->fused_iov, req->fused_iovcnt, req->offset, req->data_len, quick_test_complete, NULL);
+
+	if (rc) {
+		g_completion_success = false;
+		wake_ut_thread();
+	}
+}
+
+static void
 sgl_chop_buffer(struct bdevio_request *req, int iov_len)
 {
 	int data_len = req->data_len;
@@ -268,6 +295,32 @@ sgl_chop_buffer(struct bdevio_request *req, int iov_len)
 }
 
 static void
+sgl_chop_fused_buffer(struct bdevio_request *req, int iov_len)
+{
+	int data_len = req->data_len;
+	char *buf = req->fused_buf;
+
+	req->fused_iovcnt = 0;
+	if (!iov_len) {
+		return;
+	}
+
+	for (; data_len > 0 && req->fused_iovcnt < BUFFER_IOVS; req->fused_iovcnt++) {
+		if (data_len < iov_len) {
+			iov_len = data_len;
+		}
+
+		req->fused_iov[req->fused_iovcnt].iov_base = buf;
+		req->fused_iov[req->fused_iovcnt].iov_len = iov_len;
+
+		buf += iov_len;
+		data_len -= iov_len;
+	}
+
+	CU_ASSERT_EQUAL_FATAL(data_len, 0);
+}
+
+static void
 blockdev_write(struct io_target *target, char *tx_buf,
 	       uint64_t offset, int data_len, int iov_len)
 {
@@ -282,6 +335,25 @@ blockdev_write(struct io_target *target, char *tx_buf,
 	g_completion_success = false;
 
 	execute_spdk_function(__blockdev_write, &req);
+}
+
+static void
+_blockdev_compare_and_write(struct io_target *target, char *cmp_buf, char *write_buf,
+			    uint64_t offset, int data_len, int iov_len)
+{
+	struct bdevio_request req;
+
+	req.target = target;
+	req.buf = cmp_buf;
+	req.fused_buf = write_buf;
+	req.data_len = data_len;
+	req.offset = offset;
+	sgl_chop_buffer(&req, iov_len);
+	sgl_chop_fused_buffer(&req, iov_len);
+
+	g_completion_success = false;
+
+	execute_spdk_function(__blockdev_compare_and_write, &req);
 }
 
 static void
@@ -351,6 +423,18 @@ blockdev_write_read_data_match(char *rx_buf, char *tx_buf, int data_length)
 	return rc;
 }
 
+static bool
+blockdev_io_valid_blocks(struct spdk_bdev *bdev, uint64_t data_length)
+{
+	if (data_length < spdk_bdev_get_block_size(bdev) ||
+	    data_length % spdk_bdev_get_block_size(bdev) ||
+	    data_length / spdk_bdev_get_block_size(bdev) > spdk_bdev_get_num_blocks(bdev)) {
+		return false;
+	}
+
+	return true;
+}
+
 static void
 blockdev_write_read(uint32_t data_length, uint32_t iov_len, int pattern, uint64_t offset,
 		    int expected_rc, bool write_zeroes)
@@ -362,8 +446,7 @@ blockdev_write_read(uint32_t data_length, uint32_t iov_len, int pattern, uint64_
 
 	target = g_current_io_target;
 
-	if (data_length < spdk_bdev_get_block_size(target->bdev) ||
-	    data_length / spdk_bdev_get_block_size(target->bdev) > spdk_bdev_get_num_blocks(target->bdev)) {
+	if (!blockdev_io_valid_blocks(target->bdev, data_length)) {
 		return;
 	}
 
@@ -399,6 +482,42 @@ blockdev_write_read(uint32_t data_length, uint32_t iov_len, int pattern, uint64_
 		 * from each blockdev */
 		CU_ASSERT_EQUAL(rc, 0);
 	}
+}
+
+static void
+blockdev_compare_and_write(uint32_t data_length, uint32_t iov_len, uint64_t offset)
+{
+	struct io_target *target;
+	char	*tx_buf = NULL;
+	char	*write_buf = NULL;
+	char	*rx_buf = NULL;
+	int	rc;
+
+	target = g_current_io_target;
+
+	if (!blockdev_io_valid_blocks(target->bdev, data_length)) {
+		return;
+	}
+
+	initialize_buffer(&tx_buf, 0xAA, data_length);
+	initialize_buffer(&rx_buf, 0, data_length);
+	initialize_buffer(&write_buf, 0xBB, data_length);
+
+	blockdev_write(target, tx_buf, offset, data_length, iov_len);
+	CU_ASSERT_EQUAL(g_completion_success, true);
+
+	_blockdev_compare_and_write(target, tx_buf, write_buf, offset, data_length, iov_len);
+	CU_ASSERT_EQUAL(g_completion_success, true);
+
+	_blockdev_compare_and_write(target, tx_buf, write_buf, offset, data_length, iov_len);
+	CU_ASSERT_EQUAL(g_completion_success, false);
+
+	blockdev_read(target, rx_buf, offset, data_length, iov_len);
+	CU_ASSERT_EQUAL(g_completion_success, true);
+	rc = blockdev_write_read_data_match(rx_buf, write_buf, data_length);
+	/* Assert the write by comparing it with values read
+	 * from each blockdev */
+	CU_ASSERT_EQUAL(rc, 0);
 }
 
 static void
@@ -529,6 +648,20 @@ blockdev_writev_readv_4k(void)
 	expected_rc = 0;
 
 	blockdev_write_read(data_length, iov_len, pattern, offset, expected_rc, 0);
+}
+
+static void
+blockdev_comparev_and_writev(void)
+{
+	uint32_t data_length, iov_len;
+	uint64_t offset;
+
+	data_length = 1;
+	iov_len = 1;
+	CU_ASSERT_TRUE(data_length < BUFFER_SIZE);
+	offset = 0;
+
+	blockdev_compare_and_write(data_length, iov_len, offset);
 }
 
 static void
@@ -992,7 +1125,7 @@ __stop_init_thread(void *arg)
 	g_num_failures = 0;
 
 	bdevio_cleanup_targets();
-	if (g_wait_for_tests) {
+	if (g_wait_for_tests && !g_shutdown) {
 		/* Do not stop the app yet, wait for another RPC */
 		rpc_perform_tests_cb(num_failures, request);
 		return;
@@ -1072,6 +1205,7 @@ __setup_ut_on_single_target(struct io_target *target)
 			       blockdev_writev_readv_size_gt_128k) == NULL
 		|| CU_add_test(suite, "blockdev writev readv size > 128k in two iovs",
 			       blockdev_writev_readv_size_gt_128k_two_iov) == NULL
+		|| CU_add_test(suite, "blockdev comparev and writev", blockdev_comparev_and_writev) == NULL
 		|| CU_add_test(suite, "blockdev nvme passthru rw",
 			       blockdev_test_nvme_passthru_rw) == NULL
 		|| CU_add_test(suite, "blockdev nvme passthru vendor specific",
@@ -1131,48 +1265,33 @@ __construct_targets(void *arg)
 static void
 test_main(void *arg1)
 {
-	struct spdk_cpuset tmpmask = {}, *appmask;
-	uint32_t cpu, init_cpu;
+	struct spdk_cpuset tmpmask = {};
+	uint32_t i;
 
 	pthread_mutex_init(&g_test_mutex, NULL);
 	pthread_cond_init(&g_test_cond, NULL);
 
-	appmask = spdk_app_get_core_mask();
-
-	if (spdk_cpuset_count(appmask) < 3) {
+	/* This test runs specifically on at least three cores.
+	 * g_thread_init is the app_thread on main core from event framework.
+	 * Next two are only for the tests and should always be on separate CPU cores. */
+	if (spdk_env_get_core_count() < 3) {
 		spdk_app_stop(-1);
 		return;
 	}
 
-	init_cpu = spdk_env_get_current_core();
-	g_thread_init = spdk_get_thread();
-
-	for (cpu = 0; cpu < SPDK_ENV_LCORE_ID_ANY; cpu++) {
-		if (cpu != init_cpu && spdk_cpuset_get_cpu(appmask, cpu)) {
-			spdk_cpuset_zero(&tmpmask);
-			spdk_cpuset_set_cpu(&tmpmask, cpu, true);
+	SPDK_ENV_FOREACH_CORE(i) {
+		if (i == spdk_env_get_current_core()) {
+			g_thread_init = spdk_get_thread();
+			continue;
+		}
+		spdk_cpuset_zero(&tmpmask);
+		spdk_cpuset_set_cpu(&tmpmask, i, true);
+		if (g_thread_ut == NULL) {
 			g_thread_ut = spdk_thread_create("ut_thread", &tmpmask);
-			break;
-		}
-	}
-
-	if (cpu == SPDK_ENV_LCORE_ID_ANY) {
-		spdk_app_stop(-1);
-		return;
-	}
-
-	for (cpu++; cpu < SPDK_ENV_LCORE_ID_ANY; cpu++) {
-		if (cpu != init_cpu && spdk_cpuset_get_cpu(appmask, cpu)) {
-			spdk_cpuset_zero(&tmpmask);
-			spdk_cpuset_set_cpu(&tmpmask, cpu, true);
+		} else if (g_thread_io == NULL) {
 			g_thread_io = spdk_thread_create("io_thread", &tmpmask);
-			break;
 		}
-	}
 
-	if (cpu == SPDK_ENV_LCORE_ID_ANY) {
-		spdk_app_stop(-1);
-		return;
 	}
 
 	if (g_wait_for_tests) {
@@ -1284,15 +1403,23 @@ invalid:
 }
 SPDK_RPC_REGISTER("perform_tests", rpc_perform_tests, SPDK_RPC_RUNTIME)
 
+static void
+spdk_bdevio_shutdown_cb(void)
+{
+	g_shutdown = true;
+	spdk_thread_send_msg(g_thread_init, __stop_init_thread, NULL);
+}
+
 int
 main(int argc, char **argv)
 {
 	int			rc;
 	struct spdk_app_opts	opts = {};
 
-	spdk_app_opts_init(&opts);
+	spdk_app_opts_init(&opts, sizeof(opts));
 	opts.name = "bdevio";
 	opts.reactor_mask = "0x7";
+	opts.shutdown_cb = spdk_bdevio_shutdown_cb;
 
 	if ((rc = spdk_app_parse_args(argc, argv, &opts, "w", NULL,
 				      bdevio_parse_arg, bdevio_usage)) !=

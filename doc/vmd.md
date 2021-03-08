@@ -47,18 +47,18 @@ $ 5d:05.5 RAID bus controller: Intel Corporation Device 201d (rev 04)
 $ d7:05.5 RAID bus controller: Intel Corporation Device 201d (rev 04)
 ```
 
-Run setup.sh script with VMD devices set in PCI_WHITELIST.
+Run setup.sh script with VMD devices set in PCI_ALLOWED.
 
 Example:
 ```
-$ PCI_WHITELIST="0000:5d:05.5 0000:d7:05.5" scripts/setup.sh
+$ PCI_ALLOWED="0000:5d:05.5 0000:d7:05.5" scripts/setup.sh
 ```
 
 Check for available devices behind the VMD with spdk_lspci.
 
 Example:
 ```
-$ ./app/spdk_lspci/spdk_lspci
+$ ./build/bin/spdk_lspci
 
  5d0505:01:00.0 (8086 a54) (NVMe disk behind VMD)
  5d0505:03:00.0 (8086 a54) (NVMe disk behind VMD)
@@ -79,12 +79,6 @@ $ ./scripts/rpc.py bdev_nvme_attach_controller -b NVMe1 -t PCIe -a 5d0505:01:00.
 
 When application framework is used, VMD section needs to be added to the configuration file:
 
-Text config:
-```
-[VMD]
-  Enable True
-```
-
 JSON config:
 ```
 {
@@ -100,7 +94,7 @@ JSON config:
 
 or use RPC call before framework starts e.g.
 ```
-$ ./app/spdk_tgt/spdk_tgt --wait_for_rpc
+$ ./build/bin/spdk_tgt --wait_for_rpc
 $ ./scripts/rpc.py enable_vmd
 $ ./scripts/rpc.py framework_start_init
 ```

@@ -91,11 +91,9 @@ typedef void (*spdk_sighandler_t)(int signal);
 struct spdk_app_opts {
     // zhou: user defined App name.
 	const char *name;
-
     // zhou: "-c", deprecated, SPDK APP were configured using a configuration file.
-	const char *config_file;
 	const char *json_config_file;
-
+	bool json_config_ignore_errors;
     // zhou: "-r", RPC listen address
 	const char *rpc_addr; /* Can be UNIX domain socket path or IP address + TCP port */
     // zhou: "-m", application CPU mask
@@ -110,13 +108,13 @@ struct spdk_app_opts {
 	int shm_id;
 
 	spdk_app_shutdown_cb	shutdown_cb;
-	spdk_sighandler_t	usr1_handler;
+
     // zhou: "-d"
 	bool			enable_coredump;
     // zhou: "-n"
 	int			mem_channel;
     // zhou: "-p"
-	int			master_core;
+	int			main_core;
     // zhou: "-s"
 	int			mem_size;
     // zhou: "-u", disable PCI access,
@@ -141,18 +139,10 @@ struct spdk_app_opts {
 
 	size_t			num_pci_addr;
     // zhou: "-B",
-	struct spdk_pci_addr	*pci_blacklist;
+	struct spdk_pci_addr	*pci_blocked;
     // zhou: "-W",
-	struct spdk_pci_addr	*pci_whitelist;
-
-	/* DEPRECATED. No longer has any effect.
-	 *
-	 * The maximum latency allowed when passing an event
-	 * from one core to another. A value of 0
-	 * means all cores continually poll. This is
-	 * specified in microseconds.
-	 */
-	uint64_t		max_delay_us;
+	struct spdk_pci_addr	*pci_allowed;
+	const char		*iova_mode;
 
     // zhou: "–wait-for-rpc"
 	/* Wait for the associated RPC before initializing subsystems
@@ -171,14 +161,24 @@ struct spdk_app_opts {
 	 */
 	logfunc         *log;
 
+	uint64_t		base_virtaddr;
+
+	/**
+	 * The size of spdk_app_opts according to the caller of this library is used for ABI
+	 * compatibility. The library uses this field to know how many fields in this
+	 * structure are valid. And the library will populate any remaining fields with default values.
+	 * After that, new added fields should be put after opts_size.
+	 */
+	size_t opts_size;
 };
 
 /**
  * Initialize the default value of opts
  *
  * \param opts Data structure where SPDK will initialize the default options.
+ * \param opts_size Must be set to sizeof(struct spdk_app_opts).
  */
-void spdk_app_opts_init(struct spdk_app_opts *opts);
+void spdk_app_opts_init(struct spdk_app_opts *opts, size_t opts_size);
 
 /**
  * Start the framework.
@@ -186,19 +186,30 @@ void spdk_app_opts_init(struct spdk_app_opts *opts);
  * Before calling this function, opts must be initialized by
  * spdk_app_opts_init(). Once started, the framework will call start_fn on
  * an spdk_thread running on the current system thread with the
- * argument provided. This call will block until spdk_app_stop()
- * is called. If an error condition occurs during the intialization
- * code within spdk_app_start(), this function will immediately return
- * before invoking start_fn.
+ * argument provided.
  *
- * \param opts Initialization options used for this application.
+ * If opts->delay_subsystem_init is set
+ * (e.g. through --wait-for-rpc flag in spdk_app_parse_args())
+ * this function will only start a limited RPC server accepting
+ * only a few RPC commands - mostly related to pre-initialization.
+ * With this option, the framework won't be started and start_fn
+ * won't be called until the user sends an `rpc_framework_start_init`
+ * RPC command, which marks the pre-initialization complete and
+ * allows start_fn to be finally called.
+ *
+ * This call will block until spdk_app_stop() is called. If an error
+ * condition occurs during the intialization code within spdk_app_start(),
+ * this function will immediately return before invoking start_fn.
+ *
+ * \param opts_user Initialization options used for this application. It should not be
+ *             NULL. And the opts_size value inside the opts structure should not be zero.
  * \param start_fn Entry point that will execute on an internally created thread
  *                 once the framework has been started.
  * \param ctx Argument passed to function start_fn.
  *
  * \return 0 on success or non-zero on failure.
  */
-int spdk_app_start(struct spdk_app_opts *opts, spdk_msg_fn start_fn,
+int spdk_app_start(struct spdk_app_opts *opts_user, spdk_msg_fn start_fn,
 		   void *ctx);
 
 /**
@@ -228,16 +239,6 @@ void spdk_app_start_shutdown(void);
 void spdk_app_stop(int rc);
 
 /**
- * Generate a configuration file that corresponds to the current running state.
- *
- * \param config_str Values obtained from the generated configuration file.
- * \param name Prefix for name of temporary configuration file to save the current config.
- *
- * \return 0 on success, -1 on failure.
- */
-int spdk_app_get_running_config(char **config_str, char *name);
-
-/**
  * Return the shared memory id for this application.
  *
  * \return shared memory id.
@@ -259,10 +260,10 @@ int spdk_app_parse_core_mask(const char *mask, struct spdk_cpuset *cpumask);
  *
  * \return the bitmask of the active CPU cores.
  */
-struct spdk_cpuset *spdk_app_get_core_mask(void);
+const struct spdk_cpuset *spdk_app_get_core_mask(void);
 
 // zhou: SPDK support CLI options.
-#define SPDK_APP_GETOPT_STRING "c:de:ghi:m:n:p:r:s:uvB:L:RW:"
+#define SPDK_APP_GETOPT_STRING "c:de:ghi:m:n:p:r:s:uvA:B:L:RW:"
 
 enum spdk_app_parse_args_rvals {
 	SPDK_APP_PARSE_ARGS_HELP = 0,

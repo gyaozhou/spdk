@@ -52,8 +52,8 @@
 static void cli_start(void *arg1);
 
 static const char *program_name = "blobcli";
-/* default name for .conf file, any name can be used however with -c switch */
-static const char *program_conf = "blobcli.conf";
+/* default name for .json file, any name can be used however with -j switch */
+static const char *program_conf = "blobcli.json";
 
 /*
  * CMD mode runs one command at a time which can be annoying as the init takes
@@ -179,7 +179,7 @@ usage(struct cli_context_t *cli_context, char *msg)
 
 	if (!cli_context || cli_context->cli_mode == CLI_MODE_CMD) {
 		printf("Version %s\n", SPDK_VERSION_STRING);
-		printf("Usage: %s [-c SPDK config_file] Command\n", program_name);
+		printf("Usage: %s [-j SPDK josn_config_file] Command\n", program_name);
 		printf("\n%s is a command line tool for interacting with blobstore\n",
 		       program_name);
 		printf("on the underlying device specified in the conf file passed\n");
@@ -433,7 +433,6 @@ show_blob(struct cli_context_t *cli_context)
 	struct spdk_xattr_names *names;
 	const void *value;
 	size_t value_len;
-	char data[BUFSIZE];
 	unsigned int i;
 
 	printf("Blob Public Info:\n");
@@ -457,16 +456,14 @@ show_blob(struct cli_context_t *cli_context)
 		spdk_blob_get_xattr_value(cli_context->blob,
 					  spdk_xattr_names_get_name(names, i),
 					  &value, &value_len);
-		if ((value_len + 1) > sizeof(data)) {
+		if (value_len > BUFSIZE) {
 			printf("FYI: adjusting size of xattr due to CLI limits.\n");
-			value_len = sizeof(data) - 1;
+			value_len = BUFSIZE + 1;
 		}
-		memcpy(&data, value, value_len);
-		data[value_len] = '\0';
 		printf("\n(%d) Name:%s\n", i,
 		       spdk_xattr_names_get_name(names, i));
 		printf("(%d) Value:\n", i);
-		spdk_log_dump(stdout, "", value, value_len);
+		spdk_log_dump(stdout, "", value, value_len - 1);
 	}
 
 	/*
@@ -860,25 +857,26 @@ load_bs_cb(void *arg1, struct spdk_blob_store *bs, int bserrno)
 	}
 }
 
+static void
+base_bdev_event_cb(enum spdk_bdev_event_type type, struct spdk_bdev *bdev,
+		   void *event_ctx)
+{
+	printf("Unsupported bdev event: type %d\n", type);
+}
+
 /*
  * Load the blobstore.
  */
 static void
 load_bs(struct cli_context_t *cli_context)
 {
-	struct spdk_bdev *bdev = NULL;
 	struct spdk_bs_dev *bs_dev = NULL;
+	int rc;
 
-	bdev = spdk_bdev_get_by_name(cli_context->bdev_name);
-	if (bdev == NULL) {
-		printf("Could not find a bdev\n");
-		spdk_app_stop(-1);
-		return;
-	}
-
-	bs_dev = spdk_bdev_create_bs_dev(bdev, NULL, NULL);
-	if (bs_dev == NULL) {
-		printf("Could not create blob bdev!!\n");
+	rc = spdk_bdev_create_bs_dev_ext(cli_context->bdev_name, base_bdev_event_cb,
+					 NULL, &bs_dev);
+	if (rc != 0) {
+		printf("Could not create blob bdev, %s!!\n", spdk_strerror(-rc));
 		spdk_app_stop(-1);
 		return;
 	}
@@ -942,20 +940,14 @@ bs_init_cb(void *cb_arg, struct spdk_blob_store *bs,
 static void
 init_bs(struct cli_context_t *cli_context)
 {
-	struct spdk_bdev *bdev = NULL;
+	int rc;
 
-	bdev = spdk_bdev_get_by_name(cli_context->bdev_name);
-	if (bdev == NULL) {
-		printf("Could not find a bdev\n");
-		spdk_app_stop(-1);
-		return;
-	}
-	printf("Init blobstore using bdev Product Name: %s\n",
-	       spdk_bdev_get_product_name(bdev));
+	printf("Init blobstore using bdev Name: %s\n", cli_context->bdev_name);
 
-	cli_context->bs_dev = spdk_bdev_create_bs_dev(bdev, NULL, NULL);
-	if (cli_context->bs_dev == NULL) {
-		printf("Could not create blob bdev!!\n");
+	rc = spdk_bdev_create_bs_dev_ext(cli_context->bdev_name, base_bdev_event_cb, NULL,
+					 &cli_context->bs_dev);
+	if (rc != 0) {
+		printf("Could not create blob bdev, %s!!\n", spdk_strerror(-rc));
 		spdk_app_stop(-1);
 		return;
 	}
@@ -1014,20 +1006,14 @@ bsdump_print_xattr(FILE *fp, const char *bstype, const char *name, const void *v
 static void
 dump_bs(struct cli_context_t *cli_context)
 {
-	struct spdk_bdev *bdev = NULL;
+	int rc;
 
-	bdev = spdk_bdev_get_by_name(cli_context->bdev_name);
-	if (bdev == NULL) {
-		printf("Could not find a bdev\n");
-		spdk_app_stop(-1);
-		return;
-	}
-	printf("Init blobstore using bdev Product Name: %s\n",
-	       spdk_bdev_get_product_name(bdev));
+	printf("Init blobstore using bdev Name: %s\n", cli_context->bdev_name);
 
-	cli_context->bs_dev = spdk_bdev_create_bs_dev(bdev, NULL, NULL);
-	if (cli_context->bs_dev == NULL) {
-		printf("Could not create blob bdev!!\n");
+	rc = spdk_bdev_create_bs_dev_ext(cli_context->bdev_name, base_bdev_event_cb, NULL,
+					 &cli_context->bs_dev);
+	if (rc != 0) {
+		printf("Could not create blob bdev, %s!!\n", spdk_strerror(-rc));
 		spdk_app_stop(-1);
 		return;
 	}
@@ -1045,7 +1031,7 @@ cmd_parser(int argc, char **argv, struct cli_context_t *cli_context)
 	int cmd_chosen = 0;
 	char resp;
 
-	while ((op = getopt(argc, argv, "b:c:d:f:hil:m:n:p:r:s:DST:Xx:")) != -1) {
+	while ((op = getopt(argc, argv, "b:d:f:hij:l:m:n:p:r:s:DST:Xx:")) != -1) {
 		switch (op) {
 		case 'b':
 			if (strcmp(cli_context->bdev_name, "") == 0) {
@@ -1053,13 +1039,6 @@ cmd_parser(int argc, char **argv, struct cli_context_t *cli_context)
 			} else {
 				printf("Current setting for -b is: %s\n", cli_context->bdev_name);
 				usage(cli_context, "ERROR: -b option can only be set once.\n");
-			}
-			break;
-		case 'c':
-			if (cli_context->app_started == false) {
-				cli_context->config_file = optarg;
-			} else {
-				usage(cli_context, "ERROR: -c option not valid during shell mode.\n");
 			}
 			break;
 		case 'D':
@@ -1107,6 +1086,13 @@ cmd_parser(int argc, char **argv, struct cli_context_t *cli_context)
 			} else {
 				cmd_chosen++;
 				cli_context->action = CLI_INIT_BS;
+			}
+			break;
+		case 'j':
+			if (cli_context->app_started == false) {
+				cli_context->config_file = optarg;
+			} else {
+				usage(cli_context, "ERROR: -j option not valid during shell mode.\n");
 			}
 			break;
 		case 'r':
@@ -1536,8 +1522,8 @@ main(int argc, char **argv)
 	/* if the config file doesn't exist, tell them how to make one */
 	if (access(cli_context->config_file, F_OK) == -1) {
 		printf("Error: No config file found.\n");
-		printf("To create a config file named 'blobcli.conf' for your NVMe device:\n");
-		printf("   <path to spdk>/scripts/gen_nvme.sh > blobcli.conf\n");
+		printf("To create a config file named 'blobcli.json' for your NVMe device:\n");
+		printf("   <path to spdk>/scripts/gen_nvme.sh --json-with-subsystems > blobcli.json\n");
 		printf("and then re-run the cli tool.\n");
 		exit(-1);
 	}
@@ -1556,9 +1542,9 @@ main(int argc, char **argv)
 	}
 
 	/* Set default values in opts struct along with name and conf file. */
-	spdk_app_opts_init(&opts);
+	spdk_app_opts_init(&opts, sizeof(opts));
 	opts.name = "blobcli";
-	opts.config_file = cli_context->config_file;
+	opts.json_config_file = cli_context->config_file;
 
 	cli_context->app_started = true;
 	rc = spdk_app_start(&opts, cli_start, cli_context);

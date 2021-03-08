@@ -47,6 +47,47 @@ static struct nvme_driver _g_nvme_driver = {
 
 static struct nvme_request *g_request = NULL;
 
+DEFINE_STUB_V(nvme_io_msg_ctrlr_detach, (struct spdk_nvme_ctrlr *ctrlr));
+
+DEFINE_STUB_V(nvme_ctrlr_destruct_async,
+	      (struct spdk_nvme_ctrlr *ctrlr, struct nvme_ctrlr_detach_ctx *ctx));
+
+DEFINE_STUB(nvme_ctrlr_destruct_poll_async,
+	    int,
+	    (struct spdk_nvme_ctrlr *ctrlr, struct nvme_ctrlr_detach_ctx *ctx),
+	    0);
+
+DEFINE_STUB(spdk_nvme_poll_group_process_completions,
+	    int64_t,
+	    (struct spdk_nvme_poll_group *group, uint32_t completions_per_qpair,
+	     spdk_nvme_disconnected_qpair_cb disconnected_qpair_cb),
+	    0);
+
+DEFINE_STUB(spdk_nvme_qpair_process_completions,
+	    int32_t,
+	    (struct spdk_nvme_qpair *qpair, uint32_t max_completions),
+	    0);
+
+DEFINE_STUB(spdk_nvme_ctrlr_get_regs_csts,
+	    union spdk_nvme_csts_register,
+	    (struct spdk_nvme_ctrlr *ctrlr),
+	    {});
+
+DEFINE_STUB(nvme_uevent_connect, int, (void), 1);
+
+DEFINE_STUB_V(nvme_ctrlr_fail,
+	      (struct spdk_nvme_ctrlr *ctrlr, bool hotremove));
+
+DEFINE_STUB(nvme_transport_ctrlr_destruct,
+	    int,
+	    (struct spdk_nvme_ctrlr *ctrlr),
+	    0);
+
+DEFINE_STUB(nvme_ctrlr_get_current_process,
+	    struct spdk_nvme_ctrlr_process *,
+	    (struct spdk_nvme_ctrlr *ctrlr),
+	    (struct spdk_nvme_ctrlr_process *)(uintptr_t)0x1);
+
 int
 nvme_qpair_submit_request(struct spdk_nvme_qpair *qpair, struct nvme_request *req)
 {
@@ -85,7 +126,7 @@ spdk_nvme_ctrlr_get_default_ctrlr_opts(struct spdk_nvme_ctrlr_opts *opts, size_t
 }
 
 bool
-spdk_nvme_transport_available(enum spdk_nvme_transport_type trtype)
+spdk_nvme_transport_available_by_name(const char *transport_name)
 {
 	return true;
 }
@@ -622,41 +663,23 @@ int main(int argc, char **argv)
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	if (CU_initialize_registry() != CUE_SUCCESS) {
-		return CU_get_error();
-	}
+	CU_set_error_action(CUEA_ABORT);
+	CU_initialize_registry();
 
 	suite = CU_add_suite("nvme_ns_cmd", NULL, NULL);
-	if (suite == NULL) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
 
-	if (
-		CU_add_test(suite, "nvme_ns_ocssd_cmd_vector_reset", test_nvme_ocssd_ns_cmd_vector_reset) == NULL
-		|| CU_add_test(suite, "nvme_ocssd_ns_cmd_vector_reset_single_entry",
-			       test_nvme_ocssd_ns_cmd_vector_reset_single_entry) == NULL
-		|| CU_add_test(suite, "nvme_ocssd_ns_cmd_vector_read_with_md",
-			       test_nvme_ocssd_ns_cmd_vector_read_with_md) == NULL
-		|| CU_add_test(suite, "nvme_ocssd_ns_cmd_vector_read_with_md_single_entry",
-			       test_nvme_ocssd_ns_cmd_vector_read_with_md_single_entry) == NULL
-		|| CU_add_test(suite, "nvme_ocssd_ns_cmd_vector_read", test_nvme_ocssd_ns_cmd_vector_read) == NULL
-		|| CU_add_test(suite, "nvme_ocssd_ns_cmd_vector_read_single_entry",
-			       test_nvme_ocssd_ns_cmd_vector_read_single_entry) == NULL
-		|| CU_add_test(suite, "nvme_ocssd_ns_cmd_vector_write_with_md",
-			       test_nvme_ocssd_ns_cmd_vector_write_with_md) == NULL
-		|| CU_add_test(suite, "nvme_ocssd_ns_cmd_vector_write_with_md_single_entry",
-			       test_nvme_ocssd_ns_cmd_vector_write_with_md_single_entry) == NULL
-		|| CU_add_test(suite, "nvme_ocssd_ns_cmd_vector_write", test_nvme_ocssd_ns_cmd_vector_write) == NULL
-		|| CU_add_test(suite, "nvme_ocssd_ns_cmd_vector_write_single_entry",
-			       test_nvme_ocssd_ns_cmd_vector_write_single_entry) == NULL
-		|| CU_add_test(suite, "nvme_ocssd_ns_cmd_vector_copy", test_nvme_ocssd_ns_cmd_vector_copy) == NULL
-		|| CU_add_test(suite, "nvme_ocssd_ns_cmd_vector_copy_single_entry",
-			       test_nvme_ocssd_ns_cmd_vector_copy_single_entry) == NULL
-	) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
+	CU_ADD_TEST(suite, test_nvme_ocssd_ns_cmd_vector_reset);
+	CU_ADD_TEST(suite, test_nvme_ocssd_ns_cmd_vector_reset_single_entry);
+	CU_ADD_TEST(suite, test_nvme_ocssd_ns_cmd_vector_read_with_md);
+	CU_ADD_TEST(suite, test_nvme_ocssd_ns_cmd_vector_read_with_md_single_entry);
+	CU_ADD_TEST(suite, test_nvme_ocssd_ns_cmd_vector_read);
+	CU_ADD_TEST(suite, test_nvme_ocssd_ns_cmd_vector_read_single_entry);
+	CU_ADD_TEST(suite, test_nvme_ocssd_ns_cmd_vector_write_with_md);
+	CU_ADD_TEST(suite, test_nvme_ocssd_ns_cmd_vector_write_with_md_single_entry);
+	CU_ADD_TEST(suite, test_nvme_ocssd_ns_cmd_vector_write);
+	CU_ADD_TEST(suite, test_nvme_ocssd_ns_cmd_vector_write_single_entry);
+	CU_ADD_TEST(suite, test_nvme_ocssd_ns_cmd_vector_copy);
+	CU_ADD_TEST(suite, test_nvme_ocssd_ns_cmd_vector_copy_single_entry);
 
 	g_spdk_nvme_driver = &_g_nvme_driver;
 

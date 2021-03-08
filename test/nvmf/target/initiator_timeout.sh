@@ -11,7 +11,7 @@ MALLOC_BLOCK_SIZE=512
 rpc_py="$rootdir/scripts/rpc.py"
 
 nvmftestinit
-nvmfappstart "-m 0xF"
+nvmfappstart -m 0xF
 
 trap 'process_shm --id $NVMF_APP_SHM_ID; killprocess $nvmfpid; nvmftestfini $1; exit 1' SIGINT SIGTERM EXIT
 
@@ -21,13 +21,13 @@ $rpc_py bdev_malloc_create $MALLOC_BDEV_SIZE $MALLOC_BLOCK_SIZE -b Malloc0
 $rpc_py bdev_delay_create -b Malloc0 -d Delay0 -r 30 -t 30 -w 30 -n 30
 
 $rpc_py nvmf_create_transport $NVMF_TRANSPORT_OPTS -u 8192
-$rpc_py nvmf_create_subsystem nqn.2016-06.io.spdk:cnode1 -a -s SPDK00000000000001
+$rpc_py nvmf_create_subsystem nqn.2016-06.io.spdk:cnode1 -a -s $NVMF_SERIAL
 $rpc_py nvmf_subsystem_add_ns nqn.2016-06.io.spdk:cnode1 Delay0
 $rpc_py nvmf_subsystem_add_listener nqn.2016-06.io.spdk:cnode1 -t $TEST_TRANSPORT -a $NVMF_FIRST_TARGET_IP -s $NVMF_PORT
 
 nvme connect -t $TEST_TRANSPORT -n "nqn.2016-06.io.spdk:cnode1" -a "$NVMF_FIRST_TARGET_IP" -s "$NVMF_PORT"
 
-waitforblk "nvme0n1"
+waitforserial "$NVMF_SERIAL"
 
 # Once our timed out I/O complete, we will still have 10 sec of I/O.
 $rootdir/scripts/fio.py -p nvmf -i 4096 -d 1 -t write -r 60 -v &
@@ -55,11 +55,11 @@ wait $fio_pid || fio_status=$?
 nvme disconnect -n "nqn.2016-06.io.spdk:cnode1" || true
 
 if [ $fio_status -eq 0 ]; then
-        echo "nvmf hotplug test: fio successful as expected"
+	echo "nvmf hotplug test: fio successful as expected"
 else
-        echo "nvmf hotplug test: fio failed, expected success"
-        nvmftestfini
-        exit 1
+	echo "nvmf hotplug test: fio failed, expected success"
+	nvmftestfini
+	exit 1
 fi
 
 $rpc_py nvmf_delete_subsystem nqn.2016-06.io.spdk:cnode1

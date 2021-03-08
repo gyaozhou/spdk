@@ -56,7 +56,7 @@ static void
 fuse_run_cb(void *cb_arg, int fserrno)
 {
 	if (fserrno) {
-		printf("Failed to mount filesystem on bdev %s to path %s: %s",
+		printf("Failed to mount filesystem on bdev %s to path %s: %s\n",
 		       g_bdev_name, g_mountpoint, spdk_strerror(fserrno));
 
 		spdk_app_stop(0);
@@ -69,7 +69,7 @@ fuse_run_cb(void *cb_arg, int fserrno)
 static void
 spdk_fuse_run(void *arg1)
 {
-	printf("Mounting filesystem on bdev %s to path %s...",
+	printf("Mounting filesystem on bdev %s to path %s...\n",
 	       g_bdev_name, g_mountpoint);
 	fflush(stdout);
 
@@ -92,9 +92,9 @@ int main(int argc, char **argv)
 		exit(1);
 	}
 
-	spdk_app_opts_init(&opts);
+	spdk_app_opts_init(&opts, sizeof(opts));
 	opts.name = "spdk_fuse";
-	opts.config_file = argv[1];
+	opts.json_config_file = argv[1];
 	opts.reactor_mask = "0x3";
 	opts.shutdown_cb = spdk_fuse_shutdown;
 
@@ -104,6 +104,8 @@ int main(int argc, char **argv)
 	/* TODO: mount blobfs with extra FUSE options. */
 	g_fuse_argc = argc - 2;
 	g_fuse_argv = &argv[2];
+
+	spdk_fs_set_cache_size(512);
 
 	rc = spdk_app_start(&opts, spdk_fuse_run, NULL);
 	spdk_app_fini();

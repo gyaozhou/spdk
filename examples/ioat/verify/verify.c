@@ -57,7 +57,7 @@ struct ioat_device {
 	TAILQ_ENTRY(ioat_device) tailq;
 };
 
-static TAILQ_HEAD(, ioat_device) g_devices;
+static TAILQ_HEAD(, ioat_device) g_devices = TAILQ_HEAD_INITIALIZER(g_devices);
 static struct ioat_device *g_next_device;
 
 static struct user_config g_user_config;
@@ -227,8 +227,6 @@ attach_cb(void *cb_ctx, struct spdk_pci_device *pci_dev, struct spdk_ioat_chan *
 static int
 ioat_init(void)
 {
-	TAILQ_INIT(&g_devices);
-
 	if (spdk_ioat_probe(NULL, probe_cb, attach_cb) != 0) {
 		fprintf(stderr, "ioat_probe() failed\n");
 		return 1;
@@ -307,7 +305,9 @@ submit_xfers(struct thread_entry *thread_entry, uint64_t queue_depth)
 	while (queue_depth-- > 0) {
 		struct ioat_task *ioat_task = NULL;
 		ioat_task = spdk_mempool_get(thread_entry->task_pool);
+		assert(ioat_task != NULL);
 		ioat_task->buffer = spdk_mempool_get(thread_entry->data_pool);
+		assert(ioat_task->buffer != NULL);
 
 		ioat_task->type = IOAT_COPY_TYPE;
 		if (spdk_ioat_get_dma_capabilities(thread_entry->chan) & SPDK_IOAT_ENGINE_FILL_SUPPORTED) {
@@ -328,7 +328,7 @@ work_fn(void *arg)
 	struct thread_entry *t = (struct thread_entry *)arg;
 
 	if (!t->chan) {
-		return 0;
+		return 1;
 	}
 
 	t->lcore_id = spdk_env_get_current_core();
@@ -369,7 +369,7 @@ init_src_buffer(void)
 	g_src = spdk_dma_zmalloc(SRC_BUFFER_SIZE, 512, NULL);
 	if (g_src == NULL) {
 		fprintf(stderr, "Allocate src buffer failed\n");
-		return -1;
+		return 1;
 	}
 
 	for (i = 0; i < SRC_BUFFER_SIZE / 4; i++) {
@@ -428,7 +428,8 @@ dump_result(struct thread_entry *threads, uint32_t num_threads)
 		total_failed += t->xfer_failed;
 		total_failed += t->fill_failed;
 		if (total_completed || total_failed)
-			printf("lcore = %d, copy success = %ld, copy failed = %ld, fill success = %ld, fill failed = %ld\n",
+			printf("lcore = %d, copy success = %" PRIu64 ", copy failed = %" PRIu64 ", fill success = %" PRIu64
+			       ", fill failed = %" PRIu64 "\n",
 			       t->lcore_id, t->xfer_completed, t->xfer_failed, t->fill_completed, t->fill_failed);
 	}
 	return total_failed ? 1 : 0;
@@ -504,7 +505,10 @@ main(int argc, char **argv)
 	}
 
 	threads[current_core].chan = get_next_chan();
-	work_fn(&threads[current_core]);
+	if (work_fn(&threads[current_core]) != 0) {
+		rc = 1;
+		goto cleanup;
+	}
 
 	spdk_env_thread_wait_all();
 	rc = dump_result(threads, num_threads);

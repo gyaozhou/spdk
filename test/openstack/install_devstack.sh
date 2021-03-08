@@ -3,9 +3,11 @@
 testdir=$(readlink -f $(dirname $0))
 rootdir=$(readlink -f $testdir/../..)
 
-function usage()
-{
-	[[ -n $2 ]] && ( echo "$2"; echo ""; )
+function usage() {
+	[[ -n $2 ]] && (
+		echo "$2"
+		echo ""
+	)
 	echo "Devstack installation script"
 	echo "Usage: $(basename $1) [OPTIONS]"
 	echo "--branch=BRANCH    Define which version of openstack"
@@ -15,18 +17,17 @@ function usage()
 	exit 0
 }
 
-
 branch="master"
 while getopts 'h-:' optchar; do
 	case "$optchar" in
 		-)
-		case "$OPTARG" in
-			help) usage $0 ;;
-			branch=*) branch="${OPTARG#*=}" ;;
-		esac
-		;;
-	h) usage $0 ;;
-	*) usage $0 "Invalid argument '$OPTARG'"
+			case "$OPTARG" in
+				help) usage $0 ;;
+				branch=*) branch="${OPTARG#*=}" ;;
+			esac
+			;;
+		h) usage $0 ;;
+		*) usage $0 "Invalid argument '$OPTARG'" ;;
 	esac
 done
 
@@ -44,6 +45,7 @@ fi
 cp $rootdir/scripts/vagrant/local.conf /opt/stack/devstack/local.conf
 
 cd /opt/stack/devstack
+sudo sed -i "s|http://download.cirros-cloud.net|https://download.cirros-cloud.net|g" stackrc
 su -c "./stack.sh" -s /bin/bash stack
 source openrc admin admin
 openstack volume type create SPDK --public

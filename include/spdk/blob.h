@@ -196,6 +196,8 @@ struct spdk_bs_dev {
 		      uint64_t lba, uint32_t lba_count,
 		      struct spdk_bs_dev_cb_args *cb_args);
 
+	struct spdk_bdev *(*get_base_bdev)(struct spdk_bs_dev *dev);
+
 	uint64_t	blockcnt;
 	uint32_t	blocklen; /* In bytes */
 };
@@ -234,14 +236,23 @@ struct spdk_bs_opts {
 
 	/** Argument passed to iter_cb_fn for each blob. */
 	void *iter_cb_arg;
+
+	/**
+	 * The size of spdk_bs_opts according to the caller of this library is used for ABI
+	 * compatibility. The library uses this field to know how many fields in this
+	 * structure are valid. And the library will populate any remaining fields with default values.
+	 * After that, new added fields should be put in the end of the struct.
+	 */
+	size_t opts_size;
 };
 
 /**
  * Initialize a spdk_bs_opts structure to the default blobstore option values.
  *
  * \param opts The spdk_bs_opts structure to be initialized.
+ * \param opts_size The opts_size must be the size of spdk_bs_opts structure.
  */
-void spdk_bs_opts_init(struct spdk_bs_opts *opts);
+void spdk_bs_opts_init(struct spdk_bs_opts *opts, size_t opts_size);
 
 /**
  * Load a blobstore from the given device.
@@ -421,15 +432,28 @@ struct spdk_blob_xattr_opts {
 struct spdk_blob_opts {
 	uint64_t  num_clusters;
 	bool	thin_provision;
+	enum blob_clear_method clear_method;
 	struct spdk_blob_xattr_opts xattrs;
+
+	/** Enable separate extent pages in metadata */
+	bool use_extent_table;
+
+	/**
+	 * The size of spdk_blob_opts according to the caller of this library is used for ABI
+	 * compatibility. The library uses this field to know how many fields in this
+	 * structure are valid. And the library will populate any remaining fields with default values.
+	 * New added fields should be put at the end of the struct.
+	 */
+	size_t opts_size;
 };
 
 /**
  * Initialize a spdk_blob_opts structure to the default blob option values.
  *
  * \param opts spdk_blob_opts structure to initialize.
+ * \param opts_size It must be the size of spdk_blob_opts structure.
  */
-void spdk_blob_opts_init(struct spdk_blob_opts *opts);
+void spdk_blob_opts_init(struct spdk_blob_opts *opts, size_t opts_size);
 
 /**
  * Create a new blob with options on the given blobstore. The new blob id will
@@ -601,14 +625,23 @@ void spdk_bs_blob_decouple_parent(struct spdk_blob_store *bs, struct spdk_io_cha
 
 struct spdk_blob_open_opts {
 	enum blob_clear_method  clear_method;
+
+	/**
+	 * The size of spdk_blob_open_opts according to the caller of this library is used for ABI
+	 * compatibility. The library uses this field to know how many fields in this
+	 * structure are valid. And the library will populate any remaining fields with default values.
+	 * New added fields should be put at the end of the struct.
+	 */
+	size_t opts_size;
 };
 
 /**
  * Initialize a spdk_blob_open_opts structure to the default blob option values.
  *
  * \param opts spdk_blob_open_opts structure to initialize.
+ * \param opts_size It mus be the size of struct spdk_blob_open_opts.
  */
-void spdk_blob_open_opts_init(struct spdk_blob_open_opts *opts);
+void spdk_blob_open_opts_init(struct spdk_blob_open_opts *opts, size_t opts_size);
 
 /**
  * Open a blob from the given blobstore.

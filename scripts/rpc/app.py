@@ -37,6 +37,30 @@ def framework_get_reactors(client):
     return client.call('framework_get_reactors')
 
 
+def framework_set_scheduler(client, name, period=None):
+    """Select threads scheduler that will be activated and its period.
+
+    Args:
+        name: Name of a scheduler
+        period: Scheduler period in microseconds
+    Returns:
+        True or False
+    """
+    params = {'name': name}
+    if period is not None:
+        params['period'] = period
+    return client.call('framework_set_scheduler', params)
+
+
+def framework_get_scheduler(client):
+    """Query currently set scheduler.
+
+    Returns:
+        Name, period (in microseconds) of currently set scheduler and name of curently set governor.
+    """
+    return client.call('framework_get_scheduler')
+
+
 def thread_get_stats(client):
     """Query threads statistics.
 
@@ -44,3 +68,48 @@ def thread_get_stats(client):
         Current threads statistics.
     """
     return client.call('thread_get_stats')
+
+
+def thread_set_cpumask(client, id, cpumask):
+    """Set the cpumask of the thread whose ID matches to the specified value.
+
+    Args:
+        id: thread ID
+        cpumask: cpumask for this thread
+
+    Returns:
+        True or False
+    """
+    params = {'id': id, 'cpumask': cpumask}
+    return client.call('thread_set_cpumask', params)
+
+
+def log_enable_timestamps(client, enabled):
+    """Enable or disable timestamps.
+
+    Args:
+        value: on or off
+
+    Returns:
+        None
+    """
+    params = {'enabled': enabled}
+    return client.call('log_enable_timestamps', params)
+
+
+def thread_get_pollers(client):
+    """Query current pollers.
+
+    Returns:
+        Current pollers.
+    """
+    return client.call('thread_get_pollers')
+
+
+def thread_get_io_channels(client):
+    """Query current IO channels.
+
+    Returns:
+        Current IO channels.
+    """
+    return client.call('thread_get_io_channels')

@@ -343,7 +343,7 @@ nvme_fuzz_cpl_cb(void *cb_arg, const struct spdk_nvme_cpl *cpl)
 
 	qp->completed_cmd_counter++;
 	if (spdk_unlikely(cpl->status.sc == SPDK_NVME_SC_SUCCESS)) {
-		fprintf(stderr, "The following %s command (command num %lu) completed successfully\n",
+		fprintf(stderr, "The following %s command (command num %" PRIu64 ") completed successfully\n",
 			qp->is_admin ? "Admin" : "I/O", qp->completed_cmd_counter);
 		qp->successful_completed_cmd_counter++;
 		json_dump_nvme_cmd(&ctx->cmd);
@@ -354,7 +354,7 @@ nvme_fuzz_cpl_cb(void *cb_arg, const struct spdk_nvme_cpl *cpl)
 			__sync_bool_compare_and_swap(&g_successful_io_opcodes[ctx->cmd.opc], false, true);
 		}
 	} else if (g_verbose_mode == true) {
-		fprintf(stderr, "The following %s command (command num %lu) failed as expected.\n",
+		fprintf(stderr, "The following %s command (command num %" PRIu64 ") failed as expected.\n",
 			qp->is_admin ? "Admin" : "I/O", qp->completed_cmd_counter);
 		json_dump_nvme_cmd(&ctx->cmd);
 	}
@@ -456,7 +456,9 @@ submit_qp_cmds(struct nvme_fuzz_ns *ns, struct nvme_fuzz_qp *qp)
 	while ((qp->submitted_cmd_counter < g_cmd_array_size || g_cmd_array_size == 0) &&
 	       !TAILQ_EMPTY(&qp->free_ctx_objs)) {
 		ctx = TAILQ_FIRST(&qp->free_ctx_objs);
-		prep_nvme_cmd(ns, qp, ctx);
+		do {
+			prep_nvme_cmd(ns, qp, ctx);
+		} while (qp->is_admin && ctx->cmd.opc == SPDK_NVME_OPC_ASYNC_EVENT_REQUEST);
 
 		TAILQ_REMOVE(&qp->free_ctx_objs, ctx, link);
 		TAILQ_INSERT_HEAD(&qp->outstanding_ctx_objs, ctx, link);
@@ -510,10 +512,12 @@ free_namespaces(void)
 	struct nvme_fuzz_ns *ns, *tmp;
 
 	TAILQ_FOREACH_SAFE(ns, &g_ns_list, tailq, tmp) {
-		printf("NS: %p I/O qp, Total commands completed: %lu, total successful commands: %lu, random_seed: %u\n",
+		printf("NS: %p I/O qp, Total commands completed: %" PRIu64 ", total successful commands: %" PRIu64
+		       ", random_seed: %u\n",
 		       ns->ns,
 		       ns->io_qp.completed_cmd_counter, ns->io_qp.successful_completed_cmd_counter, ns->io_qp.random_seed);
-		printf("NS: %p admin qp, Total commands completed: %lu, total successful commands: %lu, random_seed: %u\n",
+		printf("NS: %p admin qp, Total commands completed: %" PRIu64 ", total successful commands: %" PRIu64
+		       ", random_seed: %u\n",
 		       ns->ns,
 		       ns->a_qp.completed_cmd_counter, ns->a_qp.successful_completed_cmd_counter, ns->a_qp.random_seed);
 
@@ -535,11 +539,16 @@ static void
 free_controllers(void)
 {
 	struct nvme_fuzz_ctrlr *ctrlr, *tmp;
+	struct spdk_nvme_detach_ctx *detach_ctx = NULL;
 
 	TAILQ_FOREACH_SAFE(ctrlr, &g_ctrlr_list, tailq, tmp) {
 		TAILQ_REMOVE(&g_ctrlr_list, ctrlr, tailq);
-		spdk_nvme_detach(ctrlr->ctrlr);
+		spdk_nvme_detach_async(ctrlr->ctrlr, &detach_ctx);
 		free(ctrlr);
+	}
+
+	while (detach_ctx && spdk_nvme_detach_poll_async(detach_ctx) == -EAGAIN) {
+		;
 	}
 }
 
@@ -687,7 +696,7 @@ start_ns_poller(void *ctx)
 {
 	struct nvme_fuzz_ns *ns_entry = ctx;
 
-	ns_entry->req_poller = spdk_poller_register(poll_for_completions, ns_entry, 0);
+	ns_entry->req_poller = SPDK_POLLER_REGISTER(poll_for_completions, ns_entry, 0);
 	submit_ns_cmds(ns_entry);
 }
 
@@ -765,7 +774,7 @@ begin_fuzz(void *ctx)
 		__sync_add_and_fetch(&g_num_active_threads, 1);
 	}
 
-	g_app_completion_poller = spdk_poller_register(check_app_completion, NULL, 1000000);
+	g_app_completion_poller = SPDK_POLLER_REGISTER(check_app_completion, NULL, 1000000);
 	return;
 out:
 	printf("Shutting down the fuzz application\n");
@@ -899,7 +908,7 @@ main(int argc, char **argv)
 	struct spdk_app_opts opts = {};
 	int rc;
 
-	spdk_app_opts_init(&opts);
+	spdk_app_opts_init(&opts, sizeof(opts));
 	opts.name = "nvme_fuzz";
 
 	g_runtime = DEFAULT_RUNTIME;

@@ -38,11 +38,11 @@
 #include "spdk/util.h"
 
 static void
-spdk_rpc_scsi_get_devices(struct spdk_jsonrpc_request *request,
-			  const struct spdk_json_val *params)
+rpc_scsi_get_devices(struct spdk_jsonrpc_request *request,
+		     const struct spdk_json_val *params)
 {
 	struct spdk_json_write_ctx *w;
-	struct spdk_scsi_dev *devs = spdk_scsi_dev_get_list();
+	struct spdk_scsi_dev *devs = scsi_dev_get_list();
 	int i;
 
 	if (params != NULL) {
@@ -73,5 +73,5 @@ spdk_rpc_scsi_get_devices(struct spdk_jsonrpc_request *request,
 
 	spdk_jsonrpc_end_result(request, w);
 }
-SPDK_RPC_REGISTER("scsi_get_devices", spdk_rpc_scsi_get_devices, SPDK_RPC_RUNTIME)
+SPDK_RPC_REGISTER("scsi_get_devices", rpc_scsi_get_devices, SPDK_RPC_RUNTIME)
 SPDK_RPC_REGISTER_ALIAS_DEPRECATED(scsi_get_devices, get_scsi_devices)

@@ -47,6 +47,11 @@
 extern "C" {
 #endif
 
+enum spdk_thread_poller_rc {
+	SPDK_POLLER_IDLE,
+	SPDK_POLLER_BUSY,
+};
+
 /**
  * A stackless, lightweight thread.
  */
@@ -67,6 +72,31 @@ struct spdk_io_channel_iter;
  * \param thread The new spdk_thread.
  */
 typedef int (*spdk_new_thread_fn)(struct spdk_thread *thread);
+
+/**
+ * SPDK thread operation type.
+ */
+enum spdk_thread_op {
+	/* Called each time a new thread is created. The implementor of this operation
+	 * should frequently call spdk_thread_poll() on the thread provided.
+	 */
+	SPDK_THREAD_OP_NEW,
+
+	/* Called when SPDK thread needs to be rescheduled. (e.g., when cpumask of the
+	 * SPDK thread is updated.
+	 */
+	SPDK_THREAD_OP_RESCHED,
+};
+
+/**
+ * Function to be called for SPDK thread operation.
+ */
+typedef int (*spdk_thread_op_fn)(struct spdk_thread *thread, enum spdk_thread_op op);
+
+/**
+ * Function to check whether the SPDK thread operation is supported.
+ */
+typedef bool (*spdk_thread_op_supported_fn)(enum spdk_thread_op op);
 
 /**
  * A function that will be called on the target thread.
@@ -201,6 +231,23 @@ struct spdk_io_channel {
 int spdk_thread_lib_init(spdk_new_thread_fn new_thread_fn, size_t ctx_sz);
 
 /**
+ * Initialize the threading library. Must be called once prior to allocating any threads
+ *
+ * Both thread_op_fn and thread_op_type_supported_fn have to be specified or not
+ * specified together.
+ *
+ * \param thread_op_fn Called for SPDK thread operation.
+ * \param thread_op_supported_fn Called to check whether the SPDK thread operation is supported.
+ * \param ctx_sz For each thread allocated, for use by the thread scheduler. A pointer
+ * to this region may be obtained by calling spdk_thread_get_ctx().
+ *
+ * \return 0 on success. Negated errno on failure.
+ */
+int spdk_thread_lib_init_ext(spdk_thread_op_fn thread_op_fn,
+			     spdk_thread_op_supported_fn thread_op_supported_fn,
+			     size_t ctx_sz);
+
+/**
  * Release all resources associated with this library.
  */
 void spdk_thread_lib_fini(void);
@@ -227,16 +274,30 @@ struct spdk_thread *spdk_thread_create(const char *name, struct spdk_cpuset *cpu
 void spdk_set_thread(struct spdk_thread *thread);
 
 /**
- * Mark the thread as exited, failing all future spdk_thread_poll() calls. May
- * only be called within an spdk poller or message.
+ * Mark the thread as exited, failing all future spdk_thread_send_msg(),
+ * spdk_poller_register(), and spdk_get_io_channel() calls. May only be called
+ * within an spdk poller or message.
  *
+ * All I/O channel references associated with the thread must be released
+ * using spdk_put_io_channel(), and all active pollers associated with the thread
+ * should be unregistered using spdk_poller_unregister(), prior to calling
+ * this function. This function will complete these processing. The completion can
+ * be queried by spdk_thread_is_exited().
  *
  * \param thread The thread to destroy.
  *
- * All I/O channel references associated with the thread must be released using
- * spdk_put_io_channel() prior to calling this function.
+ * \return always 0. (return value was deprecated but keep it for ABI compatibility.)
  */
-void spdk_thread_exit(struct spdk_thread *thread);
+int spdk_thread_exit(struct spdk_thread *thread);
+
+/**
+ * Returns whether the thread is marked as exited.
+ *
+ * \param thread The thread to query.
+ *
+ * \return true if marked as exited, false otherwise.
+ */
+bool spdk_thread_is_exited(struct spdk_thread *thread);
 
 /**
  * Destroy a thread, releasing all of its resources. May only be called
@@ -267,6 +328,18 @@ void *spdk_thread_get_ctx(struct spdk_thread *thread);
 struct spdk_cpuset *spdk_thread_get_cpumask(struct spdk_thread *thread);
 
 /**
+ * Set the current thread's cpumask to the specified value. The thread may be
+ * rescheduled to one of the CPUs specified in the cpumask.
+ *
+ * This API requires SPDK thread operation supports SPDK_THREAD_OP_RESCHED.
+ *
+ * \param cpumask The new cpumask for the thread.
+ *
+ * \return 0 on success, negated errno otherwise.
+ */
+int spdk_thread_set_cpumask(struct spdk_cpuset *cpumask);
+
+/**
  * Return the thread object associated with the context handle previously
  * obtained by calling spdk_thread_get_ctx().
  *
@@ -285,7 +358,10 @@ struct spdk_thread *spdk_thread_get_from_ctx(void *ctx);
  * \param max_msgs The maximum number of messages that will be processed.
  *                 Use 0 to process the default number of messages (8).
  * \param now The current time, in ticks. Optional. If 0 is passed, this
- *            function may call spdk_get_ticks() to get the current time.
+ *            function will call spdk_get_ticks() to get the current time.
+ *            The current time is used as start time and this function
+ *            will call spdk_get_ticks() at its end to know end time to
+ *            measure run time of this function.
  *
  * \return 1 if work was done. 0 if no work was done.
  */
@@ -357,6 +433,23 @@ struct spdk_thread *spdk_get_thread(void);
  */
 const char *spdk_thread_get_name(const struct spdk_thread *thread);
 
+/**
+ * Get a thread's ID.
+ *
+ * \param thread Thread to query.
+ *
+ * \return the ID of the thread..
+ */
+uint64_t spdk_thread_get_id(const struct spdk_thread *thread);
+
+/**
+ * Get the thread by the ID.
+ *
+ * \param id ID of the thread.
+ * \return Thread whose ID matches or NULL otherwise.
+ */
+struct spdk_thread *spdk_thread_get_by_id(uint64_t id);
+
 struct spdk_thread_stats {
 	uint64_t busy_tsc;
 	uint64_t idle_tsc;
@@ -370,6 +463,15 @@ struct spdk_thread_stats {
  * \param stats User's thread_stats structure.
  */
 int spdk_thread_get_stats(struct spdk_thread_stats *stats);
+
+/**
+ * Return the TSC value from the end of the last time this thread was polled.
+ *
+ * \param thread Thread to query.
+ *
+ * \return TSC value from the end of the last time this thread was polled.
+ */
+uint64_t spdk_thread_get_last_tsc(struct spdk_thread *thread);
 
 /**
  * Send a message to the given thread.
@@ -386,6 +488,23 @@ int spdk_thread_get_stats(struct spdk_thread_stats *stats);
  * \return -EIO if the message could not be sent to the destination thread
  */
 int spdk_thread_send_msg(const struct spdk_thread *thread, spdk_msg_fn fn, void *ctx);
+
+/**
+ * Send a message to the given thread. Only one critical message can be outstanding at the same
+ * time. It's intended to use this function in any cases that might interrupt the execution of the
+ * application, such as signal handlers.
+ *
+ * The message will be sent asynchronously - i.e. spdk_thread_send_critical_msg will always return
+ * prior to `fn` being called.
+ *
+ * \param thread The target thread.
+ * \param fn This function will be called on the given thread.
+ *
+ * \return 0 on success
+ * \return -EIO if the message could not be sent to the destination thread, due to an already
+ * outstanding critical message
+ */
+int spdk_thread_send_critical_msg(struct spdk_thread *thread, spdk_msg_fn fn);
 
 /**
  * Send a message to each thread, serially.
@@ -416,6 +535,33 @@ void spdk_for_each_thread(spdk_msg_fn fn, void *ctx, spdk_msg_fn cpl);
 struct spdk_poller *spdk_poller_register(spdk_poller_fn fn,
 		void *arg,
 		uint64_t period_microseconds);
+
+/**
+ * Register a poller on the current thread with arbitrary name.
+ *
+ * The poller can be unregistered by calling spdk_poller_unregister().
+ *
+ * \param fn This function will be called every `period_microseconds`.
+ * \param arg Argument passed to fn.
+ * \param period_microseconds How often to call `fn`. If 0, call `fn` as often
+ *  as possible.
+ * \param name Human readable name for the poller. Pointer of the poller function
+ * name is set if NULL.
+ *
+ * \return a pointer to the poller registered on the current thread on success
+ * or NULL on failure.
+ */
+struct spdk_poller *spdk_poller_register_named(spdk_poller_fn fn,
+		void *arg,
+		uint64_t period_microseconds,
+		const char *name);
+
+/*
+ * \brief Register a poller on the current thread with setting its name
+ * to the string of the poller function name.
+ */
+#define SPDK_POLLER_REGISTER(fn, arg, period_microseconds)	\
+	spdk_poller_register_named(fn, arg, period_microseconds, #fn)
 
 /**
  * Unregister a poller on the current thread.
@@ -495,7 +641,7 @@ struct spdk_io_channel *spdk_get_io_channel(void *io_device);
 /**
  * Release a reference to an I/O channel. This happens asynchronously.
  *
- * Actual release will happen on the same thread that called spdk_get_io_channel()
+ * This must be called on the same thread that called spdk_get_io_channel()
  * for the specified I/O channel. If this releases the last reference to the
  * I/O channel, The destroy_cb function specified in spdk_io_device_register()
  * will be invoked to release any associated resources.
@@ -589,6 +735,93 @@ void *spdk_io_channel_iter_get_ctx(struct spdk_io_channel_iter *i);
  * \param status Status for the I/O channel iterator.
  */
 void spdk_for_each_channel_continue(struct spdk_io_channel_iter *i, int status);
+
+/**
+ * A representative for registered interrupt file descriptor.
+ */
+struct spdk_interrupt;
+
+/**
+ * Callback function registered for interrupt file descriptor.
+ *
+ * \param ctx Context passed as arg to spdk_interrupt_register().
+ *
+ * \return 0 to indicate that interrupt took place but no events were found;
+ * positive to indicate that interrupt took place and some events were processed;
+ * negative if no event information is provided.
+ */
+typedef int (*spdk_interrupt_fn)(void *ctx);
+
+/**
+ * Register an spdk_interrupt on the current thread. The provided function
+ * will be called any time the associated file descriptor is written to.
+ *
+ * \param efd File descriptor of the spdk_interrupt.
+ * \param fn Called each time there are events in spdk_interrupt.
+ * \param arg Function argument for fn.
+ * \param name Human readable name for the spdk_interrupt. Pointer of the spdk_interrupt
+ * name is set if NULL.
+ *
+ * \return a pointer to the spdk_interrupt registered on the current thread on success
+ * or NULL on failure.
+ */
+struct spdk_interrupt *spdk_interrupt_register(int efd, spdk_interrupt_fn fn,
+		void *arg, const char *name);
+
+/*
+ * \brief Register an spdk_interrupt on the current thread with setting its name
+ * to the string of the spdk_interrupt function name.
+ */
+#define SPDK_INTERRUPT_REGISTER(efd, fn, arg)	\
+	spdk_interrupt_register(efd, fn, arg, #fn)
+
+/**
+ * Unregister an spdk_interrupt on the current thread.
+ *
+ * \param pintr The spdk_interrupt to unregister.
+ */
+void spdk_interrupt_unregister(struct spdk_interrupt **pintr);
+
+enum spdk_interrupt_event_types {
+	SPDK_INTERRUPT_EVENT_IN = 0x001,
+	SPDK_INTERRUPT_EVENT_OUT = 0x004,
+	SPDK_INTERRUPT_EVENT_ET = 1u << 31
+};
+
+/**
+ * Change the event_types associated with the spdk_interrupt on the current thread.
+ *
+ * \param intr The pointer to the spdk_interrupt registered on the current thread.
+ * \param event_types New event_types for the spdk_interrupt.
+ *
+ * \return 0 if success or -errno if failed.
+ */
+int spdk_interrupt_set_event_types(struct spdk_interrupt *intr,
+				   enum spdk_interrupt_event_types event_types);
+
+/**
+ * Return a file descriptor that becomes ready whenever any of the registered
+ * interrupt file descriptors are ready
+ *
+ * \param thread The thread to get.
+ *
+ * \return The spdk_interrupt fd of thread itself.
+ */
+int spdk_thread_get_interrupt_fd(struct spdk_thread *thread);
+
+/**
+ * Set SPDK run as event driven mode
+ *
+ * \return 0 on success or -errno on failure
+ */
+int spdk_interrupt_mode_enable(void);
+
+/**
+ * Reports whether interrupt mode is set.
+ *
+ * \return True if interrupt mode is set, false otherwise.
+ */
+bool spdk_interrupt_mode_is_enabled(void);
 
 #ifdef __cplusplus
 }

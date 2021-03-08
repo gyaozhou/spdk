@@ -20,7 +20,6 @@ bdev_dict["bdev_virtio_attach_controller"] = []
 vhost_dict = OrderedDict()
 vhost_dict["vhost_create_scsi_controller"] = []
 vhost_dict["vhost_create_blk_controller"] = []
-vhost_dict["vhost_create_nvme_controller"] = []
 
 iscsi_dict = OrderedDict()
 iscsi_dict["iscsi_set_options"] = []
@@ -36,13 +35,8 @@ nvmf_dict["subsystems"] = []
 
 # dictionary with new config that will be written to new json config file
 subsystem = {
-    "copy": None,
-    "interface": None,
-    "net_framework": None,
     "bdev": bdev_dict,
-    "scsi": [],
     "nvmf": nvmf_dict,
-    "nbd": [],
     "vhost": vhost_dict,
     "iscsi": iscsi_dict
 }
@@ -60,35 +54,34 @@ no_yes_map = {"no": False, "No": False, "Yes": True, "yes": True}
 
 
 def generate_new_json_config():
-    json_subsystem = [
-        {'subsystem': "copy", 'config': None},
-        {"subsystem": "interface", "config": None},
-        {"subsystem": "net_framework", "config": None},
-        {"subsystem": "bdev", "config": []},
-        {"subsystem": "scsi", "config": None},
-        {"subsystem": "nvmf", "config": []},
-        {"subsystem": "nbd", "config": []},
-        {"subsystem": "vhost", "config": []},
-        {"subsystem": "iscsi", "config": []}
-    ]
+    json_subsystems = []
+
+    bdev_subsystem = {"subsystem": "bdev", "config": []}
     for method in subsystem['bdev']:
         for item in subsystem['bdev'][method]:
-            json_subsystem[3]['config'].append(item)
-    for item in subsystem['scsi']:
-        if json_subsystem[4]['config'] is None:
-            json_subsystem[4]['config'] = []
-        json_subsystem[4]['config'].append(item)
+            bdev_subsystem['config'].append(item)
+    if bdev_subsystem['config']:
+        json_subsystems.append(bdev_subsystem)
+    nvmf_subsystem = {"subsystem": "nvmf", "config": []}
     for method in subsystem['nvmf']:
         for item in subsystem['nvmf'][method]:
-            json_subsystem[5]['config'].append(item)
+            nvmf_subsystem['config'].append(item)
+    if nvmf_subsystem['config']:
+        json_subsystems.append(nvmf_subsystem)
+    vhost_subsystem = {"subsystem": "vhost", "config": []}
     for method in subsystem['vhost']:
         for item in subsystem['vhost'][method]:
-            json_subsystem[7]['config'].append(item)
+            vhost_subsystem['config'].append(item)
+    if vhost_subsystem['config']:
+        json_subsystems.append(vhost_subsystem)
+    iscsi_subsystem = {"subsystem": "iscsi", "config": []}
     for method in subsystem['iscsi']:
         for item in subsystem['iscsi'][method]:
-            json_subsystem[8]['config'].append(item)
+            iscsi_subsystem['config'].append(item)
+    if iscsi_subsystem['config']:
+        json_subsystems.append(iscsi_subsystem)
 
-    return {"subsystems": json_subsystem}
+    return {"subsystems": json_subsystems}
 
 
 section_to_subsystem = {
@@ -438,34 +431,6 @@ def get_vhost_blk_json(config, section):
             "params": to_json_params(params)}]
 
 
-def get_vhost_nvme_json(config, section):
-    params = [
-        ["Name", "ctrlr", str, ""],
-        ["NumberOfQueues", "io_queues", int, -1],
-        ["Cpumask", "cpumask", "hex", 0x1],
-        ["Namespace", "bdev_name", list, []]
-    ]
-    for option in config.options(section):
-        values = config.get(section, option).split("\n")
-        for value in values:
-            set_param(params, option, value)
-    vhost_nvme_json = []
-    vhost_nvme_json.append({
-        "params": to_json_params(params[:3]),
-        "method": "vhost_create_nvme_controller"
-    })
-    for namespace in params[3][3]:
-        vhost_nvme_json.append({
-            "params": {
-                "ctrlr": params[0][3],
-                "bdev_name": namespace,
-            },
-            "method": "vhost_nvme_controller_add_ns"
-        })
-
-    return vhost_nvme_json
-
-
 def get_virtio_user_json(config, section):
     params = [
         ["Path", "traddr", str, ""],
@@ -656,16 +621,12 @@ if __name__ == "__main__":
     except Exception as e:
         print("Exception while parsing config: %s" % e)
         exit(1)
-    # Add missing sections to generate default configuration
-    for section in ['Nvme', 'Nvmf', 'Bdev', 'iSCSI']:
-        if section not in config.sections():
-            config.add_section(section)
 
     for section in config.sections():
         match = re.match(r'(Bdev|Nvme|Malloc|VirtioUser\d+|Split|Pmem|AIO|'
                          r'iSCSI|PortalGroup\d+|InitiatorGroup\d+|'
                          r'TargetNode\d+|Nvmf|Subsystem\d+|VhostScsi\d+|'
-                         r'VhostBlk\d+|VhostNvme\d+)', section)
+                         r'VhostBlk\d+)', section)
         if match:
             match_section = ''.join(letter for letter in match.group(0)
                                     if not letter.isdigit())
@@ -689,8 +650,6 @@ if __name__ == "__main__":
                 items = get_vhost_scsi_json(config, section)
             elif match_section == "VhostBlk":
                 items = get_vhost_blk_json(config, section)
-            elif match_section == "VhostNvme":
-                items = get_vhost_nvme_json(config, section)
             elif match_section == "VirtioUser":
                 items = get_virtio_user_json(config, section)
             elif match_section == "iSCSI":
@@ -704,8 +663,6 @@ if __name__ == "__main__":
             for item in items:
                 if match_section == "VhostScsi":
                     section_to_subsystem[match_section]["vhost_create_scsi_controller"].append(item)
-                elif match_section == "VhostNvme":
-                    section_to_subsystem[match_section]["vhost_create_nvme_controller"].append(item)
                 elif match_section == "Subsystem":
                     section_to_subsystem[match_section]["subsystems"].append(item)
                 else:

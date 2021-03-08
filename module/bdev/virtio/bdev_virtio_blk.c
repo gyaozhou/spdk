@@ -34,7 +34,6 @@
 #include "spdk/stdinc.h"
 
 #include "spdk/bdev.h"
-#include "spdk/conf.h"
 #include "spdk/endian.h"
 #include "spdk/env.h"
 #include "spdk/thread.h"
@@ -44,10 +43,12 @@
 
 #include "spdk_internal/assert.h"
 #include "spdk/bdev_module.h"
-#include "spdk_internal/log.h"
+#include "spdk/log.h"
 #include "spdk_internal/virtio.h"
+#include "spdk_internal/vhost_user.h"
 
 #include <linux/virtio_blk.h>
+#include <linux/virtio_ids.h>
 
 #include "bdev_virtio.h"
 
@@ -79,7 +80,9 @@ struct bdev_virtio_blk_io_channel {
 
 /* Features desired/implemented by this driver. */
 #define VIRTIO_BLK_DEV_SUPPORTED_FEATURES		\
-	(1ULL << VIRTIO_BLK_F_BLK_SIZE		|	\
+	(1ULL << VIRTIO_BLK_F_SIZE_MAX		|	\
+	 1ULL << VIRTIO_BLK_F_SEG_MAX		|	\
+	 1ULL << VIRTIO_BLK_F_BLK_SIZE		|	\
 	 1ULL << VIRTIO_BLK_F_TOPOLOGY		|	\
 	 1ULL << VIRTIO_BLK_F_MQ		|	\
 	 1ULL << VIRTIO_BLK_F_RO		|	\
@@ -389,7 +392,7 @@ bdev_virtio_blk_ch_create_cb(void *io_device, void *ctx_buf)
 	ch->vdev = vdev;
 	ch->vq = vq;
 
-	ch->poller = spdk_poller_register(bdev_virtio_poll, ch, 0);
+	ch->poller = SPDK_POLLER_REGISTER(bdev_virtio_poll, ch, 0);
 	return 0;
 }
 
@@ -411,7 +414,7 @@ virtio_blk_dev_init(struct virtio_blk_dev *bvdev, uint16_t max_queues)
 	struct virtio_dev *vdev = &bvdev->vdev;
 	struct spdk_bdev *bdev = &bvdev->bdev;
 	uint64_t capacity, num_blocks;
-	uint32_t block_size;
+	uint32_t block_size, size_max, seg_max;
 	uint16_t host_max_queues;
 	int rc;
 
@@ -462,6 +465,39 @@ virtio_blk_dev_init(struct virtio_blk_dev *bvdev, uint16_t max_queues)
 		}
 	} else {
 		host_max_queues = 1;
+	}
+
+	if (virtio_dev_has_feature(vdev, VIRTIO_BLK_F_SIZE_MAX)) {
+		rc = virtio_dev_read_dev_config(vdev, offsetof(struct virtio_blk_config, size_max),
+						&size_max, sizeof(size_max));
+		if (rc) {
+			SPDK_ERRLOG("%s: config read failed: %s\n", vdev->name, spdk_strerror(-rc));
+			return rc;
+		}
+
+		if (spdk_unlikely(size_max < block_size)) {
+			SPDK_WARNLOG("%s: minimum segment size is set to block size %u forcefully.\n",
+				     vdev->name, block_size);
+			size_max = block_size;
+		}
+
+		bdev->max_segment_size = size_max;
+	}
+
+	if (virtio_dev_has_feature(vdev, VIRTIO_BLK_F_SEG_MAX)) {
+		rc = virtio_dev_read_dev_config(vdev, offsetof(struct virtio_blk_config, seg_max),
+						&seg_max, sizeof(seg_max));
+		if (rc) {
+			SPDK_ERRLOG("%s: config read failed: %s\n", vdev->name, spdk_strerror(-rc));
+			return rc;
+		}
+
+		if (spdk_unlikely(seg_max == 0)) {
+			SPDK_ERRLOG("%s: virtio blk SEG_MAX can't be 0\n", vdev->name);
+			return -EINVAL;
+		}
+
+		bdev->max_num_segments = seg_max;
 	}
 
 	if (virtio_dev_has_feature(vdev, VIRTIO_BLK_F_RO)) {
@@ -553,9 +589,7 @@ virtio_pci_blk_dev_create(const char *name, struct virtio_pci_ctx *pci_ctx)
 
 	rc = virtio_dev_reset(vdev, VIRTIO_BLK_DEV_SUPPORTED_FEATURES);
 	if (rc != 0) {
-		virtio_dev_destruct(vdev);
-		free(bvdev);
-		return NULL;
+		goto fail;
 	}
 
 	/* TODO: add a way to limit usable virtqueues */
@@ -564,9 +598,7 @@ virtio_pci_blk_dev_create(const char *name, struct virtio_pci_ctx *pci_ctx)
 						&num_queues, sizeof(num_queues));
 		if (rc) {
 			SPDK_ERRLOG("%s: config read failed: %s\n", vdev->name, spdk_strerror(-rc));
-			virtio_dev_destruct(vdev);
-			free(bvdev);
-			return NULL;
+			goto fail;
 		}
 	} else {
 		num_queues = 1;
@@ -574,12 +606,16 @@ virtio_pci_blk_dev_create(const char *name, struct virtio_pci_ctx *pci_ctx)
 
 	rc = virtio_blk_dev_init(bvdev, num_queues);
 	if (rc != 0) {
-		virtio_dev_destruct(vdev);
-		free(bvdev);
-		return NULL;
+		goto fail;
 	}
 
 	return bvdev;
+
+fail:
+	vdev->ctx = NULL;
+	virtio_dev_destruct(vdev);
+	free(bvdev);
+	return NULL;
 }
 
 static struct virtio_blk_dev *
@@ -646,7 +682,7 @@ bdev_virtio_pci_blk_dev_create(const char *name, struct spdk_pci_addr *pci_addr)
 	create_ctx.ret = NULL;
 
 	virtio_pci_dev_attach(bdev_virtio_pci_blk_dev_create_cb, &create_ctx,
-			      PCI_DEVICE_ID_VIRTIO_BLK_MODERN, pci_addr);
+			      VIRTIO_ID_BLOCK, pci_addr);
 
 	if (create_ctx.ret == NULL) {
 		return NULL;
@@ -656,80 +692,9 @@ bdev_virtio_pci_blk_dev_create(const char *name, struct spdk_pci_addr *pci_addr)
 }
 
 static int
-virtio_pci_blk_dev_enumerate_cb(struct virtio_pci_ctx *pci_ctx, void *ctx)
-{
-	struct virtio_blk_dev *bvdev;
-
-	bvdev = virtio_pci_blk_dev_create(NULL, pci_ctx);
-	return bvdev == NULL ? -1 : 0;
-}
-
-static int
 bdev_virtio_initialize(void)
 {
-	struct spdk_conf_section *sp;
-	struct virtio_blk_dev *bvdev;
-	char *default_name = NULL;
-	char *path, *type, *name;
-	unsigned vdev_num;
-	int num_queues;
-	bool enable_pci;
-	int rc = 0;
-
-	for (sp = spdk_conf_first_section(NULL); sp != NULL; sp = spdk_conf_next_section(sp)) {
-		if (!spdk_conf_section_match_prefix(sp, "VirtioUser")) {
-			continue;
-		}
-
-		if (sscanf(spdk_conf_section_get_name(sp), "VirtioUser%u", &vdev_num) != 1) {
-			SPDK_ERRLOG("Section '%s' has non-numeric suffix.\n",
-				    spdk_conf_section_get_name(sp));
-			return -1;
-		}
-
-		path = spdk_conf_section_get_val(sp, "Path");
-		if (path == NULL) {
-			SPDK_ERRLOG("VirtioUserBlk%u: missing Path\n", vdev_num);
-			return -1;
-		}
-
-		type = spdk_conf_section_get_val(sp, "Type");
-		if (type == NULL || strcmp(type, "Blk") != 0) {
-			continue;
-		}
-
-		num_queues = spdk_conf_section_get_intval(sp, "Queues");
-		if (num_queues < 1) {
-			num_queues = 1;
-		}
-
-		name = spdk_conf_section_get_val(sp, "Name");
-		if (name == NULL) {
-			default_name = spdk_sprintf_alloc("VirtioBlk%u", vdev_num);
-			name = default_name;
-		}
-
-		bvdev = virtio_user_blk_dev_create(name, path, num_queues, 512);
-		free(default_name);
-		default_name = NULL;
-
-		if (bvdev == NULL) {
-			return -1;
-		}
-	}
-
-	sp = spdk_conf_find_section(NULL, "VirtioPci");
-	if (sp == NULL) {
-		return 0;
-	}
-
-	enable_pci = spdk_conf_section_get_boolval(sp, "Enable", false);
-	if (enable_pci) {
-		rc = virtio_pci_dev_enumerate(virtio_pci_blk_dev_enumerate_cb, NULL,
-					      PCI_DEVICE_ID_VIRTIO_BLK_MODERN);
-	}
-
-	return rc;
+	return 0;
 }
 
 struct spdk_bdev *
@@ -752,4 +717,4 @@ bdev_virtio_blk_get_ctx_size(void)
 	return sizeof(struct virtio_blk_io_ctx);
 }
 
-SPDK_LOG_REGISTER_COMPONENT("virtio_blk", SPDK_LOG_VIRTIO_BLK)
+SPDK_LOG_REGISTER_COMPONENT(virtio_blk)

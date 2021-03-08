@@ -1,5 +1,9 @@
 # Block Device User Guide {#bdev}
 
+# Target Audience {#bdev_ug_targetaudience}
+
+This user guide is intended for software developers who have knowledge of block storage, storage drivers, issuing JSON-RPC commands and storage services such as RAID, compression, crypto, and others.
+
 # Introduction {#bdev_ug_introduction}
 
 The SPDK block device layer, often simply called *bdev*, is a C library
@@ -35,72 +39,12 @@ directly from SPDK application by running `scripts/rpc.py rpc_get_methods`.
 Detailed help for each command can be displayed by adding `-h` flag as a
 command parameter.
 
-# General Purpose RPCs {#bdev_ug_general_rpcs}
+# Configuring Block Device Modules {#bdev_ug_general_rpcs}
 
-## bdev_get_bdevs {#bdev_ug_get_bdevs}
+Block devices can be configured using JSON RPCs. A complete list of available RPC commands
+with detailed information can be found on the @ref jsonrpc_components_bdev page.
 
-List of currently available block devices including detailed information about
-them can be get by using `bdev_get_bdevs` RPC command. User can add optional
-parameter `name` to get details about specified by that name bdev.
-
-Example response
-
-~~~
-{
-  "num_blocks": 32768,
-  "assigned_rate_limits": {
-    "rw_ios_per_sec": 10000,
-    "rw_mbytes_per_sec": 20
-  },
-  "supported_io_types": {
-    "reset": true,
-    "nvme_admin": false,
-    "unmap": true,
-    "read": true,
-    "write_zeroes": true,
-    "write": true,
-    "flush": true,
-    "nvme_io": false
-  },
-  "driver_specific": {},
-  "claimed": false,
-  "block_size": 4096,
-  "product_name": "Malloc disk",
-  "name": "Malloc0"
-}
-~~~
-
-## bdev_set_qos_limit {#bdev_set_qos_limit}
-
-Users can use the `bdev_set_qos_limit` RPC command to enable, adjust, and disable
-rate limits on an existing bdev.  Two types of rate limits are supported:
-IOPS and bandwidth.  The rate limits can be enabled, adjusted, and disabled at any
-time for the specified bdev.  The bdev name is a required parameter for this
-RPC command and at least one of `rw_ios_per_sec` and `rw_mbytes_per_sec` must be
-specified.  When both rate limits are enabled, the first met limit will
-take effect.  The value 0 may be specified to disable the corresponding rate
-limit. Users can run this command with `-h` or `--help` for more information.
-
-## Histograms {#rpc_bdev_histogram}
-
-The `bdev_enable_histogram` RPC command allows to enable or disable gathering
-latency data for specified bdev. Histogram can be downloaded by the user by
-calling `bdev_get_histogram` and parsed using scripts/histogram.py script.
-
-Example command
-
-`rpc.py bdev_enable_histogram Nvme0n1 --enable`
-
-The command will enable gathering data for histogram on Nvme0n1 device.
-
-`rpc.py bdev_get_histogram Nvme0n1 | histogram.py`
-
-The command will download gathered histogram data. The script will parse
-the data and show table containing IO count for latency ranges.
-
-`rpc.py bdev_enable_histogram Nvme0n1 --disable`
-
-The command will disable histogram on Nvme0n1 device.
+# Common Block Device Configuration Examples
 
 # Ceph RBD {#bdev_config_rbd}
 
@@ -118,6 +62,12 @@ This command will create a bdev that represents the 'foo' image from a pool call
 To remove a block device representation use the bdev_rbd_delete command.
 
 `rpc.py bdev_rbd_delete Rbd0`
+
+To resize a bdev use the bdev_rbd_resize command.
+
+`rpc.py bdev_rbd_resize Rbd0 4096`
+
+This command will resize the Rbd0 bdev to 4096 MiB.
 
 # Compression Virtual Bdev Module {#bdev_config_compress}
 
@@ -164,7 +114,7 @@ a value of 1 tells the driver to use QAT and if not available then the creation 
 the vbdev should fail to create or load.  A value of '2' as shown below tells the module
 to use ISAL and if for some reason it is not available, the vbdev should fail to create or load.
 
-`rpc.py set_compress_pmd -p 2`
+`rpc.py compress_set_pmd -p 2`
 
 To remove a compression vbdev, use the following command which will also delete the PMEM
 file.  If the logical volume is deleted the PMEM file will not be removed and the
@@ -189,8 +139,8 @@ time the SPDK virtual bdev module supports cipher only as follows:
 
 - AESN-NI Multi Buffer Crypto Poll Mode Driver: RTE_CRYPTO_CIPHER_AES128_CBC
 - Intel(R) QuickAssist (QAT) Crypto Poll Mode Driver: RTE_CRYPTO_CIPHER_AES128_CBC
-(Note: QAT is functional however is marked as experimental until the hardware has
-been fully integrated with the SPDK CI system.)
+  (Note: QAT is functional however is marked as experimental until the hardware has
+  been fully integrated with the SPDK CI system.)
 
 In order to support using the bdev block offset (LBA) as the initialization vector (IV),
 the crypto module break up all I/O into crypto operations of a size equal to the block
@@ -255,7 +205,7 @@ possibly multiple virtual bdevs.
 ## SPDK GPT partition table {#bdev_ug_gpt}
 
 The SPDK partition type GUID is `7c5222bd-8f5d-4087-9c00-bf9843c7b58c`. Existing SPDK bdevs
-can be exposed as Linux block devices via NBD and then ca be partitioned with
+can be exposed as Linux block devices via NBD and then can be partitioned with
 standard partitioning tools. After partitioning, the bdevs will need to be deleted and
 attached again for the GPT bdev module to see any changes. NBD kernel module must be
 loaded first. To create NBD bdev user should use `nbd_start_disk` RPC command.
@@ -330,9 +280,9 @@ Example commands
 
 This command will create `aio0` device from /dev/sda.
 
-`rpc.py bdev_aio_create /tmp/file file 8192`
+`rpc.py bdev_aio_create /tmp/file file 4096`
 
-This command will create `file` device with block size 8192 from /tmp/file.
+This command will create `file` device with block size 4096 from /tmp/file.
 
 To delete an aio bdev use the bdev_aio_delete command.
 
@@ -362,15 +312,21 @@ To remove `Cache1`:
 
 During removal OCF-cache will be stopped and all cached data will be written to the core device.
 
-Note that OCF has a per-device RAM requirement
-of about 56000 + _cache device size_ * 58 / _cache line size_ (in bytes).
-To get more information on OCF
-please visit [OCF documentation](https://open-cas.github.io/).
+Note that OCF has a per-device RAM requirement. More details can be found in the
+[OCF documentation](https://open-cas.github.io/guide_system_requirements.html).
 
 # Malloc bdev {#bdev_config_malloc}
 
 Malloc bdevs are ramdisks. Because of its nature they are volatile. They are created from hugepage memory given to SPDK
 application.
+
+Example command for creating malloc bdev:
+
+`rpc.py bdev_malloc_create -b Malloc0 64 512`
+
+Example command for removing malloc bdev:
+
+`rpc.py bdev_malloc_delete Malloc0`
 
 # Null {#bdev_config_null}
 
@@ -454,7 +410,6 @@ User can get list of available lvol stores using `bdev_lvol_get_lvstores` RPC co
 parameters available).
 
 Example response
-
 ~~~
 {
   "uuid": "330a6ab2-f468-11e7-983e-001e67edf35d",
@@ -485,26 +440,6 @@ Example commands
 `rpc.py bdev_lvol_create lvol1 25 -l lvs`
 
 `rpc.py bdev_lvol_create lvol2 25 -u 330a6ab2-f468-11e7-983e-001e67edf35d`
-
-# RAID {#bdev_ug_raid}
-
-RAID virtual bdev module provides functionality to combine any SPDK bdevs into
-one RAID bdev. Currently SPDK supports only RAID 0. RAID functionality does not
-store on-disk metadata on the member disks, so user must recreate the RAID
-volume when restarting application. User may specify member disks to create RAID
-volume event if they do not exists yet - as the member disks are registered at
-a later time, the RAID module will claim them and will surface the RAID volume
-after all of the member disks are available. It is allowed to use disks of
-different sizes - the smallest disk size will be the amount of space used on
-each member disk.
-
-Example commands
-
-`rpc.py bdev_raid_create -n Raid0 -z 64 -r 0 -b "lvol0 lvol1 lvol2 lvol3"`
-
-`rpc.py bdev_raid_get_bdevs`
-
-`rpc.py bdev_raid_delete Raid0`
 
 # Passthru {#bdev_config_passthru}
 
@@ -554,6 +489,65 @@ Example command
 To remove a block device representation use the bdev_pmem_delete command.
 
 `rpc.py bdev_pmem_delete pmem`
+
+# RAID {#bdev_ug_raid}
+
+RAID virtual bdev module provides functionality to combine any SPDK bdevs into
+one RAID bdev. Currently SPDK supports only RAID 0. RAID functionality does not
+store on-disk metadata on the member disks, so user must recreate the RAID
+volume when restarting application. User may specify member disks to create RAID
+volume event if they do not exists yet - as the member disks are registered at
+a later time, the RAID module will claim them and will surface the RAID volume
+after all of the member disks are available. It is allowed to use disks of
+different sizes - the smallest disk size will be the amount of space used on
+each member disk.
+
+Example commands
+
+`rpc.py bdev_raid_create -n Raid0 -z 64 -r 0 -b "lvol0 lvol1 lvol2 lvol3"`
+
+`rpc.py bdev_raid_get_bdevs`
+
+`rpc.py bdev_raid_delete Raid0`
+
+# Split {#bdev_ug_split}
+
+The split block device module takes an underlying block device and splits it into
+several smaller equal-sized virtual block devices. This serves as an example to create
+more vbdevs on a given base bdev for user testing.
+
+Example commands
+
+To create four split bdevs with base bdev_b0 use the `bdev_split_create` command.
+Each split bdev will be one fourth the size of the base bdev.
+
+`rpc.py bdev_split_create bdev_b0 4`
+
+The `split_size_mb`(-s) parameter restricts the size of each split bdev.
+The total size of all split bdevs must not exceed the base bdev size.
+
+`rpc.py bdev_split_create bdev_b0 4 -s 128`
+
+To remove the split bdevs, use the `bdev_split_delete` command with the base bdev name.
+
+`rpc.py bdev_split_delete bdev_b0`
+
+# Uring {#bdev_ug_uring}
+
+The uring bdev module issues I/O to kernel block devices using the io_uring Linux kernel API. This module requires liburing.
+For more information on io_uring refer to kernel [IO_uring] (https://kernel.dk/io_uring.pdf)
+
+The user needs to configure SPDK to include io_uring support:
+
+`configure --with-uring`
+
+To create a uring bdev with given filename, bdev name and block size use the `bdev_uring_create` RPC.
+
+`rpc.py  bdev_uring_create /path/to/device bdev_u0 512`
+
+To remove a uring bdev use the `bdev_uring_delete` RPC.
+
+`rpc.py bdev_uring_delete bdev_u0`
 
 # Virtio Block {#bdev_config_virtio_blk}
 

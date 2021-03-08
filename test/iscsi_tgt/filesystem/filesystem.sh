@@ -6,9 +6,7 @@ source $rootdir/test/common/autotest_common.sh
 source $rootdir/test/iscsi_tgt/common.sh
 source $rootdir/scripts/common.sh
 
-# $1 = "iso" - triggers isolation mode (setting up required environment).
-# $2 = test type posix or vpp. defaults to posix.
-iscsitestinit $1 $2
+iscsitestinit
 
 rpc_py="$rootdir/scripts/rpc.py"
 # Remove lvol bdevs and stores.
@@ -27,11 +25,11 @@ function remove_backends() {
 
 timing_enter start_iscsi_tgt
 
-$ISCSI_APP -m $ISCSI_TEST_CORE_MASK --wait-for-rpc &
+"${ISCSI_APP[@]}" -m $ISCSI_TEST_CORE_MASK --wait-for-rpc &
 pid=$!
 echo "Process pid: $pid"
 
-trap 'killprocess $pid; iscsitestfini $1 $2; exit 1' SIGINT SIGTERM EXIT
+trap 'killprocess $pid; iscsitestfini; exit 1' SIGINT SIGTERM EXIT
 
 waitforlisten $pid
 $rpc_py iscsi_set_options -o 30 -a 16
@@ -40,7 +38,7 @@ echo "iscsi_tgt is listening. Running tests..."
 
 timing_exit start_iscsi_tgt
 
-bdf=$(iter_pci_class_code 01 08 02 | head -1)
+bdf=$(get_first_nvme_bdf)
 $rpc_py iscsi_create_portal_group $PORTAL_TAG $TARGET_IP:$ISCSI_PORT
 $rpc_py iscsi_create_initiator_group $INITIATOR_TAG $INITIATOR_NAME $NETMASK
 $rpc_py bdev_nvme_attach_controller -b "Nvme0" -t "pcie" -a $bdf
@@ -64,7 +62,7 @@ iscsiadm -m discovery -t sendtargets -p $TARGET_IP:$ISCSI_PORT
 iscsiadm -m node --login -p $TARGET_IP:$ISCSI_PORT
 waitforiscsidevices 1
 
-trap 'iscsicleanup; remove_backends; umount /mnt/device; rm -rf /mnt/device; killprocess $pid; iscsitestfini $1 $2; exit 1' SIGINT SIGTERM EXIT
+trap 'iscsicleanup; remove_backends; umount /mnt/device; rm -rf /mnt/device; killprocess $pid; iscsitestfini; exit 1' SIGINT SIGTERM EXIT
 
 mkdir -p /mnt/device
 
@@ -75,14 +73,10 @@ parted -s /dev/$dev mklabel msdos
 parted -s /dev/$dev mkpart primary '0%' '100%'
 sleep 1
 
-function filesystem_test {
+function filesystem_test() {
 	fstype=$1
 
-	if [ "$fstype" == "ext4" ]; then
-		mkfs.${fstype} -F /dev/${dev}1
-	else
-		mkfs.${fstype} -f /dev/${dev}1
-	fi
+	make_filesystem ${fstype} /dev/${dev}1
 	mount /dev/${dev}1 /mnt/device
 	if [ $RUN_NIGHTLY -eq 1 ]; then
 		fio -filename=/mnt/device/test -direct=1 -iodepth 64 -thread=1 -invalidate=1 -rw=randwrite -ioengine=libaio -bs=4k \
@@ -146,4 +140,4 @@ trap - SIGINT SIGTERM EXIT
 iscsicleanup
 remove_backends
 killprocess $pid
-iscsitestfini $1 $2
+iscsitestfini

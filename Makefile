@@ -2,6 +2,7 @@
 #  BSD LICENSE
 #
 #  Copyright (c) Intel Corporation.
+#  Copyright (c) 2020, Mellanox Corporation.
 #  All rights reserved.
 #
 #  Redistribution and use in source and binary forms, with or without
@@ -39,14 +40,19 @@ include $(SPDK_ROOT_DIR)/mk/spdk.common.mk
 DIRS-y += lib
 DIRS-y += module
 DIRS-$(CONFIG_SHARED) += shared_lib
-DIRS-y += examples app include
-DIRS-$(CONFIG_TESTS) += test
+DIRS-y += app include
+DIRS-$(CONFIG_EXAMPLES) += examples
+DIRS-y += test
 DIRS-$(CONFIG_IPSEC_MB) += ipsecbuild
 DIRS-$(CONFIG_ISAL) += isalbuild
+DIRS-$(CONFIG_VFIO_USER) += vfiouserbuild
 
 .PHONY: all clean $(DIRS-y) include/spdk/config.h mk/config.mk \
 	cc_version cxx_version .libs_only_other .ldflags ldflags install \
 	uninstall
+
+# Workaround for ninja. See dpdkbuild/Makefile
+export MAKE_PID := $(shell echo $$PPID)
 
 ifeq ($(SPDK_ROOT_DIR)/lib/env_dpdk,$(CONFIG_ENV))
 ifeq ($(CURDIR)/dpdk/build,$(CONFIG_DPDK_DIR))
@@ -73,9 +79,20 @@ LIB += isalbuild
 DPDK_DEPS += isalbuild
 endif
 
+ifeq ($(CONFIG_VFIO_USER),y)
+VFIOUSERBUILD = vfiouserbuild
+LIB += vfiouserbuild
+endif
+
 all: mk/cc.mk $(DIRS-y)
 clean: $(DIRS-y)
 	$(Q)rm -f include/spdk/config.h
+	$(Q)rm -rf build/bin
+	$(Q)rm -rf build/fio
+	$(Q)rm -rf build/examples
+	$(Q)rm -rf build/include
+	$(Q)rm -rf build/lib/pkgconfig
+	$(Q)find build/lib ! -name .gitignore -type f -delete
 
 install: all
 	$(Q)echo "Installed to $(DESTDIR)$(CONFIG_PREFIX)"
@@ -87,7 +104,7 @@ ifneq ($(SKIP_DPDK_BUILD),1)
 dpdkbuild: $(DPDK_DEPS)
 endif
 
-lib: $(DPDKBUILD)
+lib: $(DPDKBUILD) $(VFIOUSERBUILD)
 module: lib
 shared_lib: module
 app: $(LIB)
@@ -96,18 +113,23 @@ examples: $(LIB)
 pkgdep:
 	sh ./scripts/pkgdep.sh
 
-$(DIRS-y): include/spdk/config.h
+$(DIRS-y): mk/cc.mk build_dir include/spdk/config.h
 
 mk/cc.mk:
 	$(Q)echo "Please run configure prior to make"
 	false
 
+build_dir: mk/cc.mk
+	$(Q)mkdir -p build/lib/pkgconfig
+	$(Q)mkdir -p build/bin
+	$(Q)mkdir -p build/fio
+	$(Q)mkdir -p build/examples
+	$(Q)mkdir -p build/include/spdk
+
 include/spdk/config.h: mk/config.mk scripts/genconfig.py
-	$(Q)PYCMD=$$(cat PYTHON_COMMAND 2>/dev/null) ; \
-	test -z "$$PYCMD" && PYCMD=python ; \
-	echo "#ifndef SPDK_CONFIG_H" > $@.tmp; \
+	$(Q)echo "#ifndef SPDK_CONFIG_H" > $@.tmp; \
 	echo "#define SPDK_CONFIG_H" >> $@.tmp; \
-	$$PYCMD scripts/genconfig.py $(MAKEFLAGS) >> $@.tmp; \
+	scripts/genconfig.py $(MAKEFLAGS) >> $@.tmp; \
 	echo "#endif /* SPDK_CONFIG_H */" >> $@.tmp; \
 	cmp -s $@.tmp $@ || mv $@.tmp $@ ; \
 	rm -f $@.tmp

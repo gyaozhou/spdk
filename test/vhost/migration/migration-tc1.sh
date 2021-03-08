@@ -1,5 +1,4 @@
-function migration_tc1_clean_vhost_config()
-{
+function migration_tc1_clean_vhost_config() {
 	# Restore trap
 	trap 'error_exit "${FUNCNAME}" "${LINENO}"' INT ERR EXIT
 
@@ -14,8 +13,7 @@ function migration_tc1_clean_vhost_config()
 	unset -v incoming_vm target_vm incoming_vm_ctrlr target_vm_ctrlr rpc
 }
 
-function migration_tc1_configure_vhost()
-{
+function migration_tc1_configure_vhost() {
 	# Those are global intentionally - they will be unset in cleanup handler
 	incoming_vm=0
 	target_vm=1
@@ -36,8 +34,7 @@ function migration_tc1_configure_vhost()
 	$rpc vhost_scsi_controller_add_target $target_vm_ctrlr 0 Malloc0
 }
 
-function migration_tc1_error_handler()
-{
+function migration_tc1_error_handler() {
 	trap - SIGINT ERR EXIT
 	warning "Migration TC1 ERROR HANDLER"
 	print_backtrace
@@ -49,12 +46,13 @@ function migration_tc1_error_handler()
 	warning "Migration TC1 FAILED"
 }
 
-function migration_tc1()
-{
+function migration_tc1() {
 	# Use 2 VMs:
 	# incoming VM - the one we want to migrate
 	# targe VM - the one which will accept migration
 	local job_file="$testdir/migration-tc1.job"
+	local log_file
+	log_file="/root/$(basename ${job_file%%.*}).log"
 
 	# Run vhost
 	vhost_run 0
@@ -74,14 +72,14 @@ function migration_tc1()
 	notice "Starting FIO"
 
 	vm_check_scsi_location $incoming_vm
-	run_fio $fio_bin --job-file="$job_file" --local --vm="${incoming_vm}$(printf ':/dev/%s' $SCSI_DISK)"
+	run_fio $fio_bin --job-file="$job_file" --no-wait-for-fio --local --vm="${incoming_vm}$(printf ':/dev/%s' $SCSI_DISK)"
 
 	# Wait a while to let the FIO time to issue some IO
 	sleep 5
 
 	# Check if fio is still running before migration
 	if ! is_fio_running $incoming_vm; then
-		vm_exec $incoming_vm "cat /root/$(basename ${job_file}).out"
+		vm_exec $incoming_vm "cat $log_file"
 		error "FIO is not running before migration: process crashed or finished too early"
 	fi
 
@@ -90,7 +88,7 @@ function migration_tc1()
 
 	# Check if fio is still running after migration
 	if ! is_fio_running $target_vm; then
-		vm_exec $target_vm "cat /root/$(basename ${job_file}).out"
+		vm_exec $target_vm "cat $log_file"
 		error "FIO is not running after migration: process crashed or finished too early"
 	fi
 
@@ -99,13 +97,13 @@ function migration_tc1()
 	while is_fio_running $target_vm; do
 		sleep 1
 		echo -n "."
-		if (( timeout-- == 0 )); then
+		if ((timeout-- == 0)); then
 			error "timeout while waiting for FIO!"
 		fi
 	done
 
 	notice "Fio result is:"
-	vm_exec $target_vm "cat /root/$(basename ${job_file}).out"
+	vm_exec $target_vm "cat $log_file"
 
 	notice "Migration DONE"
 

@@ -795,13 +795,16 @@ INPUT                  += \
                          misc.md \
                          driver_modules.md \
                          tools.md \
+                         ci_tools.md \
                          performance_reports.md \
 
 # All remaining pages are listed here in alphabetical order by filename.
 INPUT                  += \
                          about.md \
+                         accel_fw.md \
                          applications.md \
                          bdev.md \
+                         bdevperf.md \
                          bdev_module.md \
                          bdev_pg.md \
                          blob.md \
@@ -809,27 +812,33 @@ INPUT                  += \
                          changelog.md \
                          compression.md \
                          concurrency.md \
+                         containers.md \
                          event.md \
                          ftl.md \
                          gdb_macros.md \
                          getting_started.md \
+                         idxd.md \
                          ioat.md \
                          iscsi.md \
                          jsonrpc.md \
                          jsonrpc_proxy.md \
+                         libraries.md \
                          lvol.md \
                          memory.md \
                          notify.md \
                          nvme.md \
-                         nvme-cli.md \
                          nvme_spec.md \
                          nvmf.md \
                          nvmf_tgt_pg.md \
                          nvmf_tracing.md \
                          overview.md \
                          peer_2_peer.md \
+                         pkgconfig.md \
                          porting.md \
+                         scheduler.md \
+                         shfmt.md \
                          spdkcli.md \
+                         spdk_top.md \
                          ssd_internals.md \
                          system_configuration.md \
                          userspace.md \
@@ -837,8 +846,7 @@ INPUT                  += \
                          vhost.md \
                          vhost_processing.md \
                          virtio.md \
-                         vmd.md \
-                         vpp_integration.md
+                         vmd.md
 
 # This tag can be used to specify the character encoding of the source files
 # that doxygen parses. Internally doxygen uses the UTF-8 encoding. Doxygen uses
@@ -1656,7 +1664,7 @@ EXTRA_SEARCH_MAPPINGS  =
 # If the GENERATE_LATEX tag is set to YES, doxygen will generate LaTeX output.
 # The default value is: YES.
 
-GENERATE_LATEX         = YES
+GENERATE_LATEX         = NO
 
 # The LATEX_OUTPUT tag is used to specify where the LaTeX docs will be put. If a
 # relative path is entered the value of OUTPUT_DIRECTORY will be put in front of

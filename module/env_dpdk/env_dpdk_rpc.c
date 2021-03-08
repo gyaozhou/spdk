@@ -34,11 +34,11 @@
 #include "spdk/stdinc.h"
 #include "spdk/rpc.h"
 #include "spdk/env_dpdk.h"
-#include "spdk_internal/log.h"
+#include "spdk/log.h"
 
 static void
-spdk_rpc_env_dpdk_get_mem_stats(struct spdk_jsonrpc_request *request,
-				const struct spdk_json_val *params)
+rpc_env_dpdk_get_mem_stats(struct spdk_jsonrpc_request *request,
+			   const struct spdk_json_val *params)
 {
 	FILE *file = NULL;
 	struct spdk_json_write_ctx *w;
@@ -65,4 +65,4 @@ spdk_rpc_env_dpdk_get_mem_stats(struct spdk_jsonrpc_request *request,
 	spdk_json_write_object_end(w);
 	spdk_jsonrpc_end_result(request, w);
 }
-SPDK_RPC_REGISTER("env_dpdk_get_mem_stats", spdk_rpc_env_dpdk_get_mem_stats, SPDK_RPC_RUNTIME)
+SPDK_RPC_REGISTER("env_dpdk_get_mem_stats", rpc_env_dpdk_get_mem_stats, SPDK_RPC_RUNTIME)

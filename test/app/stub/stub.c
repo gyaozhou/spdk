@@ -41,6 +41,30 @@
 static char g_path[256];
 static struct spdk_poller *g_poller;
 
+struct ctrlr_entry {
+	struct spdk_nvme_ctrlr *ctrlr;
+	TAILQ_ENTRY(ctrlr_entry) link;
+};
+
+static TAILQ_HEAD(, ctrlr_entry) g_controllers = TAILQ_HEAD_INITIALIZER(g_controllers);
+
+static void
+cleanup(void)
+{
+	struct ctrlr_entry *ctrlr_entry, *tmp;
+	struct spdk_nvme_detach_ctx *detach_ctx = NULL;
+
+	TAILQ_FOREACH_SAFE(ctrlr_entry, &g_controllers, link, tmp) {
+		TAILQ_REMOVE(&g_controllers, ctrlr_entry, link);
+		spdk_nvme_detach_async(ctrlr_entry->ctrlr, &detach_ctx);
+		free(ctrlr_entry);
+	}
+
+	while (detach_ctx && spdk_nvme_detach_poll_async(detach_ctx) == -EAGAIN) {
+		;
+	}
+}
+
 static void
 usage(char *executable_name)
 {
@@ -49,7 +73,7 @@ usage(char *executable_name)
 	printf(" -i shared memory ID [required]\n");
 	printf(" -m mask    core mask for DPDK\n");
 	printf(" -n channel number of memory channels used for DPDK\n");
-	printf(" -p core    master (primary) core for DPDK\n");
+	printf(" -p core    main (primary) core for DPDK\n");
 	printf(" -s size    memory size in MB for DPDK\n");
 	printf(" -H         show this usage\n");
 }
@@ -70,6 +94,16 @@ static void
 attach_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
 	  struct spdk_nvme_ctrlr *ctrlr, const struct spdk_nvme_ctrlr_opts *opts)
 {
+	struct ctrlr_entry *entry;
+
+	entry = malloc(sizeof(struct ctrlr_entry));
+	if (entry == NULL) {
+		fprintf(stderr, "Malloc error\n");
+		exit(1);
+	}
+
+	entry->ctrlr = ctrlr;
+	TAILQ_INSERT_TAIL(&g_controllers, entry, link);
 }
 
 static int
@@ -97,7 +131,7 @@ stub_start(void *arg1)
 		exit(1);
 	}
 
-	g_poller = spdk_poller_register(stub_sleep, NULL, 0);
+	g_poller = SPDK_POLLER_REGISTER(stub_sleep, NULL, 0);
 }
 
 static void
@@ -116,7 +150,7 @@ main(int argc, char **argv)
 	long int val;
 
 	/* default value in opts structure */
-	spdk_app_opts_init(&opts);
+	spdk_app_opts_init(&opts, sizeof(opts));
 
 	opts.name = "stub";
 	opts.rpc_addr = NULL;
@@ -124,9 +158,9 @@ main(int argc, char **argv)
 	while ((ch = getopt(argc, argv, "i:m:n:p:s:H")) != -1) {
 		if (ch == 'm') {
 			opts.reactor_mask = optarg;
-		} else if (ch == '?') {
+		} else if (ch == '?' || ch == 'H') {
 			usage(argv[0]);
-			exit(1);
+			exit(EXIT_SUCCESS);
 		} else {
 			val = spdk_strtol(optarg, 10);
 			if (val < 0) {
@@ -141,15 +175,14 @@ main(int argc, char **argv)
 				opts.mem_channel = val;
 				break;
 			case 'p':
-				opts.master_core = val;
+				opts.main_core = val;
 				break;
 			case 's':
 				opts.mem_size = val;
 				break;
-			case 'H':
 			default:
 				usage(argv[0]);
-				exit(EXIT_SUCCESS);
+				exit(EXIT_FAILURE);
 			}
 		}
 	}
@@ -163,6 +196,8 @@ main(int argc, char **argv)
 	opts.shutdown_cb = stub_shutdown;
 
 	ch = spdk_app_start(&opts, stub_start, (void *)(intptr_t)opts.shm_id);
+
+	cleanup();
 	spdk_app_fini();
 
 	return ch;

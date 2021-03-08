@@ -6,7 +6,7 @@ function nbd_start_disks() {
 	local nbd_list=($3)
 	local i
 
-	for (( i=0; i<${#nbd_list[@]}; i++ )); do
+	for ((i = 0; i < ${#nbd_list[@]}; i++)); do
 		$rootdir/scripts/rpc.py -s $rpc_server nbd_start_disk ${bdev_list[$i]} ${nbd_list[$i]}
 		# Wait for nbd device ready
 		waitfornbd $(basename ${nbd_list[$i]})
@@ -19,7 +19,7 @@ function nbd_start_disks_without_nbd_idx() {
 	local i
 	local nbd_device
 
-	for (( i=0; i<${#bdev_list[@]}; i++ )); do
+	for ((i = 0; i < ${#bdev_list[@]}; i++)); do
 		nbd_device=$($rootdir/scripts/rpc.py -s $rpc_server nbd_start_disk ${bdev_list[$i]})
 		# Wait for nbd device ready
 		waitfornbd $(basename ${nbd_device})
@@ -29,7 +29,7 @@ function nbd_start_disks_without_nbd_idx() {
 function waitfornbd_exit() {
 	local nbd_name=$1
 
-	for ((i=1; i<=20; i++)); do
+	for ((i = 1; i <= 20; i++)); do
 		if grep -q -w $nbd_name /proc/partitions; then
 			sleep 0.1
 		else
@@ -64,7 +64,7 @@ function nbd_get_count() {
 function nbd_dd_data_verify() {
 	local nbd_list=($1)
 	local operation=$2
-	local tmp_file=/tmp/nbdrandtest
+	local tmp_file=$SPDK_TEST_STORAGE/nbdrandtest
 
 	if [ "$operation" = "write" ]; then
 		# data write

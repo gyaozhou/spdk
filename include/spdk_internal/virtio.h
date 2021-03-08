@@ -40,17 +40,13 @@
 #include <linux/virtio_pci.h>
 #include <linux/virtio_config.h>
 
-#include "spdk_internal/log.h"
+#include "spdk/log.h"
 #include "spdk/likely.h"
 #include "spdk/queue.h"
 #include "spdk/json.h"
 #include "spdk/thread.h"
 #include "spdk/pci_ids.h"
 #include "spdk/env.h"
-
-#ifndef VHOST_USER_F_PROTOCOL_FEATURES
-#define VHOST_USER_F_PROTOCOL_FEATURES	30
-#endif
 
 /**
  * The maximum virtqueue size is 2^15. Use that value as the end of
@@ -456,11 +452,11 @@ int virtio_pci_dev_enumerate(virtio_pci_create_cb enum_cb, void *enum_ctx,
  * Returning any other value will cause the PCI context to be freed,
  * making it unusable.
  * \param enum_ctx additional opaque context to be passed into `enum_cb`
- * \param pci_device_id PCI Device ID of devices to iterate through
+ * \param device_id Device ID of devices to iterate through
  * \param pci_addr PCI address of the device to attach
  */
 int virtio_pci_dev_attach(virtio_pci_create_cb create_cb, void *enum_ctx,
-			  uint16_t pci_device_id, struct spdk_pci_addr *pci_addr);
+			  uint16_t device_id, struct spdk_pci_addr *pci_addr);
 
 /**
  * Connect to a vhost-user device and init corresponding virtio_dev struct.

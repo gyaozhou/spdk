@@ -5,9 +5,7 @@ rootdir=$(readlink -f $testdir/../../..)
 source $rootdir/test/common/autotest_common.sh
 source $rootdir/test/iscsi_tgt/common.sh
 
-# $1 = "iso" - triggers isolation mode (setting up required environment).
-# $2 = test type posix or vpp. defaults to posix.
-iscsitestinit $1 $2
+iscsitestinit
 
 delete_tmp_files() {
 	rm -f $testdir/iscsi2.json
@@ -28,7 +26,7 @@ function running_config() {
 
 	timing_enter start_iscsi_tgt2
 
-	$ISCSI_APP --wait-for-rpc &
+	"${ISCSI_APP[@]}" --wait-for-rpc &
 	pid=$!
 	echo "Process pid: $pid"
 	trap 'iscsicleanup; killprocess $pid; delete_tmp_files; exit 1' SIGINT SIGTERM EXIT
@@ -62,7 +60,7 @@ fio_py="$rootdir/scripts/fio.py"
 
 timing_enter start_iscsi_tgt
 
-$ISCSI_APP --wait-for-rpc &
+"${ISCSI_APP[@]}" --wait-for-rpc &
 pid=$!
 echo "Process pid: $pid"
 
@@ -82,7 +80,7 @@ $rpc_py iscsi_create_initiator_group $INITIATOR_TAG $INITIATOR_NAME $NETMASK
 malloc_bdevs="$($rpc_py bdev_malloc_create $MALLOC_BDEV_SIZE $MALLOC_BLOCK_SIZE) "
 malloc_bdevs+="$($rpc_py bdev_malloc_create $MALLOC_BDEV_SIZE $MALLOC_BLOCK_SIZE)"
 $rpc_py bdev_raid_create -n raid0 -z 64 -r 0 -b "$malloc_bdevs"
-bdev=$( $rpc_py bdev_malloc_create 1024 512 )
+bdev=$($rpc_py bdev_malloc_create 1024 512)
 # "raid0:0" ==> use raid0 blockdev for LUN0
 # "1:2" ==> map PortalGroup1 to InitiatorGroup2
 # "64" ==> iSCSI queue depth 64
@@ -94,7 +92,7 @@ iscsiadm -m discovery -t sendtargets -p $TARGET_IP:$ISCSI_PORT
 iscsiadm -m node --login -p $TARGET_IP:$ISCSI_PORT
 waitforiscsidevices 2
 
-trap 'iscsicleanup; killprocess $pid; iscsitestfini $1 $2; delete_tmp_files; exit 1' SIGINT SIGTERM EXIT
+trap 'iscsicleanup; killprocess $pid; iscsitestfini; delete_tmp_files; exit 1' SIGINT SIGTERM EXIT
 
 $fio_py -p iscsi -i 4096 -d 1 -t randrw -r 1 -v
 $fio_py -p iscsi -i 131072 -d 32 -t randrw -r 1 -v
@@ -131,7 +129,6 @@ $rpc_py bdev_malloc_delete ${bdev}
 fio_status=0
 wait $fio_pid || fio_status=$?
 
-
 if [ $fio_status -eq 0 ]; then
 	echo "iscsi hotplug test: fio successful - expected failure"
 	exit 1
@@ -148,4 +145,4 @@ trap - SIGINT SIGTERM EXIT
 
 killprocess $pid
 
-iscsitestfini $1 $2
+iscsitestfini

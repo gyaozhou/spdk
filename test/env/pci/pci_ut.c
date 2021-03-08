@@ -34,6 +34,7 @@
 #include "spdk/stdinc.h"
 
 #include "CUnit/Basic.h"
+#include "spdk_internal/mock.h"
 
 #include "env_dpdk/pci.c"
 
@@ -58,9 +59,7 @@ pci_claim_test(struct spdk_pci_device *dev)
 	}
 }
 
-static struct spdk_pci_driver ut_pci_driver = {
-	.is_registered = true,
-};
+static struct spdk_pci_driver ut_pci_driver;
 
 struct ut_pci_dev {
 	struct spdk_pci_device pci;
@@ -128,14 +127,6 @@ ut_enum_cb(void *ctx, struct spdk_pci_device *dev)
 }
 
 static void
-ut_detach(struct spdk_pci_device *dev)
-{
-	struct ut_pci_dev *ut_dev = (struct ut_pci_dev *)dev;
-
-	ut_dev->attached = false;
-}
-
-static void
 pci_hook_test(void)
 {
 	struct ut_pci_dev ut_dev = {};
@@ -144,18 +135,21 @@ pci_hook_test(void)
 	uint64_t bar0_paddr, bar0_size;
 	int rc;
 
-	ut_dev.pci.addr.domain = 0x10000;
-	ut_dev.pci.addr.bus = 0x0;
-	ut_dev.pci.addr.dev = 0x1;
-	ut_dev.pci.addr.func = 0x0;
+	ut_dev.pci.type = "custom";
 	ut_dev.pci.id.vendor_id = 0x4;
 	ut_dev.pci.id.device_id = 0x8;
+
+	/* Use add parse for initilization */
+	spdk_pci_addr_parse(&ut_dev.pci.addr, "10000:00:01.0");
+	CU_ASSERT(ut_dev.pci.addr.domain == 0x10000);
+	CU_ASSERT(ut_dev.pci.addr.bus == 0x0);
+	CU_ASSERT(ut_dev.pci.addr.dev == 0x1);
+	CU_ASSERT(ut_dev.pci.addr.func == 0x0);
 
 	ut_dev.pci.map_bar = ut_map_bar;
 	ut_dev.pci.unmap_bar = ut_unmap_bar;
 	ut_dev.pci.cfg_read = ut_cfg_read;
 	ut_dev.pci.cfg_write = ut_cfg_write;
-	ut_dev.pci.detach = ut_detach;
 
 	/* hook the device into the PCI layer */
 	spdk_pci_hook_device(&ut_pci_driver, &ut_dev.pci);
@@ -203,9 +197,7 @@ pci_hook_test(void)
 	/* test spdk_pci_device_claim() */
 	pci_claim_test(&ut_dev.pci);
 
-	/* detach and verify our callback was called */
 	spdk_pci_device_detach(&ut_dev.pci);
-	CU_ASSERT(!ut_dev.attached);
 	CU_ASSERT(!ut_dev.pci.internal.attached);
 
 	/* unhook the device */

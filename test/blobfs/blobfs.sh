@@ -1,37 +1,35 @@
 #!/usr/bin/env bash
 
 SYSTEM=$(uname -s)
-if [ $SYSTEM = "FreeBSD" ] ; then
-    echo "blobfs.sh cannot run on FreeBSD currently."
-    exit 0
+if [ $SYSTEM = "FreeBSD" ]; then
+	echo "blobfs.sh cannot run on FreeBSD currently."
+	exit 0
 fi
 
 testdir=$(readlink -f $(dirname $0))
 rootdir=$(readlink -f $testdir/../..)
+source $rootdir/test/common/autotest_common.sh
+
 rpc_server=/var/tmp/spdk-blobfs.sock
 rpc_py="$rootdir/scripts/rpc.py -s $rpc_server"
-tmp_file=/tmp/blobfs_file
-conf_file=/tmp/blobfs.conf
+tmp_file=$SPDK_TEST_STORAGE/blobfs_file
+conf_file=$testdir/config
 bdevname=BlobfsBdev
 mount_dir=/tmp/spdk_tmp_mount
 test_cache_size=512
 
-source $rootdir/test/common/autotest_common.sh
-
-function on_error_exit() {
-	if [ -n "$blobfs_pid" ]; then
+function cleanup() {
+	if [[ -n $blobfs_pid && -e /proc/$blobfs_pid ]]; then
 		killprocess $blobfs_pid
 	fi
 
 	rm -rf $mount_dir
 	rm -f $tmp_file
 	rm -f $conf_file
-	print_backtrace
-	exit 1
 }
 
-function blobfs_start_app {
-	$rootdir/test/app/bdev_svc/bdev_svc -r $rpc_server -c ${conf_file} &
+function blobfs_start_app() {
+	$rootdir/test/app/bdev_svc/bdev_svc -r $rpc_server --json ${conf_file} &
 	blobfs_pid=$!
 
 	echo "Process blobfs pid: $blobfs_pid"
@@ -96,13 +94,16 @@ function blobfs_fuse_test() {
 	# So directly use default sock path.
 	waitforlisten $blobfs_pid /var/tmp/spdk.sock
 
+	sleep 1
+
 	# check mount status
-	mount || grep $mount_dir
+	mount | grep "$mount_dir"
 
 	# create a rand file in mount dir
 	dd if=/dev/urandom of=${mount_dir}/rand_file bs=4k count=32
 
 	umount ${mount_dir}
+	sleep 1
 	killprocess $blobfs_pid
 
 	# Verify there is no file in mount dir now
@@ -119,15 +120,34 @@ function blobfs_fuse_test() {
 	rm ${mount_dir}/rand_file
 
 	umount ${mount_dir}
+	sleep 1
 	killprocess $blobfs_pid
 }
 
-trap 'on_error_exit;' ERR
+trap 'cleanup' EXIT
 
 # Create one temp file as test bdev
 dd if=/dev/zero of=${tmp_file} bs=4k count=1M
-echo "[AIO]" > ${conf_file}
-echo "AIO ${tmp_file} ${bdevname} 4096" >> ${conf_file}
+
+jq . <<- JSON > ${conf_file}
+	{
+	  "subsystems": [
+	    {
+	      "subsystem": "bdev",
+	      "config": [
+	        {
+	          "method": "bdev_aio_create",
+	          "params": {
+	            "name": "${bdevname}",
+	            "block_size": 512,
+	            "filename": "${tmp_file}"
+	          }
+	        }
+	      ]
+	    }
+	  ]
+	}
+JSON
 
 blobfs_detect_test
 
@@ -139,8 +159,3 @@ blobfs_create_test
 # Create dir for FUSE mount
 mkdir -p $mount_dir
 blobfs_fuse_test
-
-
-rm -rf $mount_dir
-rm -f $tmp_file
-report_test_completion "blobfs"

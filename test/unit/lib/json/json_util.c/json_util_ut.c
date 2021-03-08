@@ -252,6 +252,37 @@ test_decode_object(void)
 }
 
 static void
+test_free_object(void)
+{
+	struct my_object {
+		char *my_name;
+		uint32_t my_int;
+		char *my_other_name;
+		char *empty_string;
+	};
+	struct spdk_json_object_decoder decoders[] = {
+		{"first", offsetof(struct my_object, my_name), spdk_json_decode_string, false},
+		{"second", offsetof(struct my_object, my_int), spdk_json_decode_uint32, false},
+		{"third", offsetof(struct my_object, my_other_name), spdk_json_decode_string, true},
+		{"fourth", offsetof(struct my_object, empty_string), spdk_json_decode_string, false},
+	};
+	struct my_object output = {
+		.my_name = strdup("hello"),
+		.my_int = 3,
+		.my_other_name = strdup("world"),
+		.empty_string = NULL
+	};
+
+	SPDK_CU_ASSERT_FATAL(output.my_name != NULL);
+	SPDK_CU_ASSERT_FATAL(output.my_other_name != NULL);
+
+	spdk_json_free_object(decoders, 4, &output);
+	CU_ASSERT(output.my_name == NULL);
+	CU_ASSERT(output.my_other_name == NULL);
+	CU_ASSERT(output.empty_string == NULL);
+}
+
+static void
 test_decode_array(void)
 {
 	struct spdk_json_val values[4];
@@ -862,11 +893,11 @@ test_iterating(void)
 	CU_ASSERT(spdk_json_strequal(string_key, "string") == true);
 
 	object_key = spdk_json_next(string_key);
-	object_val = spdk_json_value(object_key);
+	object_val = json_value(object_key);
 	CU_ASSERT(spdk_json_strequal(object_key, "object") == true);
 
 	array_key = spdk_json_next(object_key);
-	array_val = spdk_json_value(array_key);
+	array_val = json_value(array_key);
 	CU_ASSERT(spdk_json_strequal(array_key, "array") == true);
 
 	/* NULL '}' */
@@ -877,7 +908,7 @@ test_iterating(void)
 	CU_ASSERT(spdk_json_strequal(another_string_key, "another_string") == true);
 
 	array_name_with_space_key = spdk_json_next(another_string_key);
-	array_name_with_space_val = spdk_json_value(array_name_with_space_key);
+	array_name_with_space_val = json_value(array_name_with_space_key);
 	CU_ASSERT(spdk_json_strequal(array_name_with_space_key, "array name with space") == true);
 
 	CU_ASSERT(spdk_json_next(array_name_with_space_key) == NULL);
@@ -923,34 +954,26 @@ int main(int argc, char **argv)
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	if (CU_initialize_registry() != CUE_SUCCESS) {
-		return CU_get_error();
-	}
+	CU_set_error_action(CUEA_ABORT);
+	CU_initialize_registry();
 
 	suite = CU_add_suite("json", NULL, NULL);
-	if (suite == NULL) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
 
-	if (
-		CU_add_test(suite, "strequal", test_strequal) == NULL ||
-		CU_add_test(suite, "num_to_uint16", test_num_to_uint16) == NULL ||
-		CU_add_test(suite, "num_to_int32", test_num_to_int32) == NULL ||
-		CU_add_test(suite, "num_to_uint64", test_num_to_uint64) == NULL ||
-		CU_add_test(suite, "decode_object", test_decode_object) == NULL ||
-		CU_add_test(suite, "decode_array", test_decode_array) == NULL ||
-		CU_add_test(suite, "decode_bool", test_decode_bool) == NULL ||
-		CU_add_test(suite, "decode_uint16", test_decode_uint16) == NULL ||
-		CU_add_test(suite, "decode_int32", test_decode_int32) == NULL ||
-		CU_add_test(suite, "decode_uint32", test_decode_uint32) == NULL ||
-		CU_add_test(suite, "decode_uint64", test_decode_uint64) == NULL ||
-		CU_add_test(suite, "decode_string", test_decode_string) == NULL ||
-		CU_add_test(suite, "find_object", test_find) == NULL ||
-		CU_add_test(suite, "iterating", test_iterating) == NULL) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
+	CU_ADD_TEST(suite, test_strequal);
+	CU_ADD_TEST(suite, test_num_to_uint16);
+	CU_ADD_TEST(suite, test_num_to_int32);
+	CU_ADD_TEST(suite, test_num_to_uint64);
+	CU_ADD_TEST(suite, test_decode_object);
+	CU_ADD_TEST(suite, test_decode_array);
+	CU_ADD_TEST(suite, test_decode_bool);
+	CU_ADD_TEST(suite, test_decode_uint16);
+	CU_ADD_TEST(suite, test_decode_int32);
+	CU_ADD_TEST(suite, test_decode_uint32);
+	CU_ADD_TEST(suite, test_decode_uint64);
+	CU_ADD_TEST(suite, test_decode_string);
+	CU_ADD_TEST(suite, test_find);
+	CU_ADD_TEST(suite, test_iterating);
+	CU_ADD_TEST(suite, test_free_object);
 
 	CU_basic_set_mode(CU_BRM_VERBOSE);
 

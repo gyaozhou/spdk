@@ -1,18 +1,6 @@
 {
   "subsystems": [
     {
-      "subsystem": "copy",
-      "config": null
-    },
-    {
-      "subsystem": "interface",
-      "config": null
-    },
-    {
-      "subsystem": "net_framework",
-      "config": null
-    },
-    {
       "subsystem": "bdev",
       "config": [
         {
@@ -169,10 +157,6 @@
       ]
     },
     {
-      "subsystem": "scsi",
-      "config": null
-    },
-    {
       "subsystem": "nvmf",
       "config": [
         {
@@ -307,10 +291,6 @@
       ]
     },
     {
-      "subsystem": "nbd",
-      "config": []
-    },
-    {
       "subsystem": "vhost",
       "config": [
         {
@@ -376,28 +356,6 @@
             "cpumask": "1"
           },
           "method": "vhost_create_blk_controller"
-        },
-        {
-          "params": {
-            "cpumask": "1",
-            "io_queues": 2,
-            "ctrlr": "naa.vhost.3"
-          },
-          "method": "vhost_create_nvme_controller"
-        },
-        {
-          "params": {
-            "bdev_name": "Nvme0n1p0",
-            "ctrlr": "naa.vhost.3"
-          },
-          "method": "vhost_nvme_controller_add_ns"
-        },
-        {
-          "params": {
-            "bdev_name": "Nvme0n1p1",
-            "ctrlr": "naa.vhost.3"
-          },
-          "method": "vhost_nvme_controller_add_ns"
         }
       ]
     },

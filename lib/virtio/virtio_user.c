@@ -35,13 +35,7 @@
 
 #include <sys/eventfd.h>
 
-#include <linux/virtio_scsi.h>
-
-#include <rte_config.h>
-#include <rte_malloc.h>
-#include <rte_alarm.h>
-
-#include "virtio_user/vhost.h"
+#include "vhost_user.h"
 #include "spdk/string.h"
 #include "spdk/config.h"
 
@@ -165,20 +159,6 @@ virtio_user_map_notify(void *cb_ctx, struct spdk_mem_map *map,
 	if (ret < 0) {
 		return ret;
 	}
-
-#ifdef SPDK_CONFIG_VHOST_INTERNAL_LIB
-	/* Our internal rte_vhost lib requires SET_VRING_ADDR to flush a pending
-	 * SET_MEM_TABLE. On the other hand, the upstream rte_vhost will invalidate
-	 * the entire queue upon receiving SET_VRING_ADDR message, so we mustn't
-	 * send it here. Both behaviors are strictly implementation specific, but
-	 * this message isn't needed from the point of the spec, so send it only
-	 * if vhost is compiled with our internal lib.
-	 */
-	ret = virtio_user_queue_setup(vdev, virtio_user_set_vring_addr);
-	if (ret < 0) {
-		return ret;
-	}
-#endif
 
 	/* Since we might want to use that mapping straight away, we have to
 	 * make sure the guest has already processed our SET_MEM_TABLE message.
@@ -476,7 +456,7 @@ virtio_user_setup_queue(struct virtio_dev *vdev, struct virtqueue *vq)
 	vq->vq_ring_virt_mem = queue_mem;
 
 	state.index = vq->vq_queue_index;
-	state.num = 0;
+	state.num = vq->vq_nentries;
 
 	if (virtio_dev_has_feature(vdev, VHOST_USER_F_PROTOCOL_FEATURES)) {
 		rc = dev->ops->send_request(dev, VHOST_USER_SET_VRING_ENABLE, &state);
@@ -495,9 +475,9 @@ virtio_user_setup_queue(struct virtio_dev *vdev, struct virtqueue *vq)
 
 	desc_addr = (uintptr_t)vq->vq_ring_virt_mem;
 	avail_addr = desc_addr + vq->vq_nentries * sizeof(struct vring_desc);
-	used_addr = RTE_ALIGN_CEIL(avail_addr + offsetof(struct vring_avail,
-				   ring[vq->vq_nentries]),
-				   VIRTIO_PCI_VRING_ALIGN);
+	used_addr = SPDK_ALIGN_CEIL(avail_addr + offsetof(struct vring_avail,
+				    ring[vq->vq_nentries]),
+				    VIRTIO_PCI_VRING_ALIGN);
 
 	dev->vrings[queue_idx].num = vq->vq_nentries;
 	dev->vrings[queue_idx].desc = (void *)(uintptr_t)desc_addr;

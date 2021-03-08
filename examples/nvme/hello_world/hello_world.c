@@ -35,23 +35,24 @@
 
 #include "spdk/nvme.h"
 #include "spdk/vmd.h"
+#include "spdk/nvme_zns.h"
 #include "spdk/env.h"
 
 struct ctrlr_entry {
-	struct spdk_nvme_ctrlr	*ctrlr;
-	struct ctrlr_entry	*next;
-	char			name[1024];
+	struct spdk_nvme_ctrlr		*ctrlr;
+	TAILQ_ENTRY(ctrlr_entry)	link;
+	char				name[1024];
 };
 
 struct ns_entry {
 	struct spdk_nvme_ctrlr	*ctrlr;
 	struct spdk_nvme_ns	*ns;
-	struct ns_entry		*next;
+	TAILQ_ENTRY(ns_entry)	link;
 	struct spdk_nvme_qpair	*qpair;
 };
 
-static struct ctrlr_entry *g_controllers = NULL;
-static struct ns_entry *g_namespaces = NULL;
+static TAILQ_HEAD(, ctrlr_entry) g_controllers = TAILQ_HEAD_INITIALIZER(g_controllers);
+static TAILQ_HEAD(, ns_entry) g_namespaces = TAILQ_HEAD_INITIALIZER(g_namespaces);
 
 static bool g_vmd = false;
 
@@ -72,8 +73,7 @@ register_ns(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_ns *ns)
 
 	entry->ctrlr = ctrlr;
 	entry->ns = ns;
-	entry->next = g_namespaces;
-	g_namespaces = entry;
+	TAILQ_INSERT_TAIL(&g_namespaces, entry, link);
 
 	printf("  Namespace ID: %d size: %juGB\n", spdk_nvme_ns_get_id(ns),
 	       spdk_nvme_ns_get_size(ns) / 1000000000);
@@ -102,6 +102,7 @@ read_complete(void *arg, const struct spdk_nvme_cpl *completion)
 		fprintf(stderr, "I/O error status: %s\n", spdk_nvme_cpl_get_status_string(&completion->status));
 		fprintf(stderr, "Read I/O failed, aborting run\n");
 		sequence->is_completed = 2;
+		exit(1);
 	}
 
 	/*
@@ -138,7 +139,7 @@ write_complete(void *arg, const struct spdk_nvme_cpl *completion)
 	 *  the data back from the NVMe namespace.
 	 */
 	if (sequence->using_cmb_io) {
-		spdk_nvme_ctrlr_free_cmb_io_buffer(ns_entry->ctrlr, sequence->buf, 0x1000);
+		spdk_nvme_ctrlr_unmap_cmb(ns_entry->ctrlr);
 	} else {
 		spdk_free(sequence->buf);
 	}
@@ -155,14 +156,51 @@ write_complete(void *arg, const struct spdk_nvme_cpl *completion)
 }
 
 static void
+reset_zone_complete(void *arg, const struct spdk_nvme_cpl *completion)
+{
+	struct hello_world_sequence *sequence = arg;
+
+	/* Assume the I/O was successful */
+	sequence->is_completed = 1;
+	/* See if an error occurred. If so, display information
+	 * about it, and set completion value so that I/O
+	 * caller is aware that an error occurred.
+	 */
+	if (spdk_nvme_cpl_is_error(completion)) {
+		spdk_nvme_qpair_print_completion(sequence->ns_entry->qpair, (struct spdk_nvme_cpl *)completion);
+		fprintf(stderr, "I/O error status: %s\n", spdk_nvme_cpl_get_status_string(&completion->status));
+		fprintf(stderr, "Reset zone I/O failed, aborting run\n");
+		sequence->is_completed = 2;
+		exit(1);
+	}
+}
+
+static void
+reset_zone_and_wait_for_completion(struct hello_world_sequence *sequence)
+{
+	if (spdk_nvme_zns_reset_zone(sequence->ns_entry->ns, sequence->ns_entry->qpair,
+				     0, /* starting LBA of the zone to reset */
+				     false, /* don't reset all zones */
+				     reset_zone_complete,
+				     sequence)) {
+		fprintf(stderr, "starting reset zone I/O failed\n");
+		exit(1);
+	}
+	while (!sequence->is_completed) {
+		spdk_nvme_qpair_process_completions(sequence->ns_entry->qpair, 0);
+	}
+	sequence->is_completed = 0;
+}
+
+static void
 hello_world(void)
 {
 	struct ns_entry			*ns_entry;
 	struct hello_world_sequence	sequence;
 	int				rc;
+	size_t				sz;
 
-	ns_entry = g_namespaces;
-	while (ns_entry != NULL) {
+	TAILQ_FOREACH(ns_entry, &g_namespaces, link) {
 		/*
 		 * Allocate an I/O qpair that we can use to submit read/write requests
 		 *  to namespaces on the controller.  NVMe controllers typically support
@@ -187,8 +225,8 @@ hello_world(void)
 		 * I/O operations.
 		 */
 		sequence.using_cmb_io = 1;
-		sequence.buf = spdk_nvme_ctrlr_alloc_cmb_io_buffer(ns_entry->ctrlr, 0x1000);
-		if (sequence.buf == NULL) {
+		sequence.buf = spdk_nvme_ctrlr_map_cmb(ns_entry->ctrlr, &sz);
+		if (sequence.buf == NULL || sz < 0x1000) {
 			sequence.using_cmb_io = 0;
 			sequence.buf = spdk_zmalloc(0x1000, 0x1000, NULL, SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
 		}
@@ -203,6 +241,15 @@ hello_world(void)
 		}
 		sequence.is_completed = 0;
 		sequence.ns_entry = ns_entry;
+
+		/*
+		 * If the namespace is a Zoned Namespace, rather than a regular
+		 * NVM namespace, we need to reset the first zone, before we
+		 * write to it. This not needed for regular NVM namespaces.
+		 */
+		if (spdk_nvme_ns_get_csi(ns_entry->ns) == SPDK_NVME_CSI_ZNS) {
+			reset_zone_and_wait_for_completion(&sequence);
+		}
 
 		/*
 		 * Print "Hello world!" to sequence.buf.  We will write this data to LBA
@@ -258,7 +305,6 @@ hello_world(void)
 		 *  pending I/O are completed before trying to free the qpair.
 		 */
 		spdk_nvme_ctrlr_free_io_qpair(ns_entry->qpair);
-		ns_entry = ns_entry->next;
 	}
 }
 
@@ -301,8 +347,7 @@ attach_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
 	snprintf(entry->name, sizeof(entry->name), "%-20.20s (%-20.20s)", cdata->mn, cdata->sn);
 
 	entry->ctrlr = ctrlr;
-	entry->next = g_controllers;
-	g_controllers = entry;
+	TAILQ_INSERT_TAIL(&g_controllers, entry, link);
 
 	/*
 	 * Each controller has one or more namespaces.  An NVMe namespace is basically
@@ -326,21 +371,23 @@ attach_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
 static void
 cleanup(void)
 {
-	struct ns_entry *ns_entry = g_namespaces;
-	struct ctrlr_entry *ctrlr_entry = g_controllers;
+	struct ns_entry *ns_entry, *tmp_ns_entry;
+	struct ctrlr_entry *ctrlr_entry, *tmp_ctrlr_entry;
+	struct spdk_nvme_detach_ctx *detach_ctx = NULL;
 
-	while (ns_entry) {
-		struct ns_entry *next = ns_entry->next;
+	TAILQ_FOREACH_SAFE(ns_entry, &g_namespaces, link, tmp_ns_entry) {
+		TAILQ_REMOVE(&g_namespaces, ns_entry, link);
 		free(ns_entry);
-		ns_entry = next;
 	}
 
-	while (ctrlr_entry) {
-		struct ctrlr_entry *next = ctrlr_entry->next;
-
-		spdk_nvme_detach(ctrlr_entry->ctrlr);
+	TAILQ_FOREACH_SAFE(ctrlr_entry, &g_controllers, link, tmp_ctrlr_entry) {
+		TAILQ_REMOVE(&g_controllers, ctrlr_entry, link);
+		spdk_nvme_detach_async(ctrlr_entry->ctrlr, &detach_ctx);
 		free(ctrlr_entry);
-		ctrlr_entry = next;
+	}
+
+	while (detach_ctx && spdk_nvme_detach_poll_async(detach_ctx) == -EAGAIN) {
+		;
 	}
 }
 
@@ -417,7 +464,7 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	if (g_controllers == NULL) {
+	if (TAILQ_EMPTY(&g_controllers)) {
 		fprintf(stderr, "no NVMe controllers found\n");
 		cleanup();
 		return 1;
@@ -426,5 +473,9 @@ int main(int argc, char **argv)
 	printf("Initialization complete.\n");
 	hello_world();
 	cleanup();
+	if (g_vmd) {
+		spdk_vmd_fini();
+	}
+
 	return 0;
 }

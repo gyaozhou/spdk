@@ -39,6 +39,7 @@
 
 #include <rte_crypto.h>
 #include <rte_cryptodev.h>
+#include <rte_cryptodev_pmd.h>
 
 #define MAX_TEST_BLOCKS 8192
 struct rte_crypto_op *g_test_crypto_ops[MAX_TEST_BLOCKS];
@@ -48,6 +49,9 @@ uint16_t g_dequeue_mock;
 uint16_t g_enqueue_mock;
 unsigned ut_rte_crypto_op_bulk_alloc;
 int ut_rte_crypto_op_attach_sym_session = 0;
+#define MOCK_INFO_GET_1QP_AESNI 0
+#define MOCK_INFO_GET_1QP_QAT 1
+#define MOCK_INFO_GET_1QP_BOGUS_PMD 2
 int ut_rte_cryptodev_info_get = 0;
 bool ut_rte_cryptodev_info_get_mocked = false;
 
@@ -139,32 +143,31 @@ mock_rte_lcore_count(void)
 /* SPDK stubs */
 DEFINE_STUB(spdk_bdev_queue_io_wait, int, (struct spdk_bdev *bdev, struct spdk_io_channel *ch,
 		struct spdk_bdev_io_wait_entry *entry), 0);
-DEFINE_STUB(spdk_conf_find_section, struct spdk_conf_section *,
-	    (struct spdk_conf *cp, const char *name), NULL);
-DEFINE_STUB(spdk_conf_section_get_nval, char *,
-	    (struct spdk_conf_section *sp, const char *key, int idx), NULL);
-DEFINE_STUB(spdk_conf_section_get_nmval, char *,
-	    (struct spdk_conf_section *sp, const char *key, int idx1, int idx2), NULL);
 DEFINE_STUB_V(spdk_bdev_module_list_add, (struct spdk_bdev_module *bdev_module));
 DEFINE_STUB_V(spdk_bdev_free_io, (struct spdk_bdev_io *g_bdev_io));
+DEFINE_STUB_V(spdk_bdev_io_put_aux_buf, (struct spdk_bdev_io *bdev_io, void *aux_buf));
 DEFINE_STUB(spdk_bdev_io_type_supported, bool, (struct spdk_bdev *bdev,
 		enum spdk_bdev_io_type io_type), 0);
 DEFINE_STUB_V(spdk_bdev_module_release_bdev, (struct spdk_bdev *bdev));
 DEFINE_STUB_V(spdk_bdev_close, (struct spdk_bdev_desc *desc));
 DEFINE_STUB(spdk_bdev_get_name, const char *, (const struct spdk_bdev *bdev), 0);
-DEFINE_STUB(spdk_bdev_get_buf_align, size_t, (const struct spdk_bdev *bdev), 0);
+DEFINE_STUB(spdk_bdev_get_buf_align, size_t, (const struct spdk_bdev *bdev), 64);
 DEFINE_STUB(spdk_bdev_get_io_channel, struct spdk_io_channel *, (struct spdk_bdev_desc *desc), 0);
 DEFINE_STUB_V(spdk_bdev_unregister, (struct spdk_bdev *bdev, spdk_bdev_unregister_cb cb_fn,
 				     void *cb_arg));
-DEFINE_STUB(spdk_bdev_open, int, (struct spdk_bdev *bdev, bool write,
-				  spdk_bdev_remove_cb_t remove_cb,
-				  void *remove_ctx, struct spdk_bdev_desc **_desc), 0);
+DEFINE_STUB(spdk_bdev_open_ext, int, (const char *bdev_name, bool write,
+				      spdk_bdev_event_cb_t event_cb,
+				      void *event_ctx, struct spdk_bdev_desc **_desc), 0);
+DEFINE_STUB(spdk_bdev_desc_get_bdev, struct spdk_bdev *, (struct spdk_bdev_desc *desc), NULL);
 DEFINE_STUB(spdk_bdev_module_claim_bdev, int, (struct spdk_bdev *bdev, struct spdk_bdev_desc *desc,
 		struct spdk_bdev_module *module), 0);
 DEFINE_STUB_V(spdk_bdev_module_examine_done, (struct spdk_bdev_module *module));
 DEFINE_STUB(spdk_bdev_register, int, (struct spdk_bdev *vbdev), 0);
 
 /* DPDK stubs */
+#define DPDK_DYNFIELD_OFFSET offsetof(struct rte_mbuf, dynfield1[1])
+DEFINE_STUB(rte_mbuf_dynfield_register, int, (const struct rte_mbuf_dynfield *params),
+	    DPDK_DYNFIELD_OFFSET);
 DEFINE_STUB(rte_cryptodev_count, uint8_t, (void), 0);
 DEFINE_STUB_V(rte_mempool_free, (struct rte_mempool *mp));
 DEFINE_STUB(rte_mempool_create, struct rte_mempool *, (const char *name, unsigned n,
@@ -179,18 +182,12 @@ DEFINE_STUB(rte_crypto_op_pool_create, struct rte_mempool *,
 	     unsigned cache_size, uint16_t priv_size, int socket_id), (struct rte_mempool *)1);
 DEFINE_STUB(rte_cryptodev_device_count_by_driver, uint8_t, (uint8_t driver_id), 0);
 DEFINE_STUB(rte_cryptodev_configure, int, (uint8_t dev_id, struct rte_cryptodev_config *config), 0);
-#if RTE_VERSION >= RTE_VERSION_NUM(19, 02, 0, 0)
 DEFINE_STUB(rte_cryptodev_queue_pair_setup, int, (uint8_t dev_id, uint16_t queue_pair_id,
 		const struct rte_cryptodev_qp_conf *qp_conf, int socket_id), 0);
 DEFINE_STUB(rte_cryptodev_sym_session_pool_create, struct rte_mempool *, (const char *name,
 		uint32_t nb_elts,
 		uint32_t elt_size, uint32_t cache_size, uint16_t priv_size,
 		int socket_id), (struct rte_mempool *)1);
-#else
-DEFINE_STUB(rte_cryptodev_queue_pair_setup, int, (uint8_t dev_id, uint16_t queue_pair_id,
-		const struct rte_cryptodev_qp_conf *qp_conf,
-		int socket_id, struct rte_mempool *session_pool), 0);
-#endif
 DEFINE_STUB(rte_cryptodev_start, int, (uint8_t dev_id), 0);
 DEFINE_STUB_V(rte_cryptodev_stop, (uint8_t dev_id));
 DEFINE_STUB(rte_cryptodev_sym_session_create, struct rte_cryptodev_sym_session *,
@@ -216,13 +213,26 @@ struct device_qp g_dev_qp;
 void
 rte_cryptodev_info_get(uint8_t dev_id, struct rte_cryptodev_info *dev_info)
 {
-	dev_info->max_nb_queue_pairs = ut_rte_cryptodev_info_get;
+	dev_info->max_nb_queue_pairs = 1;
+	if (ut_rte_cryptodev_info_get == MOCK_INFO_GET_1QP_AESNI) {
+		dev_info->driver_name = g_driver_names[0];
+	} else if (ut_rte_cryptodev_info_get == MOCK_INFO_GET_1QP_QAT) {
+		dev_info->driver_name = g_driver_names[1];
+	} else if (ut_rte_cryptodev_info_get == MOCK_INFO_GET_1QP_BOGUS_PMD) {
+		dev_info->driver_name = "junk";
+	}
 }
 
 unsigned int
 rte_cryptodev_sym_get_private_session_size(uint8_t dev_id)
 {
 	return (unsigned int)dev_id;
+}
+
+void
+spdk_bdev_io_get_aux_buf(struct spdk_bdev_io *bdev_io, spdk_bdev_io_get_aux_buf_cb cb)
+{
+	cb(g_io_ch, g_bdev_io, (void *)0xDEADBEEF);
 }
 
 void
@@ -336,6 +346,8 @@ test_setup(void)
 		memset(g_test_crypto_ops[i], 0, sizeof(struct rte_crypto_op) +
 		       sizeof(struct rte_crypto_sym_op) + QUEUED_OP_LENGTH);
 	}
+	g_mbuf_offset = DPDK_DYNFIELD_OFFSET;
+
 	return 0;
 }
 
@@ -424,20 +436,20 @@ test_simple_write(void)
 	vbdev_crypto_submit_request(g_io_ch, g_bdev_io);
 	CU_ASSERT(g_bdev_io->internal.status == SPDK_BDEV_IO_STATUS_SUCCESS);
 	CU_ASSERT(g_io_ctx->cryop_cnt_remaining == 1);
-	CU_ASSERT(g_io_ctx->cry_iov.iov_len == 512);
-	CU_ASSERT(g_io_ctx->cry_iov.iov_base != NULL);
-	CU_ASSERT(g_io_ctx->cry_offset_blocks == 0);
-	CU_ASSERT(g_io_ctx->cry_num_blocks == 1);
+	CU_ASSERT(g_io_ctx->aux_buf_iov.iov_len == 512);
+	CU_ASSERT(g_io_ctx->aux_buf_iov.iov_base != NULL);
+	CU_ASSERT(g_io_ctx->aux_offset_blocks == 0);
+	CU_ASSERT(g_io_ctx->aux_num_blocks == 1);
 	CU_ASSERT(g_test_crypto_ops[0]->sym->m_src->buf_addr == &test_simple_write);
 	CU_ASSERT(g_test_crypto_ops[0]->sym->m_src->data_len == 512);
 	CU_ASSERT(g_test_crypto_ops[0]->sym->m_src->next == NULL);
 	CU_ASSERT(g_test_crypto_ops[0]->sym->cipher.data.length == 512);
 	CU_ASSERT(g_test_crypto_ops[0]->sym->cipher.data.offset == 0);
-	CU_ASSERT(g_test_crypto_ops[0]->sym->m_src->userdata == g_bdev_io);
+	CU_ASSERT(*RTE_MBUF_DYNFIELD(g_test_crypto_ops[0]->sym->m_src, g_mbuf_offset,
+				     uint64_t *) == (uint64_t)g_bdev_io);
 	CU_ASSERT(g_test_crypto_ops[0]->sym->m_dst->buf_addr != NULL);
 	CU_ASSERT(g_test_crypto_ops[0]->sym->m_dst->data_len == 512);
 
-	spdk_free(g_io_ctx->cry_iov.iov_base);
 	spdk_mempool_put(g_mbuf_mp, g_test_crypto_ops[0]->sym->m_src);
 	spdk_mempool_put(g_mbuf_mp, g_test_crypto_ops[0]->sym->m_dst);
 }
@@ -463,7 +475,8 @@ test_simple_read(void)
 	CU_ASSERT(g_test_crypto_ops[0]->sym->m_src->next == NULL);
 	CU_ASSERT(g_test_crypto_ops[0]->sym->cipher.data.length == 512);
 	CU_ASSERT(g_test_crypto_ops[0]->sym->cipher.data.offset == 0);
-	CU_ASSERT(g_test_crypto_ops[0]->sym->m_src->userdata == g_bdev_io);
+	CU_ASSERT(*RTE_MBUF_DYNFIELD(g_test_crypto_ops[0]->sym->m_src, g_mbuf_offset,
+				     uint64_t *) == (uint64_t)g_bdev_io);
 	CU_ASSERT(g_test_crypto_ops[0]->sym->m_dst == NULL);
 
 	spdk_mempool_put(g_mbuf_mp, g_test_crypto_ops[0]->sym->m_src);
@@ -497,7 +510,8 @@ test_large_rw(void)
 		CU_ASSERT(g_test_crypto_ops[i]->sym->m_src->next == NULL);
 		CU_ASSERT(g_test_crypto_ops[i]->sym->cipher.data.length == block_len);
 		CU_ASSERT(g_test_crypto_ops[i]->sym->cipher.data.offset == 0);
-		CU_ASSERT(g_test_crypto_ops[i]->sym->m_src->userdata == g_bdev_io);
+		CU_ASSERT(*RTE_MBUF_DYNFIELD(g_test_crypto_ops[i]->sym->m_src, g_mbuf_offset,
+					     uint64_t *) == (uint64_t)g_bdev_io);
 		CU_ASSERT(g_test_crypto_ops[i]->sym->m_dst == NULL);
 		spdk_mempool_put(g_mbuf_mp, g_test_crypto_ops[i]->sym->m_src);
 	}
@@ -522,17 +536,17 @@ test_large_rw(void)
 		CU_ASSERT(g_test_crypto_ops[i]->sym->m_src->next == NULL);
 		CU_ASSERT(g_test_crypto_ops[i]->sym->cipher.data.length == block_len);
 		CU_ASSERT(g_test_crypto_ops[i]->sym->cipher.data.offset == 0);
-		CU_ASSERT(g_test_crypto_ops[i]->sym->m_src->userdata == g_bdev_io);
-		CU_ASSERT(g_io_ctx->cry_iov.iov_len == io_len);
-		CU_ASSERT(g_io_ctx->cry_iov.iov_base != NULL);
-		CU_ASSERT(g_io_ctx->cry_offset_blocks == 0);
-		CU_ASSERT(g_io_ctx->cry_num_blocks == num_blocks);
+		CU_ASSERT(*RTE_MBUF_DYNFIELD(g_test_crypto_ops[i]->sym->m_src, g_mbuf_offset,
+					     uint64_t *) == (uint64_t)g_bdev_io);
+		CU_ASSERT(g_io_ctx->aux_buf_iov.iov_len == io_len);
+		CU_ASSERT(g_io_ctx->aux_buf_iov.iov_base != NULL);
+		CU_ASSERT(g_io_ctx->aux_offset_blocks == 0);
+		CU_ASSERT(g_io_ctx->aux_num_blocks == num_blocks);
 		CU_ASSERT(g_test_crypto_ops[i]->sym->m_dst->buf_addr != NULL);
 		CU_ASSERT(g_test_crypto_ops[i]->sym->m_dst->data_len == block_len);
 		spdk_mempool_put(g_mbuf_mp, g_test_crypto_ops[i]->sym->m_src);
 		spdk_mempool_put(g_mbuf_mp, g_test_crypto_ops[i]->sym->m_dst);
 	}
-	spdk_free(g_io_ctx->cry_iov.iov_base);
 }
 
 static void
@@ -567,7 +581,7 @@ test_dev_full(void)
 	CU_ASSERT(sym_op->m_src->next == NULL);
 	CU_ASSERT(sym_op->cipher.data.length == 512);
 	CU_ASSERT(sym_op->cipher.data.offset == 0);
-	CU_ASSERT(sym_op->m_src->userdata == g_bdev_io);
+	CU_ASSERT(*RTE_MBUF_DYNFIELD(sym_op->m_src, g_mbuf_offset, uint64_t *) == (uint64_t)g_bdev_io);
 	CU_ASSERT(sym_op->m_dst == NULL);
 
 	/* make sure one got queued and confirm its values */
@@ -582,7 +596,7 @@ test_dev_full(void)
 	CU_ASSERT(sym_op->m_src->next == NULL);
 	CU_ASSERT(sym_op->cipher.data.length == 512);
 	CU_ASSERT(sym_op->cipher.data.offset == 0);
-	CU_ASSERT(sym_op->m_src->userdata == g_bdev_io);
+	CU_ASSERT(*RTE_MBUF_DYNFIELD(sym_op->m_src, g_mbuf_offset, uint64_t *) == (uint64_t)g_bdev_io);
 	CU_ASSERT(sym_op->m_dst == NULL);
 	CU_ASSERT(TAILQ_EMPTY(&g_crypto_ch->queued_cry_ops) == true);
 	spdk_mempool_put(g_mbuf_mp, g_test_crypto_ops[0]->sym->m_src);
@@ -628,7 +642,8 @@ test_crazy_rw(void)
 		CU_ASSERT(g_test_crypto_ops[i]->sym->m_src->next == NULL);
 		CU_ASSERT(g_test_crypto_ops[i]->sym->cipher.data.length == block_len);
 		CU_ASSERT(g_test_crypto_ops[i]->sym->cipher.data.offset == 0);
-		CU_ASSERT(g_test_crypto_ops[i]->sym->m_src->userdata == g_bdev_io);
+		CU_ASSERT(*RTE_MBUF_DYNFIELD(g_test_crypto_ops[i]->sym->m_src, g_mbuf_offset,
+					     uint64_t *) == (uint64_t)g_bdev_io);
 		CU_ASSERT(g_test_crypto_ops[i]->sym->m_src == g_test_crypto_ops[i]->sym->m_src);
 		CU_ASSERT(g_test_crypto_ops[i]->sym->m_dst == NULL);
 		spdk_mempool_put(g_mbuf_mp, g_test_crypto_ops[i]->sym->m_src);
@@ -662,13 +677,13 @@ test_crazy_rw(void)
 		CU_ASSERT(g_test_crypto_ops[i]->sym->m_src->next == NULL);
 		CU_ASSERT(g_test_crypto_ops[i]->sym->cipher.data.length == block_len);
 		CU_ASSERT(g_test_crypto_ops[i]->sym->cipher.data.offset == 0);
-		CU_ASSERT(g_test_crypto_ops[i]->sym->m_src->userdata == g_bdev_io);
+		CU_ASSERT(*RTE_MBUF_DYNFIELD(g_test_crypto_ops[i]->sym->m_src, g_mbuf_offset,
+					     uint64_t *) == (uint64_t)g_bdev_io);
 		CU_ASSERT(g_test_crypto_ops[i]->sym->m_src == g_test_crypto_ops[i]->sym->m_src);
 		CU_ASSERT(g_test_crypto_ops[i]->sym->m_dst == g_test_crypto_ops[i]->sym->m_dst);
 		spdk_mempool_put(g_mbuf_mp, g_test_crypto_ops[i]->sym->m_src);
 		spdk_mempool_put(g_mbuf_mp, g_test_crypto_ops[i]->sym->m_dst);
 	}
-	spdk_free(g_io_ctx->cry_iov.iov_base);
 }
 
 static void
@@ -710,13 +725,25 @@ test_reset(void)
 }
 
 static void
+init_cleanup(void)
+{
+	spdk_mempool_free(g_mbuf_mp);
+	rte_mempool_free(g_session_mp);
+	g_mbuf_mp = NULL;
+	g_session_mp = NULL;
+	if (g_session_mp_priv != NULL) {
+		/* g_session_mp_priv may or may not be set depending on the DPDK version */
+		rte_mempool_free(g_session_mp_priv);
+	}
+}
+
+static void
 test_initdrivers(void)
 {
 	int rc;
 	static struct spdk_mempool *orig_mbuf_mp;
 	static struct rte_mempool *orig_session_mp;
 	static struct rte_mempool *orig_session_mp_priv;
-
 
 	/* These tests will alloc and free our g_mbuf_mp
 	 * so save that off here and restore it after each test is over.
@@ -772,7 +799,7 @@ test_initdrivers(void)
 
 	/* Test crypto dev configure failure. */
 	MOCK_SET(rte_cryptodev_device_count_by_driver, 2);
-	MOCK_SET(rte_cryptodev_info_get, 1);
+	MOCK_SET(rte_cryptodev_info_get, MOCK_INFO_GET_1QP_AESNI);
 	MOCK_SET(rte_cryptodev_configure, -1);
 	MOCK_CLEARED_ASSERT(spdk_mempool_create);
 	rc = vbdev_crypto_init_crypto_drivers();
@@ -802,18 +829,29 @@ test_initdrivers(void)
 	CU_ASSERT(g_session_mp_priv == NULL);
 	MOCK_SET(rte_cryptodev_start, 0);
 
-	/* Test happy path. */
+	/* Test bogus PMD */
 	MOCK_CLEARED_ASSERT(spdk_mempool_create);
+	MOCK_SET(rte_cryptodev_info_get, MOCK_INFO_GET_1QP_BOGUS_PMD);
 	rc = vbdev_crypto_init_crypto_drivers();
-	/* We don't have spdk_mempool_create mocked right now, so make sure to free the mempools. */
+	CU_ASSERT(g_mbuf_mp == NULL);
+	CU_ASSERT(g_session_mp == NULL);
+	CU_ASSERT(rc == -EINVAL);
+
+	/* Test happy path QAT. */
+	MOCK_CLEARED_ASSERT(spdk_mempool_create);
+	MOCK_SET(rte_cryptodev_info_get, MOCK_INFO_GET_1QP_QAT);
+	rc = vbdev_crypto_init_crypto_drivers();
 	CU_ASSERT(g_mbuf_mp != NULL);
 	CU_ASSERT(g_session_mp != NULL);
-	spdk_mempool_free(g_mbuf_mp);
-	rte_mempool_free(g_session_mp);
-	if (g_session_mp_priv != NULL) {
-		/* g_session_mp_priv may or may not be set depending on the DPDK version */
-		rte_mempool_free(g_session_mp_priv);
-	}
+	init_cleanup();
+	CU_ASSERT(rc == 0);
+
+	/* Test happy path AESNI. */
+	MOCK_CLEARED_ASSERT(spdk_mempool_create);
+	MOCK_SET(rte_cryptodev_info_get, MOCK_INFO_GET_1QP_AESNI);
+	rc = vbdev_crypto_init_crypto_drivers();
+	CU_ASSERT(g_mbuf_offset == DPDK_DYNFIELD_OFFSET);
+	init_cleanup();
 	CU_ASSERT(rc == 0);
 
 	/* restore our initial values. */
@@ -825,10 +863,6 @@ test_initdrivers(void)
 static void
 test_crypto_op_complete(void)
 {
-	/* Need to prove to scan-build that we are setting iov_bases properly. */
-	void *old_iov_base;
-	struct crypto_bdev_io *orig_ctx;
-
 	/* Make sure completion code respects failure. */
 	g_bdev_io->internal.status = SPDK_BDEV_IO_STATUS_FAILED;
 	g_completion_called = false;
@@ -849,11 +883,6 @@ test_crypto_op_complete(void)
 	g_bdev_io->type = SPDK_BDEV_IO_TYPE_WRITE;
 	g_completion_called = false;
 	MOCK_SET(spdk_bdev_writev_blocks, 0);
-	/* Code under test will free this, if not ASAN will complain. */
-	g_io_ctx->cry_iov.iov_base = spdk_malloc(16, 0x10, NULL, SPDK_ENV_LCORE_ID_ANY,
-				     SPDK_MALLOC_DMA);
-	orig_ctx = (struct crypto_bdev_io *)g_bdev_io->driver_ctx;
-	old_iov_base = orig_ctx->cry_iov.iov_base;
 	_crypto_operation_complete(g_bdev_io);
 	CU_ASSERT(g_bdev_io->internal.status == SPDK_BDEV_IO_STATUS_SUCCESS);
 	CU_ASSERT(g_completion_called == true);
@@ -863,13 +892,6 @@ test_crypto_op_complete(void)
 	g_bdev_io->type = SPDK_BDEV_IO_TYPE_WRITE;
 	g_completion_called = false;
 	MOCK_SET(spdk_bdev_writev_blocks, -1);
-	/* Code under test will free this, if not ASAN will complain. */
-	g_io_ctx->cry_iov.iov_base = spdk_malloc(16, 0x40, NULL, SPDK_ENV_LCORE_ID_ANY,
-				     SPDK_MALLOC_DMA);
-	/* To Do: remove this garbage assert as soon as scan-build stops throwing a
-	 * heap use after free error.
-	 */
-	SPDK_CU_ASSERT_FATAL(old_iov_base != orig_ctx->cry_iov.iov_base);
 	_crypto_operation_complete(g_bdev_io);
 	CU_ASSERT(g_bdev_io->internal.status == SPDK_BDEV_IO_STATUS_FAILED);
 	CU_ASSERT(g_completion_called == true);
@@ -907,7 +929,8 @@ test_poller(void)
 	g_dequeue_mock = g_enqueue_mock = 1;
 	spdk_mempool_get_bulk(g_mbuf_mp, (void **)&src_mbufs[0], 1);
 	g_test_crypto_ops[0]->sym->m_src = src_mbufs[0];
-	g_test_crypto_ops[0]->sym->m_src->userdata = g_bdev_io;
+	*RTE_MBUF_DYNFIELD(g_test_crypto_ops[0]->sym->m_src, g_mbuf_offset,
+			   uint64_t *) = (uintptr_t)g_bdev_io;
 	g_test_crypto_ops[0]->sym->m_dst = NULL;
 	g_io_ctx->cryop_cnt_remaining = 1;
 	g_bdev_io->type = SPDK_BDEV_IO_TYPE_READ;
@@ -937,11 +960,13 @@ test_poller(void)
 	g_io_ctx->cryop_cnt_remaining = 2;
 	spdk_mempool_get_bulk(g_mbuf_mp, (void **)&src_mbufs[0], 2);
 	g_test_crypto_ops[0]->sym->m_src = src_mbufs[0];
-	g_test_crypto_ops[0]->sym->m_src->userdata = g_bdev_io;
+	*RTE_MBUF_DYNFIELD(g_test_crypto_ops[0]->sym->m_src, g_mbuf_offset,
+			   uint64_t *) = (uint64_t)g_bdev_io;
 	g_test_crypto_ops[0]->sym->m_dst = NULL;
 	g_test_crypto_ops[0]->status =  RTE_CRYPTO_OP_STATUS_SUCCESS;
 	g_test_crypto_ops[1]->sym->m_src = src_mbufs[1];
-	g_test_crypto_ops[1]->sym->m_src->userdata = g_bdev_io;
+	*RTE_MBUF_DYNFIELD(g_test_crypto_ops[1]->sym->m_src, g_mbuf_offset,
+			   uint64_t *) = (uint64_t)g_bdev_io;
 	g_test_crypto_ops[1]->sym->m_dst = NULL;
 	g_test_crypto_ops[1]->status = RTE_CRYPTO_OP_STATUS_NOT_PROCESSED;
 	g_bdev_io->internal.status = SPDK_BDEV_IO_STATUS_SUCCESS;
@@ -950,50 +975,111 @@ test_poller(void)
 	CU_ASSERT(rc == 2);
 }
 
+/* Helper function for test_assign_device_qp() */
+static void
+_clear_device_qp_lists(void)
+{
+	struct device_qp *device_qp = NULL;
+
+	while (!TAILQ_EMPTY(&g_device_qp_qat)) {
+		device_qp = TAILQ_FIRST(&g_device_qp_qat);
+		TAILQ_REMOVE(&g_device_qp_qat, device_qp, link);
+		free(device_qp);
+
+	}
+	CU_ASSERT(TAILQ_EMPTY(&g_device_qp_qat) == true);
+	while (!TAILQ_EMPTY(&g_device_qp_aesni_mb)) {
+		device_qp = TAILQ_FIRST(&g_device_qp_aesni_mb);
+		TAILQ_REMOVE(&g_device_qp_aesni_mb, device_qp, link);
+		free(device_qp);
+	}
+	CU_ASSERT(TAILQ_EMPTY(&g_device_qp_aesni_mb) == true);
+}
+
+/* Helper function for test_assign_device_qp() */
+static void
+_check_expected_values(struct vbdev_crypto *crypto_bdev, struct device_qp *device_qp,
+		       struct crypto_io_channel *crypto_ch, uint8_t expected_index,
+		       uint8_t current_index)
+{
+	_assign_device_qp(&g_crypto_bdev, device_qp, g_crypto_ch);
+	CU_ASSERT(g_crypto_ch->device_qp->index == expected_index);
+	CU_ASSERT(g_next_qat_index == current_index);
+}
+
+static void
+test_assign_device_qp(void)
+{
+	struct device_qp *device_qp = NULL;
+	int i;
+
+	/* start with a known state, clear the device/qp lists */
+	_clear_device_qp_lists();
+
+	/* make sure that one AESNI_MB qp is found */
+	device_qp = calloc(1, sizeof(struct device_qp));
+	TAILQ_INSERT_TAIL(&g_device_qp_aesni_mb, device_qp, link);
+	g_crypto_ch->device_qp = NULL;
+	g_crypto_bdev.drv_name = AESNI_MB;
+	_assign_device_qp(&g_crypto_bdev, device_qp, g_crypto_ch);
+	CU_ASSERT(g_crypto_ch->device_qp != NULL);
+
+	/* QAT testing is more complex as the code under test load balances by
+	 * assigning each subsequent device/qp to every QAT_VF_SPREAD modulo
+	 * g_qat_total_qp. For the current latest QAT we'll have 48 virtual functions
+	 * each with 2 qp so the "spread" betwen assignments is 32.
+	 */
+	g_qat_total_qp = 96;
+	for (i = 0; i < g_qat_total_qp; i++) {
+		device_qp = calloc(1, sizeof(struct device_qp));
+		device_qp->index = i;
+		TAILQ_INSERT_TAIL(&g_device_qp_qat, device_qp, link);
+	}
+	g_crypto_ch->device_qp = NULL;
+	g_crypto_bdev.drv_name = QAT;
+
+	/* First assignment will assign to 0 and next at 32. */
+	_check_expected_values(&g_crypto_bdev, device_qp, g_crypto_ch,
+			       0, QAT_VF_SPREAD);
+
+	/* Second assignment will assign to 32 and next at 64. */
+	_check_expected_values(&g_crypto_bdev, device_qp, g_crypto_ch,
+			       QAT_VF_SPREAD, QAT_VF_SPREAD * 2);
+
+	/* Third assignment will assign to 64 and next at 0. */
+	_check_expected_values(&g_crypto_bdev, device_qp, g_crypto_ch,
+			       QAT_VF_SPREAD * 2, 0);
+
+	/* Fourth assignment will assign to 1 and next at 33. */
+	_check_expected_values(&g_crypto_bdev, device_qp, g_crypto_ch,
+			       1, QAT_VF_SPREAD + 1);
+
+	_clear_device_qp_lists();
+}
+
 int
 main(int argc, char **argv)
 {
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	if (CU_initialize_registry() != CUE_SUCCESS) {
-		return CU_get_error();
-	}
+	CU_set_error_action(CUEA_ABORT);
+	CU_initialize_registry();
 
 	suite = CU_add_suite("crypto", test_setup, test_cleanup);
-	if (suite == NULL) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
-
-	if (CU_add_test(suite, "test_error_paths",
-			test_error_paths) == NULL ||
-	    CU_add_test(suite, "test_simple_write",
-			test_simple_write) == NULL ||
-	    CU_add_test(suite, "test_simple_read",
-			test_simple_read) == NULL ||
-	    CU_add_test(suite, "test_large_rw",
-			test_large_rw) == NULL ||
-	    CU_add_test(suite, "test_dev_full",
-			test_dev_full) == NULL ||
-	    CU_add_test(suite, "test_crazy_rw",
-			test_crazy_rw) == NULL ||
-	    CU_add_test(suite, "test_passthru",
-			test_passthru) == NULL ||
-	    CU_add_test(suite, "test_initdrivers",
-			test_initdrivers) == NULL ||
-	    CU_add_test(suite, "test_crypto_op_complete",
-			test_crypto_op_complete) == NULL ||
-	    CU_add_test(suite, "test_supported_io",
-			test_supported_io) == NULL ||
-	    CU_add_test(suite, "test_reset",
-			test_reset) == NULL ||
-	    CU_add_test(suite, "test_poller",
-			test_poller) == NULL
-	   ) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
+	CU_ADD_TEST(suite, test_error_paths);
+	CU_ADD_TEST(suite, test_simple_write);
+	CU_ADD_TEST(suite, test_simple_read);
+	CU_ADD_TEST(suite, test_large_rw);
+	CU_ADD_TEST(suite, test_dev_full);
+	CU_ADD_TEST(suite, test_crazy_rw);
+	CU_ADD_TEST(suite, test_passthru);
+	CU_ADD_TEST(suite, test_initdrivers);
+	CU_ADD_TEST(suite, test_crypto_op_complete);
+	CU_ADD_TEST(suite, test_supported_io);
+	CU_ADD_TEST(suite, test_reset);
+	CU_ADD_TEST(suite, test_poller);
+	CU_ADD_TEST(suite, test_assign_device_qp);
 
 	CU_basic_set_mode(CU_BRM_VERBOSE);
 	CU_basic_run_tests();

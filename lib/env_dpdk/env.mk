@@ -48,34 +48,15 @@ DPDK_INC_DIR := $(DPDK_ABS_DIR)/include/dpdk
 endif
 DPDK_INC := -I$(DPDK_INC_DIR)
 
-ifneq (, $(wildcard $(DPDK_ABS_DIR)/lib/librte_eal.a))
-DPDK_LIB_EXT = .a
-else
-DPDK_LIB_EXT = .so
+DPDK_LIB_LIST = rte_eal rte_mempool rte_ring rte_mbuf rte_bus_pci rte_pci rte_mempool_ring
+
+ifeq ($(OS),Linux)
+DPDK_LIB_LIST += rte_power rte_ethdev rte_net
 endif
 
-DPDK_LIB_LIST = rte_eal rte_mempool rte_ring rte_mbuf
-
-# librte_mempool_ring was new added from DPDK 17.05. Link this library used for
-#   ring based mempool management API.
-ifneq (, $(wildcard $(DPDK_ABS_DIR)/lib/librte_mempool_ring.*))
-DPDK_LIB_LIST += rte_mempool_ring
-endif
-
-# librte_malloc was removed after DPDK 2.1.  Link this library conditionally based on its
-#  existence to maintain backward compatibility.
-ifneq ($(wildcard $(DPDK_ABS_DIR)/lib/librte_malloc.*),)
-DPDK_LIB_LIST += rte_malloc
-endif
-
-# librte_pci and librte_bus_pci were added in DPDK 17.11. Link these libraries conditionally
-# based on their existence to maintain backward compatibility.
-ifneq (, $(wildcard $(DPDK_ABS_DIR)/lib/librte_pci.*))
-DPDK_LIB_LIST += rte_pci
-endif
-
-ifneq (, $(wildcard $(DPDK_ABS_DIR)/lib/librte_bus_pci.*))
-DPDK_LIB_LIST += rte_bus_pci
+# DPDK 20.05 eal dependency
+ifneq (, $(wildcard $(DPDK_ABS_DIR)/lib/librte_telemetry.*))
+DPDK_LIB_LIST += rte_telemetry
 endif
 
 # There are some complex dependencies when using crypto, reduce or both so
@@ -84,69 +65,107 @@ endif
 DPDK_FRAMEWORK=n
 ifeq ($(CONFIG_CRYPTO),y)
 DPDK_FRAMEWORK=y
-DPDK_LIB_LIST += rte_pmd_aesni_mb rte_reorder
+DPDK_LIB_LIST += rte_reorder
+ifneq (, $(wildcard $(DPDK_ABS_DIR)/lib/librte_crypto_aesni_mb.*))
+DPDK_LIB_LIST += rte_crypto_aesni_mb
+else
+# PMD name for DPDK 20.08 and earlier
+DPDK_LIB_LIST += rte_pmd_aesni_mb
+endif
 endif
 
 ifeq ($(CONFIG_REDUCE),y)
 DPDK_FRAMEWORK=y
-DPDK_LIB_LIST += rte_pmd_isal_comp
+ifneq (, $(wildcard $(DPDK_ABS_DIR)/lib/librte_compress_isal.*))
+DPDK_LIB_LIST += rte_compress_isal
+else
+# PMD name for DPDK 20.08 and earlier
+DPDK_LIB_LIST += rte_pmd_isal
+endif
 endif
 
 ifeq ($(DPDK_FRAMEWORK),y)
-DPDK_LIB_LIST += rte_cryptodev rte_compressdev rte_bus_vdev rte_pmd_qat
+DPDK_LIB_LIST += rte_cryptodev rte_compressdev rte_bus_vdev
+ifneq (, $(wildcard $(DPDK_ABS_DIR)/lib/librte_common_qat.*))
+DPDK_LIB_LIST += rte_common_qat
+else
+# PMD name for DPDK 20.08 and earlier
+DPDK_LIB_LIST += rte_pmd_qat
+endif
 endif
 
 ifneq (, $(wildcard $(DPDK_ABS_DIR)/lib/librte_kvargs.*))
 DPDK_LIB_LIST += rte_kvargs
 endif
 
-ifneq ($(CONFIG_VHOST_INTERNAL_LIB),y)
-ifneq (, $(wildcard $(DPDK_ABS_DIR)/lib/librte_vhost.*))
-DPDK_LIB_LIST += rte_vhost rte_net rte_hash
+LINK_HASH=n
+
+ifeq ($(CONFIG_VHOST),y)
+DPDK_LIB_LIST += rte_vhost
+LINK_HASH=y
 ifneq ($(DPDK_FRAMEWORK),y)
 DPDK_LIB_LIST += rte_cryptodev
 endif
 endif
+
+ifeq ($(CONFIG_RAID5),y)
+LINK_HASH=y
 endif
 
-define dpdk_lib_list_to_libs
-$(1:%=$(DPDK_ABS_DIR)/lib/lib%$(DPDK_LIB_EXT))
-endef
+ifeq ($(LINK_HASH),y)
+DPDK_LIB_LIST += rte_hash
+ifneq (, $(wildcard $(DPDK_ABS_DIR)/lib/librte_rcu.*))
+DPDK_LIB_LIST += rte_rcu
+endif
+endif
 
-define dpdk_env_linker_args
-$(ENV_DPDK_FILE) -Wl,--whole-archive,--no-as-needed $(call dpdk_lib_list_to_libs,$1) -Wl,--no-whole-archive
-endef
+DPDK_SHARED_LIB = $(DPDK_LIB_LIST:%=$(DPDK_ABS_DIR)/lib/lib%.so)
+DPDK_STATIC_LIB = $(DPDK_LIB_LIST:%=$(DPDK_ABS_DIR)/lib/lib%.a)
+DPDK_SHARED_LIB_LINKER_ARGS = $(call add_no_as_needed,$(DPDK_SHARED_LIB))
+DPDK_STATIC_LIB_LINKER_ARGS = $(call add_whole_archive,$(DPDK_STATIC_LIB))
 
-DPDK_LIB = $(call dpdk_lib_list_to_libs,$(DPDK_LIB_LIST))
-
-# SPDK memory registration requires experimental (deprecated) rte_memory API for DPDK 18.05
-ENV_CFLAGS = $(DPDK_INC) -Wno-deprecated-declarations
+ENV_CFLAGS = $(DPDK_INC) -DALLOW_EXPERIMENTAL_API
 ENV_CXXFLAGS = $(ENV_CFLAGS)
-ifeq ($(CONFIG_SHARED),y)
-ENV_DPDK_FILE = $(call spdk_lib_list_to_shared_libs,env_dpdk)
-else
-ENV_DPDK_FILE = $(call spdk_lib_list_to_static_libs,env_dpdk)
-endif
-ENV_LIBS = $(ENV_DPDK_FILE) $(DPDK_LIB)
-ENV_LINKER_ARGS = $(call dpdk_env_linker_args,$(DPDK_LIB_LIST))
+
+DPDK_PRIVATE_LINKER_ARGS =
 
 ifeq ($(CONFIG_IPSEC_MB),y)
-ENV_LINKER_ARGS += -lIPSec_MB -L$(IPSEC_MB_DIR)
+DPDK_PRIVATE_LINKER_ARGS += -lIPSec_MB -L$(IPSEC_MB_DIR)
 endif
 
 ifeq ($(CONFIG_REDUCE),y)
-ENV_LINKER_ARGS += -lisal -L$(ISAL_DIR)/.libs
+DPDK_PRIVATE_LINKER_ARGS += -lisal -L$(ISAL_DIR)/.libs
 endif
 
 ifneq (,$(wildcard $(DPDK_INC_DIR)/rte_config.h))
 ifneq (,$(shell grep -e "define RTE_LIBRTE_VHOST_NUMA 1" -e "define RTE_EAL_NUMA_AWARE_HUGEPAGES 1" $(DPDK_INC_DIR)/rte_config.h))
-ENV_LINKER_ARGS += -lnuma
+DPDK_PRIVATE_LINKER_ARGS += -lnuma
+endif
+endif
+
+# DPDK built with meson puts those defines elsewhere
+ifneq (,$(wildcard $(DPDK_INC_DIR)/rte_build_config.h))
+ifneq (,$(shell grep -e "define RTE_LIBRTE_VHOST_NUMA 1" -e "define RTE_EAL_NUMA_AWARE_HUGEPAGES 1" $(DPDK_INC_DIR)/rte_build_config.h))
+DPDK_PRIVATE_LINKER_ARGS += -lnuma
 endif
 endif
 
 ifeq ($(OS),Linux)
-ENV_LINKER_ARGS += -ldl
+DPDK_PRIVATE_LINKER_ARGS += -ldl
 endif
 ifeq ($(OS),FreeBSD)
-ENV_LINKER_ARGS += -lexecinfo
+DPDK_PRIVATE_LINKER_ARGS += -lexecinfo
+endif
+
+ifeq ($(CONFIG_SHARED),y)
+ENV_DPDK_FILE = $(call spdk_lib_list_to_shared_libs,env_dpdk)
+ENV_LIBS = $(ENV_DPDK_FILE) $(DPDK_SHARED_LIB)
+DPDK_LINKER_ARGS = -Wl,-rpath-link $(DPDK_ABS_DIR)/lib $(DPDK_SHARED_LIB_LINKER_ARGS)
+ENV_LINKER_ARGS = $(ENV_DPDK_FILE) $(DPDK_LINKER_ARGS)
+else
+ENV_DPDK_FILE = $(call spdk_lib_list_to_static_libs,env_dpdk)
+ENV_LIBS = $(ENV_DPDK_FILE) $(DPDK_STATIC_LIB)
+DPDK_LINKER_ARGS = -Wl,-rpath-link $(DPDK_ABS_DIR)/lib $(DPDK_STATIC_LIB_LINKER_ARGS)
+ENV_LINKER_ARGS = $(ENV_DPDK_FILE) $(DPDK_LINKER_ARGS)
+ENV_LINKER_ARGS += $(DPDK_PRIVATE_LINKER_ARGS)
 endif

@@ -4,6 +4,10 @@ testdir=$(readlink -f $(dirname $0))
 rootdir=$(readlink -f $testdir/../..)
 source $rootdir/test/common/autotest_common.sh
 
+export SPDK_LIB_DIR="$rootdir/build/lib"
+export DPDK_LIB_DIR="$rootdir/dpdk/build/lib"
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$SPDK_LIB_DIR:$DPDK_LIB_DIR
+
 function insert_device() {
 	ssh root@$ip 'Beetle --SetGpio "$gpio" HIGH'
 	waitforblk $name
@@ -19,8 +23,6 @@ gpio=$2
 driver=$3
 declare -i io_time=5
 declare -i kernel_hotplug_time=7
-
-timing_enter hotplug_hw
 
 timing_enter hotplug_hw_cfg
 
@@ -43,14 +45,14 @@ timing_exit hotplug_hw_cfg
 
 timing_enter hotplug_hw_test
 
-$rootdir/examples/nvme/hotplug/hotplug -i 0 -t 100 -n 2 -r 2 2>&1 | tee -a log.txt &
+$SPDK_EXAMPLE_DIR/hotplug -i 0 -t 100 -n 2 -r 2 2>&1 | tee -a log.txt &
 example_pid=$!
 trap 'killprocess $example_pid; exit 1' SIGINT SIGTERM EXIT
 
 i=0
 while ! grep "Starting I/O" log.txt; do
 	[ $i -lt 20 ] || break
-	i=$((i+1))
+	i=$((i + 1))
 	sleep 1
 done
 
@@ -74,7 +76,4 @@ timing_exit wait_for_example
 
 trap - SIGINT SIGTERM EXIT
 
-report_test_completion "nvme_hotplug_hw"
 timing_exit hotplug_hw_test
-
-timing_exit hotplug_hw

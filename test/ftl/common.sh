@@ -1,14 +1,24 @@
 # Common utility functions to be sourced by the libftl test scripts
 
 function get_chunk_size() {
-	$rootdir/examples/nvme/identify/identify -r "trtype:PCIe traddr:$1" |
-		grep 'Logical blks per chunk' | sed 's/[^0-9]//g'
+	$SPDK_EXAMPLE_DIR/identify -r "trtype:PCIe traddr:$1" \
+		| grep 'Logical blks per chunk' | sed 's/[^0-9]//g'
+}
+
+function get_num_group() {
+	$SPDK_EXAMPLE_DIR/identify -r "trtype:PCIe traddr:$1" \
+		| grep 'Groups' | sed 's/[^0-9]//g'
+}
+
+function get_num_pu() {
+	$SPDK_EXAMPLE_DIR/identify -r "trtype:PCIe traddr:$1" \
+		| grep 'PUs' | sed 's/[^0-9]//g'
 }
 
 function has_separate_md() {
 	local md_type
-	md_type=$($rootdir/examples/nvme/identify/identify -r "trtype:PCIe traddr:$1" | \
-		grep 'Metadata Transferred' | cut -d: -f2)
+	md_type=$($SPDK_EXAMPLE_DIR/identify -r "trtype:PCIe traddr:$1" \
+		| grep 'Metadata Transferred' | cut -d: -f2)
 	if [[ "$md_type" =~ Separate ]]; then
 		return 0
 	else
@@ -35,4 +45,24 @@ function create_nv_cache_bdev() {
 	local nvc_bdev
 	nvc_bdev=$($rootdir/scripts/rpc.py bdev_nvme_attach_controller -b $name -t PCIe -a $cache_bdf)
 	$rootdir/scripts/rpc.py bdev_split_create $nvc_bdev -s $size 1
+}
+
+function gen_ftl_nvme_conf() {
+	jq . <<- JSON
+		{
+		  "subsystems": [
+		    {
+		      "subsystem": "bdev",
+		      "config": [
+		        {
+		          "params": {
+		            "nvme_adminq_poll_period_us": 100
+		          },
+		          "method": "bdev_nvme_set_options"
+		        }
+		      ]
+		    }
+		  ]
+		}
+	JSON
 }

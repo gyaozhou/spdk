@@ -39,17 +39,7 @@ APP = vhost
 
 C_SRCS := vhost.c
 
-SPDK_LIB_LIST = $(ALL_MODULES_LIST)
-SPDK_LIB_LIST += vhost event_vhost
-
-ifeq ($(CONFIG_VHOST_INTERNAL_LIB),y)
-SPDK_LIB_LIST += rte_vhost
-endif
-
-SPDK_LIB_LIST += event_bdev event_copy event_net event_scsi event_vmd event
-SPDK_LIB_LIST += jsonrpc json rpc bdev_rpc bdev scsi copy trace conf
-SPDK_LIB_LIST += thread util log log_rpc app_rpc
-SPDK_LIB_LIST += event_nbd nbd net sock notify
+SPDK_LIB_LIST = $(ALL_MODULES_LIST) event_vhost event_nbd
 
 ifeq ($(SPDK_ROOT_DIR)/lib/env_dpdk,$(CONFIG_ENV))
 SPDK_LIB_LIST += env_dpdk_rpc

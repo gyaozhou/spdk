@@ -13,15 +13,7 @@ LVOL_BDEV_FINAL_SIZE=30
 rpc_py="$rootdir/scripts/rpc.py"
 
 nvmftestinit
-nvmfappstart "-m 0x7"
-
-# SoftRoce does not have enough queues available for
-# multiconnection tests. Detect if we're using software RDMA.
-# If so - lower the number of subsystems for test.
-if check_ip_is_soft_roce $NVMF_FIRST_TARGET_IP; then
-	echo "Using software RDMA, lowering number of NVMeOF subsystems."
-	SUBSYS_NR=1
-fi
+nvmfappstart -m 0x7
 
 $rpc_py nvmf_create_transport $NVMF_TRANSPORT_OPTS -u 8192
 
@@ -42,7 +34,7 @@ $rpc_py nvmf_subsystem_add_ns nqn.2016-06.io.spdk:cnode0 $lvol
 $rpc_py nvmf_subsystem_add_listener nqn.2016-06.io.spdk:cnode0 -t $TEST_TRANSPORT -a $NVMF_FIRST_TARGET_IP -s $NVMF_PORT
 
 # Start random writes in the background
-$rootdir/examples/nvme/perf/perf -r "trtype:$TEST_TRANSPORT adrfam:IPv4 traddr:$NVMF_FIRST_TARGET_IP trsvcid:$NVMF_PORT" -o 4096 -q 128 -s 512 -w randwrite -t 10 -c 0x18 &
+$SPDK_EXAMPLE_DIR/perf -r "trtype:$TEST_TRANSPORT adrfam:IPv4 traddr:$NVMF_FIRST_TARGET_IP trsvcid:$NVMF_PORT" -o 4096 -q 128 -s 512 -w randwrite -t 10 -c 0x18 &
 perf_pid=$!
 
 sleep 1

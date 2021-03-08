@@ -117,6 +117,38 @@ spdk_nvme_qpair_process_completions().
 @sa spdk_nvme_ns_cmd_read, spdk_nvme_ns_cmd_write, spdk_nvme_ns_cmd_dataset_management,
 spdk_nvme_ns_cmd_flush, spdk_nvme_qpair_process_completions
 
+### Fused operations {#nvme_fuses}
+
+To "fuse" two commands, the first command should have the SPDK_NVME_IO_FLAGS_FUSE_FIRST
+io flag set, and the next one should have the SPDK_NVME_IO_FLAGS_FUSE_SECOND.
+
+In addition, the following rules must be met to execute two commands as an atomic unit:
+
+ - The commands shall be inserted next to each other in the same submission queue.
+ - The LBA range, should be the same for the two commands.
+
+E.g. To send fused compare and write operation user must call spdk_nvme_ns_cmd_compare
+followed with spdk_nvme_ns_cmd_write and make sure no other operations are submitted
+in between on the same queue, like in example below:
+
+~~~
+	rc = spdk_nvme_ns_cmd_compare(ns, qpair, cmp_buf, 0, 1, nvme_fused_first_cpl_cb,
+			NULL, SPDK_NVME_CMD_FUSE_FIRST);
+	if (rc != 0) {
+		...
+	}
+
+	rc = spdk_nvme_ns_cmd_write(ns, qpair, write_buf, 0, 1, nvme_fused_second_cpl_cb,
+			NULL, SPDK_NVME_CMD_FUSE_SECOND);
+	if (rc != 0) {
+		...
+	}
+~~~
+
+The NVMe specification currently defines compare-and-write as a fused operation.
+Support for compare-and-write is reported by the controller flag
+SPDK_NVME_CTRLR_COMPARE_AND_WRITE_SUPPORTED.
+
 ### Scaling Performance {#nvme_scaling}
 
 NVMe queue pairs (struct spdk_nvme_qpair) provide parallel submission paths for
@@ -217,9 +249,10 @@ DPDK EAL allows different types of processes to be spawned, each with different 
 on the hugepage memory used by the applications.
 
 There are two types of processes:
+
 1. a primary process which initializes the shared memory and has full privileges and
 2. a secondary process which can attach to the primary process by mapping its shared memory
-regions and perform NVMe operations including creating queue pairs.
+   regions and perform NVMe operations including creating queue pairs.
 
 This feature is enabled by default and is controlled by selecting a value for the shared
 memory group ID. This ID is a positive integer and two applications with the same shared
@@ -240,37 +273,38 @@ Example: identical shm_id and non-overlapping core masks
 
 1. Two processes sharing memory may not share any cores in their core mask.
 2. If a primary process exits while secondary processes are still running, those processes
-will continue to run. However, a new primary process cannot be created.
+   will continue to run. However, a new primary process cannot be created.
 3. Applications are responsible for coordinating access to logical blocks.
 4. If a process exits unexpectedly, the allocated memory will be released when the last
-process exits.
+   process exits.
 
 @sa spdk_nvme_probe, spdk_nvme_ctrlr_process_admin_completions
-
 
 # NVMe Hotplug {#nvme_hotplug}
 
 At the NVMe driver level, we provide the following support for Hotplug:
 
 1. Hotplug events detection:
-The user of the NVMe library can call spdk_nvme_probe() periodically to detect
-hotplug events. The probe_cb, followed by the attach_cb, will be called for each
-new device detected. The user may optionally also provide a remove_cb that will be
-called if a previously attached NVMe device is no longer present on the system.
-All subsequent I/O to the removed device will return an error.
+   The user of the NVMe library can call spdk_nvme_probe() periodically to detect
+   hotplug events. The probe_cb, followed by the attach_cb, will be called for each
+   new device detected. The user may optionally also provide a remove_cb that will be
+   called if a previously attached NVMe device is no longer present on the system.
+   All subsequent I/O to the removed device will return an error.
 
 2. Hot remove NVMe with IO loads:
-When a device is hot removed while I/O is occurring, all access to the PCI BAR will
-result in a SIGBUS error. The NVMe driver automatically handles this case by installing
-a SIGBUS handler and remapping the PCI BAR to a new, placeholder memory location.
-This means I/O in flight during a hot remove will complete with an appropriate error
-code and will not crash the application.
+   When a device is hot removed while I/O is occurring, all access to the PCI BAR will
+   result in a SIGBUS error. The NVMe driver automatically handles this case by installing
+   a SIGBUS handler and remapping the PCI BAR to a new, placeholder memory location.
+   This means I/O in flight during a hot remove will complete with an appropriate error
+   code and will not crash the application.
 
 @sa spdk_nvme_probe
 
 # NVMe Character Devices {#nvme_cuse}
 
 This feature is considered as experimental.
+
+## Design
 
 ![NVMe character devices processing diagram](nvme_cuse.svg)
 
@@ -285,35 +319,67 @@ Where X is unique SPDK NVMe controller index and Y is namespace id.
 
 Requests from CUSE are handled by pthreads when controller and namespaces are created.
 Those pass the I/O or admin commands via a ring to a thread that processes them using
-spdk_nvme_io_msg_process().
+nvme_io_msg_process().
 
 Ioctls that request information attained when attaching NVMe controller receive an
 immediate response, without passing them through the ring.
 
-This interface reserves one qpair for sending down the I/O for each controller.
+This interface reserves one additional qpair for sending down the I/O for each controller.
 
-## Enabling cuse support for NVMe
+## Usage
 
-Cuse support is disabled by default. To enable support for NVMe devices SPDK
-must be compiled with "./configure --with-nvme-cuse".
+### Enabling cuse support for NVMe
 
-## Limitations
+Cuse support is disabled by default. To enable support for NVMe-CUSE devices first
+install required dependencies
+~~~{.sh}
+sudo scripts/pkgdep.sh --fuse
+~~~
+Then compile SPDK with "./configure --with-nvme-cuse".
 
-NVMe CUSE presents character device for controller and namespaces only at the time
-the controller is being attached. Dynamic creation/deletion of namespaces is not
-supported yet.
+### Creating NVMe-CUSE device
 
-NVMe namespaces are created as character devices and their use may be limited for
-tools expecting block devices.
+First make sure to prepare the environment (see @ref getting_started).
+This includes loading CUSE kernel module.
+Any NVMe controller attached to a running SPDK application can be
+exposed via NVMe-CUSE interface. When closing SPDK application,
+the NVMe-CUSE devices are unregistered.
 
-Sysfs is not updated by SPDK.
+~~~{.sh}
+$ sudo scripts/setup.sh
+$ sudo modprobe cuse
+$ sudo build/bin/spdk_tgt
+# Continue in another session
+$ sudo scripts/rpc.py bdev_nvme_attach_controller -b Nvme0 -t PCIe -a 0000:82:00.0
+Nvme0n1
+$ sudo scripts/rpc.py bdev_nvme_get_controllers
+[
+  {
+    "name": "Nvme0",
+    "trid": {
+      "trtype": "PCIe",
+      "traddr": "0000:82:00.0"
+    }
+  }
+]
+$ sudo scripts/rpc.py bdev_nvme_cuse_register -n Nvme0
+$ ls /dev/spdk/
+nvme0  nvme0n1
+~~~
 
-SPDK NVMe CUSE creates nodes in "/dev/spdk/" directory to explicitly differentiate
-from other devices. Tools that only search in the "/dev" directory might not work
-with SPDK NVMe CUSE.
+### Example of using nvme-cli
 
-SCSI to NVMe Translation Layer is not implemented. Tools that are using this layer to
-identify, manage or operate device might not work properly or their use may be limited.
+Most nvme-cli commands can point to specific controller or namespace by providing a path to it.
+This can be leveraged to issue commands to the SPDK NVMe-CUSE devices.
+
+~~~{.sh}
+sudo nvme id-ctrl /dev/spdk/nvme0
+sudo nvme smart-log /dev/spdk/nvme0
+sudo nvme id-ns /dev/spdk/nvme0n1
+~~~
+
+Note: `nvme list` command does not display SPDK NVMe-CUSE devices,
+see nvme-cli [PR #773](https://github.com/linux-nvme/nvme-cli/pull/773).
 
 ### Examples of using smartctl
 
@@ -328,3 +394,17 @@ the NVMe device.
     smartctl -d nvme -H /dev/spdk/nvme1
     ...
 ~~~
+
+## Limitations
+
+NVMe namespaces are created as character devices and their use may be limited for
+tools expecting block devices.
+
+Sysfs is not updated by SPDK.
+
+SPDK NVMe CUSE creates nodes in "/dev/spdk/" directory to explicitly differentiate
+from other devices. Tools that only search in the "/dev" directory might not work
+with SPDK NVMe CUSE.
+
+SCSI to NVMe Translation Layer is not implemented. Tools that are using this layer to
+identify, manage or operate device might not work properly or their use may be limited.

@@ -38,15 +38,6 @@ include $(SPDK_ROOT_DIR)/mk/spdk.modules.mk
 APP := nvmf
 
 C_SRCS := nvmf.c
-SPDK_LIB_LIST = $(ALL_MODULES_LIST)
-SPDK_LIB_LIST += nvmf thread util bdev conf copy rpc jsonrpc json log sock trace notify
-SPDK_LIB_LIST += event event_bdev event_copy event_vmd
-
-ifeq ($(CONFIG_FC),y)
-ifneq ($(strip $(CONFIG_FC_PATH)),)
-SYS_LIBS += -L$(CONFIG_FC_PATH)
-endif
-SYS_LIBS += -lufc
-endif
+SPDK_LIB_LIST = $(ALL_MODULES_LIST) event_bdev nvmf
 
 include $(SPDK_ROOT_DIR)/mk/spdk.app.mk

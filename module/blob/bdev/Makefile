@@ -34,7 +34,12 @@
 SPDK_ROOT_DIR := $(abspath $(CURDIR)/../../..)
 include $(SPDK_ROOT_DIR)/mk/spdk.common.mk
 
+SO_VER := 5
+SO_MINOR := 0
+
 C_SRCS = blob_bdev.c
 LIBNAME = blob_bdev
+
+SPDK_MAP_FILE = $(abspath $(CURDIR)/spdk_blob_bdev.map)
 
 include $(SPDK_ROOT_DIR)/mk/spdk.lib.mk

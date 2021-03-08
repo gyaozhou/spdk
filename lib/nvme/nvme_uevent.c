@@ -35,7 +35,6 @@
 #include "spdk/string.h"
 
 #include "spdk/log.h"
-#include "spdk/event.h"
 
 #include "nvme_uevent.h"
 
@@ -44,13 +43,14 @@
 #include <linux/netlink.h>
 
 #define SPDK_UEVENT_MSG_LEN 4096
+#define SPDK_UEVENT_RECVBUF_SIZE 1024 * 1024
 
 int
-spdk_uevent_connect(void)
+nvme_uevent_connect(void)
 {
 	struct sockaddr_nl addr;
 	int netlink_fd;
-	int size = 64 * 1024;
+	int size = SPDK_UEVENT_RECVBUF_SIZE;
 	int flag;
 
 	memset(&addr, 0, sizeof(addr));
@@ -135,19 +135,24 @@ parse_event(const char *buf, struct spdk_uevent *event)
 			event->action = SPDK_NVME_UEVENT_REMOVE;
 		}
 		tmp = strstr(dev_path, "/uio/");
-
+		if (!tmp) {
+			SPDK_ERRLOG("Invalid format of uevent: %s\n", dev_path);
+			return -1;
+		}
 		memset(tmp, 0, SPDK_UEVENT_MSG_LEN - (tmp - dev_path));
 
 		pci_address = strrchr(dev_path, '/');
+		if (!pci_address) {
+			SPDK_ERRLOG("Not found NVMe BDF in uevent: %s\n", dev_path);
+			return -1;
+		}
 		pci_address++;
 		if (spdk_pci_addr_parse(&pci_addr, pci_address) != 0) {
 			SPDK_ERRLOG("Invalid format for NVMe BDF: %s\n", pci_address);
 			return -1;
 		}
 		spdk_pci_addr_fmt(event->traddr, sizeof(event->traddr), &pci_addr);
-		return 1;
-	}
-	if (!strncmp(driver, "vfio-pci", 8)) {
+	} else if (!strncmp(driver, "vfio-pci", 8)) {
 		struct spdk_pci_addr pci_addr;
 
 		event->subsystem = SPDK_NVME_UEVENT_SUBSYSTEM_VFIO;
@@ -162,14 +167,15 @@ parse_event(const char *buf, struct spdk_uevent *event)
 			return -1;
 		}
 		spdk_pci_addr_fmt(event->traddr, sizeof(event->traddr), &pci_addr);
-		return 1;
-
+	} else {
+		event->subsystem = SPDK_NVME_UEVENT_SUBSYSTEM_UNRECOGNIZED;
 	}
-	return -1;
+
+	return 1;
 }
 
 int
-spdk_get_uevent(int fd, struct spdk_uevent *uevent)
+nvme_get_uevent(int fd, struct spdk_uevent *uevent)
 {
 	int ret;
 	char buf[SPDK_UEVENT_MSG_LEN];
@@ -201,13 +207,13 @@ spdk_get_uevent(int fd, struct spdk_uevent *uevent)
 #else /* Not Linux */
 
 int
-spdk_uevent_connect(void)
+nvme_uevent_connect(void)
 {
 	return -1;
 }
 
 int
-spdk_get_uevent(int fd, struct spdk_uevent *uevent)
+nvme_get_uevent(int fd, struct spdk_uevent *uevent)
 {
 	return -1;
 }

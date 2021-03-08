@@ -39,7 +39,7 @@
 #include "spdk/string.h"
 #include "spdk/rpc.h"
 
-#include "spdk_internal/log.h"
+#include "spdk/log.h"
 
 struct rpc_construct_zone_block {
 	char *name;
@@ -79,8 +79,8 @@ rpc_zone_block_create(struct spdk_jsonrpc_request *request,
 		goto cleanup;
 	}
 
-	rc = spdk_vbdev_zone_block_create(req.base_bdev, req.name, req.zone_capacity,
-					  req.optimal_open_zones);
+	rc = vbdev_zone_block_create(req.base_bdev, req.name, req.zone_capacity,
+				     req.optimal_open_zones);
 	if (rc) {
 		SPDK_ERRLOG("Failed to create block zoned vbdev: %s", spdk_strerror(-rc));
 		spdk_jsonrpc_send_error_response_fmt(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
@@ -116,11 +116,8 @@ static void
 _rpc_delete_zone_block_cb(void *cb_ctx, int rc)
 {
 	struct spdk_jsonrpc_request *request = cb_ctx;
-	struct spdk_json_write_ctx *w;
 
-	w = spdk_jsonrpc_begin_result(request);
-	spdk_json_write_bool(w, rc == 0);
-	spdk_jsonrpc_end_result(request, w);
+	spdk_jsonrpc_send_bool_response(request, rc == 0);
 }
 
 static void
@@ -138,7 +135,7 @@ rpc_zone_block_delete(struct spdk_jsonrpc_request *request,
 		goto cleanup;
 	}
 
-	spdk_vbdev_zone_block_delete(attrs.name, _rpc_delete_zone_block_cb, request);
+	vbdev_zone_block_delete(attrs.name, _rpc_delete_zone_block_cb, request);
 
 cleanup:
 	free_rpc_delete_zone_block(&attrs);

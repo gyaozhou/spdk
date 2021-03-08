@@ -35,17 +35,16 @@
 
 #include "bdev_malloc.h"
 #include "spdk/bdev.h"
-#include "spdk/conf.h"
 #include "spdk/endian.h"
 #include "spdk/env.h"
-#include "spdk/copy_engine.h"
+#include "spdk/accel_engine.h"
 #include "spdk/json.h"
 #include "spdk/thread.h"
 #include "spdk/queue.h"
 #include "spdk/string.h"
 
 #include "spdk/bdev_module.h"
-#include "spdk_internal/log.h"
+#include "spdk/log.h"
 
 struct malloc_disk {
 	struct spdk_bdev		disk;
@@ -58,22 +57,10 @@ struct malloc_task {
 	enum spdk_bdev_io_status	status;
 };
 
-static struct malloc_task *
-__malloc_task_from_copy_task(struct spdk_copy_task *ct)
-{
-	return (struct malloc_task *)((uintptr_t)ct - sizeof(struct malloc_task));
-}
-
-static struct spdk_copy_task *
-__copy_task_from_malloc_task(struct malloc_task *mt)
-{
-	return (struct spdk_copy_task *)((uintptr_t)mt + sizeof(struct malloc_task));
-}
-
 static void
 malloc_done(void *ref, int status)
 {
-	struct malloc_task *task = __malloc_task_from_copy_task(ref);
+	struct malloc_task *task = (struct malloc_task *)ref;
 
 	if (status != 0) {
 		if (status == -ENOMEM) {
@@ -93,18 +80,16 @@ static TAILQ_HEAD(, malloc_disk) g_malloc_disks = TAILQ_HEAD_INITIALIZER(g_mallo
 int malloc_disk_count = 0;
 
 static int bdev_malloc_initialize(void);
-static void bdev_malloc_get_spdk_running_config(FILE *fp);
 
 static int
 bdev_malloc_get_ctx_size(void)
 {
-	return sizeof(struct malloc_task) + spdk_copy_task_size();
+	return sizeof(struct malloc_task);
 }
 
 static struct spdk_bdev_module malloc_if = {
 	.name = "malloc",
 	.module_init = bdev_malloc_initialize,
-	.config_text = bdev_malloc_get_spdk_running_config,
 	.get_ctx_size = bdev_malloc_get_ctx_size,
 
 };
@@ -164,19 +149,18 @@ bdev_malloc_readv(struct malloc_disk *mdisk, struct spdk_io_channel *ch,
 		return;
 	}
 
-	SPDK_DEBUGLOG(SPDK_LOG_BDEV_MALLOC, "read %lu bytes from offset %#lx\n",
+	SPDK_DEBUGLOG(bdev_malloc, "read %zu bytes from offset %#" PRIx64 "\n",
 		      len, offset);
 
 	task->status = SPDK_BDEV_IO_STATUS_SUCCESS;
 	task->num_outstanding = iovcnt;
 
 	for (i = 0; i < iovcnt; i++) {
-		res = spdk_copy_submit(__copy_task_from_malloc_task(task),
-				       ch, iov[i].iov_base,
-				       src, iov[i].iov_len, malloc_done);
+		res = spdk_accel_submit_copy(ch, iov[i].iov_base,
+					     src, iov[i].iov_len, malloc_done, task);
 
 		if (res != 0) {
-			malloc_done(__copy_task_from_malloc_task(task), res);
+			malloc_done(task, res);
 		}
 
 		src += iov[i].iov_len;
@@ -199,19 +183,18 @@ bdev_malloc_writev(struct malloc_disk *mdisk, struct spdk_io_channel *ch,
 		return;
 	}
 
-	SPDK_DEBUGLOG(SPDK_LOG_BDEV_MALLOC, "wrote %lu bytes to offset %#lx\n",
+	SPDK_DEBUGLOG(bdev_malloc, "wrote %zu bytes to offset %#" PRIx64 "\n",
 		      len, offset);
 
 	task->status = SPDK_BDEV_IO_STATUS_SUCCESS;
 	task->num_outstanding = iovcnt;
 
 	for (i = 0; i < iovcnt; i++) {
-		res = spdk_copy_submit(__copy_task_from_malloc_task(task),
-				       ch, dst, iov[i].iov_base,
-				       iov[i].iov_len, malloc_done);
+		res = spdk_accel_submit_copy(ch, dst, iov[i].iov_base,
+					     iov[i].iov_len, malloc_done, task);
 
 		if (res != 0) {
-			malloc_done(__copy_task_from_malloc_task(task), res);
+			malloc_done(task, res);
 		}
 
 		dst += iov[i].iov_len;
@@ -228,8 +211,8 @@ bdev_malloc_unmap(struct malloc_disk *mdisk,
 	task->status = SPDK_BDEV_IO_STATUS_SUCCESS;
 	task->num_outstanding = 1;
 
-	return spdk_copy_submit_fill(__copy_task_from_malloc_task(task), ch,
-				     mdisk->malloc_buf + offset, 0, byte_count, malloc_done);
+	return spdk_accel_submit_fill(ch, mdisk->malloc_buf + offset, 0,
+				      byte_count, malloc_done, task);
 }
 
 static int64_t
@@ -261,8 +244,7 @@ static int _bdev_malloc_submit_request(struct spdk_io_channel *ch, struct spdk_b
 				((struct malloc_disk *)bdev_io->bdev->ctxt)->malloc_buf +
 				bdev_io->u.bdev.offset_blocks * block_size;
 			bdev_io->u.bdev.iovs[0].iov_len = bdev_io->u.bdev.num_blocks * block_size;
-			spdk_bdev_io_complete(spdk_bdev_io_from_ctx(bdev_io->driver_ctx),
-					      SPDK_BDEV_IO_STATUS_SUCCESS);
+			spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_SUCCESS);
 			return 0;
 		}
 
@@ -321,8 +303,10 @@ static int _bdev_malloc_submit_request(struct spdk_io_channel *ch, struct spdk_b
 			spdk_bdev_io_set_buf(bdev_io, buf, len);
 
 		}
-		spdk_bdev_io_complete(spdk_bdev_io_from_ctx(bdev_io->driver_ctx),
-				      SPDK_BDEV_IO_STATUS_SUCCESS);
+		spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_SUCCESS);
+		return 0;
+	case SPDK_BDEV_IO_TYPE_ABORT:
+		spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_FAILED);
 		return 0;
 	default:
 		return -1;
@@ -349,6 +333,7 @@ bdev_malloc_io_type_supported(void *ctx, enum spdk_bdev_io_type io_type)
 	case SPDK_BDEV_IO_TYPE_UNMAP:
 	case SPDK_BDEV_IO_TYPE_WRITE_ZEROES:
 	case SPDK_BDEV_IO_TYPE_ZCOPY:
+	case SPDK_BDEV_IO_TYPE_ABORT:
 		return true;
 
 	default:
@@ -359,7 +344,7 @@ bdev_malloc_io_type_supported(void *ctx, enum spdk_bdev_io_type io_type)
 static struct spdk_io_channel *
 bdev_malloc_get_io_channel(void *ctx)
 {
-	return spdk_copy_engine_get_io_channel();
+	return spdk_accel_engine_get_io_channel();
 }
 
 static void
@@ -402,6 +387,11 @@ create_malloc_disk(struct spdk_bdev **bdev, const char *name, const struct spdk_
 
 	if (num_blocks == 0) {
 		SPDK_ERRLOG("Disk num_blocks must be greater than 0");
+		return -EINVAL;
+	}
+
+	if (block_size % 512) {
+		SPDK_ERRLOG("block size must be 512 bytes aligned\n");
 		return -EINVAL;
 	}
 
@@ -477,72 +467,11 @@ delete_malloc_disk(struct spdk_bdev *bdev, spdk_delete_malloc_complete cb_fn, vo
 
 static int bdev_malloc_initialize(void)
 {
-	struct spdk_conf_section *sp = spdk_conf_find_section(NULL, "Malloc");
-	int NumberOfLuns, LunSizeInMB, BlockSize, i, rc = 0;
-	uint64_t size;
-	struct spdk_bdev *bdev;
-
-    // zhou: when component init, create disk according to config file firstly.
-    //       We can create more via RPC.
-	if (sp != NULL) {
-		NumberOfLuns = spdk_conf_section_get_intval(sp, "NumberOfLuns");
-		LunSizeInMB = spdk_conf_section_get_intval(sp, "LunSizeInMB");
-		BlockSize = spdk_conf_section_get_intval(sp, "BlockSize");
-		if ((NumberOfLuns < 1) || (LunSizeInMB < 1)) {
-			SPDK_ERRLOG("Malloc section present, but no devices specified\n");
-			goto end;
-		}
-		if (BlockSize < 1) {
-			/* Default is 512 bytes */
-			BlockSize = 512;
-		}
-		size = (uint64_t)LunSizeInMB * 1024 * 1024;
-		for (i = 0; i < NumberOfLuns; i++) {
-            // zhou: create disk based on memory.
-			rc = create_malloc_disk(&bdev, NULL, NULL, size / BlockSize, BlockSize);
-			if (rc) {
-				SPDK_ERRLOG("Could not create malloc disk\n");
-				goto end;
-			}
-		}
-	}
-
-end:
-	return rc;
+	/* This needs to be reset for each reinitialization of submodules.
+	 * Otherwise after enough devices or reinitializations the value gets too high.
+	 * TODO: Make malloc bdev name mandatory and remove this counter. */
+	malloc_disk_count = 0;
+	return 0;
 }
 
-static void
-bdev_malloc_get_spdk_running_config(FILE *fp)
-{
-	int num_malloc_luns = 0;
-	uint64_t malloc_lun_size = 0;
-	struct malloc_disk *mdisk;
-
-	/* count number of malloc LUNs, get LUN size */
-	TAILQ_FOREACH(mdisk, &g_malloc_disks, link) {
-		if (0 == malloc_lun_size) {
-			/* assume all malloc luns the same size */
-			malloc_lun_size = mdisk->disk.blocklen * mdisk->disk.blockcnt;
-			malloc_lun_size /= (1024 * 1024);
-		}
-		num_malloc_luns++;
-	}
-
-	if (num_malloc_luns > 0) {
-		fprintf(fp,
-			"\n"
-			"# Users may change this section to create a different number or size of\n"
-			"# malloc LUNs.\n"
-			"# This will generate %d LUNs with a malloc-allocated backend. Each LUN\n"
-			"# will be %" PRIu64 "MB in size and these will be named Malloc0 through Malloc%d.\n"
-			"# Not all LUNs defined here are necessarily used below.\n"
-			"[Malloc]\n"
-			"  NumberOfLuns %d\n"
-			"  LunSizeInMB %" PRIu64 "\n",
-			num_malloc_luns, malloc_lun_size,
-			num_malloc_luns - 1, num_malloc_luns,
-			malloc_lun_size);
-	}
-}
-
-SPDK_LOG_REGISTER_COMPONENT("bdev_malloc", SPDK_LOG_BDEV_MALLOC)
+SPDK_LOG_REGISTER_COMPONENT(bdev_malloc)

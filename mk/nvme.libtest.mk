@@ -36,13 +36,8 @@ NVME_DIR := $(SPDK_ROOT_DIR)/lib/nvme
 include $(SPDK_ROOT_DIR)/mk/spdk.common.mk
 include $(SPDK_ROOT_DIR)/mk/spdk.modules.mk
 
-C_SRCS = $(APP:%=%.c)
+C_SRCS := $(APP:%=%.c)
 
-SPDK_LIB_LIST = $(SOCK_MODULES_LIST)
-SPDK_LIB_LIST += nvme thread util log sock vmd
-
-ifeq ($(CONFIG_RDMA),y)
-SYS_LIBS += -libverbs -lrdmacm
-endif
+SPDK_LIB_LIST = $(SOCK_MODULES_LIST) nvme vmd
 
 include $(SPDK_ROOT_DIR)/mk/spdk.app.mk

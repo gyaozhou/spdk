@@ -1,8 +1,8 @@
 /*-
  *   BSD LICENSE
  *
- *   Copyright (c) Intel Corporation.
- *   All rights reserved.
+ *   Copyright (c) Intel Corporation. All rights reserved.
+ *   Copyright (c) 2020 Mellanox Technologies LTD. All rights reserved.
  *
  *   Redistribution and use in source and binary forms, with or without
  *   modification, are permitted provided that the following conditions
@@ -38,6 +38,7 @@
 #include "spdk/nvme.h"
 #include "spdk/vmd.h"
 #include "spdk/nvme_ocssd.h"
+#include "spdk/nvme_zns.h"
 #include "spdk/env.h"
 #include "spdk/nvme_intel.h"
 #include "spdk/nvmf_spec.h"
@@ -49,6 +50,8 @@
 #define MAX_DISCOVERY_LOG_ENTRIES	((uint64_t)1000)
 
 #define NUM_CHUNK_INFO_ENTRIES		8
+#define MAX_OCSSD_PU			128
+#define MAX_ZONE_DESC_ENTRIES		8
 
 static int outstanding_commands;
 
@@ -65,6 +68,10 @@ static struct spdk_nvme_health_information_page health_page;
 
 static struct spdk_nvme_firmware_page firmware_page;
 
+static struct spdk_nvme_ana_page *g_ana_log_page;
+
+static size_t g_ana_log_page_size;
+
 static struct spdk_nvme_cmds_and_effect_log_page cmd_effects_log_page;
 
 static struct spdk_nvme_intel_smart_information_page intel_smart_page;
@@ -79,7 +86,9 @@ static uint64_t g_discovery_page_numrec;
 
 static struct spdk_ocssd_geometry_data geometry_data;
 
-static struct spdk_ocssd_chunk_information_entry g_ocssd_chunk_info_page[NUM_CHUNK_INFO_ENTRIES ];
+static struct spdk_ocssd_chunk_information_entry *g_ocssd_chunk_info_page;
+
+static int64_t g_zone_report_limit = 8;
 
 static bool g_hex_dump = false;
 
@@ -87,15 +96,20 @@ static int g_shm_id = -1;
 
 static int g_dpdk_mem = 0;
 
-static int g_master_core = 0;
+static bool g_dpdk_mem_single_seg = false;
+
+static int g_main_core = 0;
 
 static char g_core_mask[16] = "0x1";
 
 static struct spdk_nvme_transport_id g_trid;
+static char g_hostnqn[SPDK_NVMF_NQN_MAX_LEN + 1];
 
 static int g_controllers_found = 0;
 
 static bool g_vmd = false;
+
+static bool g_ocssd_verbose = false;
 
 static void
 hex_dump(const void *data, size_t size)
@@ -176,6 +190,16 @@ get_ocssd_geometry_completion(void *cb_arg, const struct spdk_nvme_cpl *cpl)
 	outstanding_commands--;
 }
 
+static void
+get_zns_zone_report_completion(void *cb_arg, const struct spdk_nvme_cpl *cpl)
+{
+	if (spdk_nvme_cpl_is_error(cpl)) {
+		printf("get zns zone report failed\n");
+	}
+
+	outstanding_commands--;
+}
+
 static int
 get_feature(struct spdk_nvme_ctrlr *ctrlr, uint8_t fid)
 {
@@ -204,7 +228,10 @@ get_features(struct spdk_nvme_ctrlr *ctrlr)
 		SPDK_OCSSD_FEAT_MEDIA_FEEDBACK,
 	};
 
-	/* Submit several GET FEATURES commands and wait for them to complete */
+	/* Submit only one GET FEATURES at a time. There is a known issue #1799
+	 * with Google Cloud Platform NVMe SSDs that do not handle overlapped
+	 * GET FEATURES commands correctly.
+	 */
 	outstanding_commands = 0;
 	for (i = 0; i < SPDK_COUNTOF(features_to_get); i++) {
 		if (!spdk_nvme_ctrlr_is_ocssd_supported(ctrlr) &&
@@ -216,11 +243,12 @@ get_features(struct spdk_nvme_ctrlr *ctrlr)
 		} else {
 			printf("get_feature(0x%02X) failed to submit command\n", features_to_get[i]);
 		}
+
+		while (outstanding_commands) {
+			spdk_nvme_ctrlr_process_admin_completions(ctrlr);
+		}
 	}
 
-	while (outstanding_commands) {
-		spdk_nvme_ctrlr_process_admin_completions(ctrlr);
-	}
 }
 
 static int
@@ -259,6 +287,19 @@ get_firmware_log_page(struct spdk_nvme_ctrlr *ctrlr)
 {
 	if (spdk_nvme_ctrlr_cmd_get_log_page(ctrlr, SPDK_NVME_LOG_FIRMWARE_SLOT,
 					     SPDK_NVME_GLOBAL_NS_TAG, &firmware_page, sizeof(firmware_page), 0, get_log_page_completion, NULL)) {
+		printf("spdk_nvme_ctrlr_cmd_get_log_page() failed\n");
+		exit(1);
+	}
+
+	return 0;
+}
+
+static int
+get_ana_log_page(struct spdk_nvme_ctrlr *ctrlr)
+{
+	if (spdk_nvme_ctrlr_cmd_get_log_page(ctrlr, SPDK_NVME_LOG_ASYMMETRIC_NAMESPACE_ACCESS,
+					     SPDK_NVME_GLOBAL_NS_TAG, g_ana_log_page, g_ana_log_page_size, 0,
+					     get_log_page_completion, NULL)) {
 		printf("spdk_nvme_ctrlr_cmd_get_log_page() failed\n");
 		exit(1);
 	}
@@ -441,6 +482,26 @@ get_log_pages(struct spdk_nvme_ctrlr *ctrlr)
 		}
 	}
 
+	if (spdk_nvme_ctrlr_is_log_page_supported(ctrlr, SPDK_NVME_LOG_ASYMMETRIC_NAMESPACE_ACCESS)) {
+		/* We always set RGO (Return Groups Only) to 0 in this tool, an ANA group
+		 * descriptor is returned only if that ANA group contains namespaces
+		 * that are attached to the controller processing the command, and
+		 * namespaces attached to the controller shall be members of an ANA group.
+		 * Hence the following size should be enough.
+		 */
+		g_ana_log_page_size = sizeof(struct spdk_nvme_ana_page) + cdata->nanagrpid *
+				      sizeof(struct spdk_nvme_ana_group_descriptor) + cdata->nn *
+				      sizeof(uint32_t);
+		g_ana_log_page = calloc(1, g_ana_log_page_size);
+		if (g_ana_log_page == NULL) {
+			exit(1);
+		}
+		if (get_ana_log_page(ctrlr) == 0) {
+			outstanding_commands++;
+		} else {
+			printf("Get Log Page (Asymmetric Namespace Access) failed\n");
+		}
+	}
 	if (cdata->lpa.celp) {
 		if (get_cmd_effects_log_page(ctrlr) == 0) {
 			outstanding_commands++;
@@ -488,15 +549,34 @@ get_ocssd_chunk_info_log_page(struct spdk_nvme_ns *ns)
 {
 	struct spdk_nvme_ctrlr *ctrlr = spdk_nvme_ns_get_ctrlr(ns);
 	int nsid = spdk_nvme_ns_get_id(ns);
+	uint32_t num_entry = geometry_data.num_grp * geometry_data.num_pu * geometry_data.num_chk;
+	uint32_t xfer_size = spdk_nvme_ns_get_max_io_xfer_size(ns);
+	uint32_t buf_size = 0;
+	uint64_t buf_offset = 0;
 	outstanding_commands = 0;
 
-	if (spdk_nvme_ctrlr_cmd_get_log_page(ctrlr, SPDK_OCSSD_LOG_CHUNK_INFO,
-					     nsid, &g_ocssd_chunk_info_page, sizeof(g_ocssd_chunk_info_page), 0,
-					     get_log_page_completion, NULL) == 0) {
-		outstanding_commands++;
-	} else {
-		printf("get_ocssd_chunk_info_log_page() failed\n");
-		return -1;
+	assert(num_entry != 0);
+	if (!g_ocssd_verbose) {
+		num_entry = spdk_min(num_entry, NUM_CHUNK_INFO_ENTRIES);
+	}
+
+	g_ocssd_chunk_info_page = calloc(num_entry, sizeof(struct spdk_ocssd_chunk_information_entry));
+	assert(g_ocssd_chunk_info_page != NULL);
+
+	buf_size = num_entry * sizeof(struct spdk_ocssd_chunk_information_entry);
+	while (buf_size > 0) {
+		xfer_size = spdk_min(buf_size, xfer_size);
+		if (spdk_nvme_ctrlr_cmd_get_log_page(ctrlr, SPDK_OCSSD_LOG_CHUNK_INFO,
+						     nsid, (void *) g_ocssd_chunk_info_page + buf_offset,
+						     xfer_size, buf_offset, get_log_page_completion, NULL) == 0) {
+			outstanding_commands++;
+		} else {
+			printf("get_ocssd_chunk_info_log_page() failed\n");
+			return -1;
+		}
+
+		buf_size -= xfer_size;
+		buf_offset += xfer_size;
 	}
 
 	while (outstanding_commands) {
@@ -570,7 +650,7 @@ print_uint_var_dec(uint8_t *array, unsigned int len)
 		result += (uint64_t)array[i - 1] << (8 * (i - 1));
 		i--;
 	}
-	printf("%lu", result);
+	printf("%" PRIu64, result);
 }
 
 /* Print ASCII string as defined by the NVMe spec */
@@ -592,6 +672,16 @@ print_ascii_string(const void *buf, size_t size)
 		}
 		str++;
 	}
+}
+
+/* Underline a "line" with the given marker, e.g. print_uline("=", printf(...)); */
+static void
+print_uline(char marker, int line_len)
+{
+	for (int i = 1; i < line_len; ++i) {
+		putchar(marker);
+	}
+	putchar('\n');
 }
 
 static void
@@ -617,9 +707,48 @@ print_ocssd_chunk_info(struct spdk_ocssd_chunk_information_entry *chk_info, int 
 		printf("Chunk type (write mode):        %s\n", ct_str);
 		printf("Chunk type (size_deviate):      %s\n", chk_info[i].ct.size_deviate ? "Yes" : "No");
 		printf("Wear-level Index:               %d\n", chk_info[i].wli);
-		printf("Starting LBA:                   %ld\n", chk_info[i].slba);
-		printf("Number of blocks in chunk:      %ld\n", chk_info[i].cnlb);
-		printf("Write Pointer:                  %ld\n", chk_info[i].wp);
+		printf("Starting LBA:                   %" PRIu64 "\n", chk_info[i].slba);
+		printf("Number of blocks in chunk:      %" PRIu64 "\n", chk_info[i].cnlb);
+		printf("Write Pointer:                  %" PRIu64 "\n", chk_info[i].wp);
+	}
+}
+
+static void
+print_ocssd_chunk_info_verbose(struct spdk_ocssd_chunk_information_entry *chk_info)
+{
+	uint32_t pu, chk, i;
+	uint32_t cnt_free, cnt_closed, cnt_open, cnt_offline;
+	uint32_t max_pu = spdk_min(MAX_OCSSD_PU, (geometry_data.num_grp * geometry_data.num_pu));
+	char cs_str[MAX_OCSSD_PU + 1], cs;
+
+	assert(chk_info != NULL);
+	printf("OCSSD Chunk Info Verbose\n");
+	printf("======================\n");
+
+	printf("%4s %-*s %3s %3s %3s %3s\n", "band", max_pu, "chunk state", "fr", "cl", "op", "of");
+	for (chk = 0; chk < geometry_data.num_chk; chk++) {
+		cnt_free = cnt_closed = cnt_open = cnt_offline = 0;
+		for (pu = 0; pu < max_pu; pu++) {
+			i = (pu * geometry_data.num_chk) + chk;
+			if (chk_info[i].cs.free) {
+				cnt_free++;
+				cs = 'f';
+			} else if (chk_info[i].cs.closed) {
+				cnt_closed++;
+				cs = 'c';
+			} else if (chk_info[i].cs.open) {
+				cnt_open++;
+				cs = 'o';
+			} else if (chk_info[i].cs.offline) {
+				cnt_offline++;
+				cs = 'l';
+			} else {
+				cs = '.';
+			}
+			cs_str[pu] = cs;
+		}
+		cs_str[pu] = 0;
+		printf("%4d %s %3d %3d %3d %3d\n", chk, cs_str, cnt_free, cnt_closed, cnt_open, cnt_offline);
 	}
 }
 
@@ -662,15 +791,126 @@ print_ocssd_geometry(struct spdk_ocssd_geometry_data *geometry_data)
 }
 
 static void
-print_namespace(struct spdk_nvme_ns *ns)
+print_zns_zone(struct spdk_nvme_zns_zone_desc *desc)
 {
+	printf("ZSLBA: 0x%016"PRIx64" ZCAP: 0x%016"PRIx64" WP: 0x%016"PRIx64" ZS: %x ZT: %x ZA: %x\n",
+	       desc->zslba, desc->zcap, desc->wp, desc->zs, desc->zt, desc->za.raw);
+}
+
+static void
+get_and_print_zns_zone_report(struct spdk_nvme_ns *ns, struct spdk_nvme_qpair *qpair)
+{
+	struct spdk_nvme_zns_zone_report *report_buf;
+	size_t report_bufsize;
+	uint64_t zone_size_lba = spdk_nvme_zns_ns_get_zone_size_sectors(ns);
+	uint64_t total_zones = spdk_nvme_zns_ns_get_num_zones(ns);
+	uint64_t max_zones_per_buf, zones_to_print, i;
+	uint64_t handled_zones = 0;
+	uint64_t slba = 0;
+
+	outstanding_commands = 0;
+
+	report_bufsize = spdk_nvme_ns_get_max_io_xfer_size(ns);
+	report_buf = malloc(report_bufsize);
+	if (!report_buf) {
+		printf("Zone report allocation failed!\n");
+		exit(1);
+	}
+
+	zones_to_print = g_zone_report_limit ? spdk_min(total_zones, (uint64_t)g_zone_report_limit) : \
+			 total_zones;
+
+	print_uline('=', printf("NVMe ZNS Zone Report (first %zu of %zu)\n", zones_to_print, total_zones));
+
+	while (handled_zones < zones_to_print) {
+		memset(report_buf, 0, report_bufsize);
+
+		if (spdk_nvme_zns_report_zones(ns, qpair, report_buf, report_bufsize,
+					       slba, SPDK_NVME_ZRA_LIST_ALL, true,
+					       get_zns_zone_report_completion, NULL)) {
+			fprintf(stderr, "spdk_nvme_zns_report_zones() failed\n");
+			exit(1);
+		} else {
+			outstanding_commands++;
+		}
+
+		while (outstanding_commands) {
+			spdk_nvme_qpair_process_completions(qpair, 0);
+		}
+
+		max_zones_per_buf = (report_bufsize - sizeof(*report_buf)) / sizeof(report_buf->descs[0]);
+		if (report_buf->nr_zones > max_zones_per_buf) {
+			fprintf(stderr, "nr_zones too big\n");
+			exit(1);
+		}
+
+		if (!report_buf->nr_zones) {
+			break;
+		}
+
+		for (i = 0; i < report_buf->nr_zones && handled_zones < zones_to_print; i++) {
+			print_zns_zone(&report_buf->descs[i]);
+			slba += zone_size_lba;
+			handled_zones++;
+		}
+	}
+
+	free(report_buf);
+}
+
+static void
+print_zns_ns_data(const struct spdk_nvme_zns_ns_data *nsdata_zns)
+{
+	printf("ZNS Specific Namespace Data\n");
+	printf("===========================\n");
+	printf("Variable Zone Capacity:                %s\n",
+	       nsdata_zns->zoc.variable_zone_capacity ? "Yes" : "No");
+	printf("Zone Active Excursions:                %s\n",
+	       nsdata_zns->zoc.zone_active_excursions ? "Yes" : "No");
+	printf("Read Across Zone Boundaries:           %s\n",
+	       nsdata_zns->ozcs.read_across_zone_boundaries ? "Yes" : "No");
+	if (nsdata_zns->mar == 0xffffffff) {
+		printf("Max Active Resources:                  No Limit\n");
+	} else {
+		printf("Max Active Resources:                  %"PRIu32"\n",
+		       nsdata_zns->mar + 1);
+	}
+	if (nsdata_zns->mor == 0xffffffff) {
+		printf("Max Open Resources:                    No Limit\n");
+	} else {
+		printf("Max Open Resources:                    %"PRIu32"\n",
+		       nsdata_zns->mor + 1);
+	}
+	if (nsdata_zns->rrl == 0) {
+		printf("Reset Recommended Limit:               Not Reported\n");
+	} else {
+		printf("Reset Recommended Limit:               %"PRIu32"\n",
+		       nsdata_zns->rrl);
+	}
+	if (nsdata_zns->frl == 0) {
+		printf("Finish Recommended Limit:              Not Reported\n");
+	} else {
+		printf("Finish Recommended Limit:              %"PRIu32"\n",
+		       nsdata_zns->frl);
+	}
+	printf("\n");
+}
+
+static void
+print_namespace(struct spdk_nvme_ctrlr *ctrlr, struct spdk_nvme_ns *ns)
+{
+	const struct spdk_nvme_ctrlr_data	*cdata;
 	const struct spdk_nvme_ns_data		*nsdata;
+	const struct spdk_nvme_zns_ns_data	*nsdata_zns;
 	const struct spdk_uuid			*uuid;
 	uint32_t				i;
 	uint32_t				flags;
 	char					uuid_str[SPDK_UUID_STRING_LEN];
+	uint32_t				blocksize;
 
+	cdata = spdk_nvme_ctrlr_get_data(ctrlr);
 	nsdata = spdk_nvme_ns_get_data(ns);
+	nsdata_zns = spdk_nvme_zns_ns_get_data(ns);
 	flags  = spdk_nvme_ns_get_flags(ns);
 
 	printf("Namespace ID:%d\n", spdk_nvme_ns_get_id(ns));
@@ -711,15 +951,16 @@ print_namespace(struct spdk_nvme_ns *ns)
 	}
 	printf("Namespace Sharing Capabilities:        %s\n",
 	       nsdata->nmic.can_share ? "Multiple Controllers" : "Private");
-	printf("Size (in LBAs):                        %lld (%lldM)\n",
+	blocksize = 1 << nsdata->lbaf[nsdata->flbas.format].lbads;
+	printf("Size (in LBAs):                        %lld (%lldGiB)\n",
 	       (long long)nsdata->nsze,
-	       (long long)nsdata->nsze / 1024 / 1024);
-	printf("Capacity (in LBAs):                    %lld (%lldM)\n",
+	       (long long)nsdata->nsze * blocksize / 1024 / 1024 / 1024);
+	printf("Capacity (in LBAs):                    %lld (%lldGiB)\n",
 	       (long long)nsdata->ncap,
-	       (long long)nsdata->ncap / 1024 / 1024);
-	printf("Utilization (in LBAs):                 %lld (%lldM)\n",
+	       (long long)nsdata->ncap * blocksize / 1024 / 1024 / 1024);
+	printf("Utilization (in LBAs):                 %lld (%lldGiB)\n",
 	       (long long)nsdata->nuse,
-	       (long long)nsdata->nuse / 1024 / 1024);
+	       (long long)nsdata->nuse * blocksize / 1024 / 1024 / 1024);
 	if (nsdata->noiob) {
 		printf("Optimal I/O Boundary:                  %u blocks\n", nsdata->noiob);
 	}
@@ -762,19 +1003,43 @@ print_namespace(struct spdk_nvme_ns *ns)
 
 	printf("NGUID/EUI64 Never Reused:              %s\n",
 	       nsdata->nsfeat.guid_never_reused ? "Yes" : "No");
+
+	if (cdata->cmic.ana_reporting) {
+		printf("ANA group ID:                          %u\n", nsdata->anagrpid);
+	}
+
 	printf("Number of LBA Formats:                 %d\n", nsdata->nlbaf + 1);
 	printf("Current LBA Format:                    LBA Format #%02d\n",
 	       nsdata->flbas.format);
-	for (i = 0; i <= nsdata->nlbaf; i++)
+	for (i = 0; i <= nsdata->nlbaf; i++) {
 		printf("LBA Format #%02d: Data Size: %5d  Metadata Size: %5d\n",
 		       i, 1 << nsdata->lbaf[i].lbads, nsdata->lbaf[i].ms);
+		if (spdk_nvme_ns_get_csi(ns) == SPDK_NVME_CSI_ZNS) {
+			printf("LBA Format Extension #%02d: Zone Size (in LBAs): 0x%"PRIx64" Zone Descriptor Extension Size: %d bytes\n",
+			       i, nsdata_zns->lbafe[i].zsze, nsdata_zns->lbafe[i].zdes << 6);
+		}
+
+	}
 	printf("\n");
 
-	if (spdk_nvme_ctrlr_is_ocssd_supported(spdk_nvme_ns_get_ctrlr(ns))) {
+	if (spdk_nvme_ctrlr_is_ocssd_supported(ctrlr)) {
 		get_ocssd_geometry(ns, &geometry_data);
 		print_ocssd_geometry(&geometry_data);
 		get_ocssd_chunk_info_log_page(ns);
-		print_ocssd_chunk_info(g_ocssd_chunk_info_page, NUM_CHUNK_INFO_ENTRIES);
+		if (g_ocssd_verbose) {
+			print_ocssd_chunk_info_verbose(g_ocssd_chunk_info_page);
+		} else {
+			print_ocssd_chunk_info(g_ocssd_chunk_info_page, NUM_CHUNK_INFO_ENTRIES);
+		}
+	} else if (spdk_nvme_ns_get_csi(ns) == SPDK_NVME_CSI_ZNS) {
+		struct spdk_nvme_qpair *qpair = spdk_nvme_ctrlr_alloc_io_qpair(ctrlr, NULL, 0);
+		if (qpair == NULL) {
+			printf("ERROR: spdk_nvme_ctrlr_alloc_io_qpair() failed\n");
+			exit(1);
+		}
+		print_zns_ns_data(nsdata_zns);
+		get_and_print_zns_zone_report(ns, qpair);
+		spdk_nvme_ctrlr_free_io_qpair(qpair);
 	}
 }
 
@@ -883,17 +1148,20 @@ print_controller(struct spdk_nvme_ctrlr *ctrlr, const struct spdk_nvme_transport
 	union spdk_nvme_cap_register		cap;
 	union spdk_nvme_vs_register		vs;
 	union spdk_nvme_cmbsz_register		cmbsz;
+	union spdk_nvme_pmrcap_register		pmrcap;
 	uint8_t					str[512];
-	uint32_t				i;
+	uint32_t				i, j;
 	struct spdk_nvme_error_information_entry *error_entry;
 	struct spdk_pci_addr			pci_addr;
 	struct spdk_pci_device			*pci_dev;
 	struct spdk_pci_id			pci_id;
 	uint32_t				nsid;
+	struct spdk_nvme_ana_group_descriptor	*desc;
 
 	cap = spdk_nvme_ctrlr_get_regs_cap(ctrlr);
 	vs = spdk_nvme_ctrlr_get_regs_vs(ctrlr);
 	cmbsz = spdk_nvme_ctrlr_get_regs_cmbsz(ctrlr);
+	pmrcap = spdk_nvme_ctrlr_get_regs_pmrcap(ctrlr);
 
 	if (!spdk_nvme_ctrlr_is_discovery(ctrlr)) {
 		/*
@@ -1006,6 +1274,9 @@ print_controller(struct spdk_nvme_ctrlr *ctrlr, const struct spdk_nvme_transport
 	       (uint64_t)1 << (12 + cap.bits.mpsmin));
 	printf("Memory Page Size Maximum:              %" PRIu64 " bytes\n",
 	       (uint64_t)1 << (12 + cap.bits.mpsmax));
+	printf("Persistent Memory Region:              %s\n",
+	       cap.bits.pmrs ? "Supported" : "Not Supported");
+
 	printf("Optional Asynchronous Events Supported\n");
 	printf("  Namespace Attribute Notices:         %s\n",
 	       cdata->oaes.ns_attribute_notices ? "Supported" : "Not Supported");
@@ -1027,7 +1298,7 @@ print_controller(struct spdk_nvme_ctrlr *ctrlr, const struct spdk_nvme_transport
 		size *= (0x1000 << (cmbsz.bits.szu * 4));
 
 		printf("Supported:                             Yes\n");
-		printf("Total Size:                            %lu bytes\n", size);
+		printf("Total Size:                            %" PRIu64 " bytes\n", size);
 		printf("Submission Queues in CMB:              %s\n",
 		       cmbsz.bits.sqs ? "Supported" : "Not Supported");
 		printf("Completion Queues in CMB:              %s\n",
@@ -1036,6 +1307,19 @@ print_controller(struct spdk_nvme_ctrlr *ctrlr, const struct spdk_nvme_transport
 		       cmbsz.bits.rds ? "Supported" : "Not Supported");
 		printf("Write data and metadata in CMB:        %s\n",
 		       cmbsz.bits.wds ? "Supported" : "Not Supported");
+	} else {
+		printf("Supported:                             No\n");
+	}
+	printf("\n");
+
+	printf("Persistent Memory Region Support\n");
+	printf("================================\n");
+	if (cap.bits.pmrs != 0) {
+		printf("Supported:                             Yes\n");
+		printf("Read data and metadata in PMR          %s\n",
+		       pmrcap.bits.rds ? "Supported" : "Not Supported");
+		printf("Write data and metadata in PMR:        %s\n",
+		       pmrcap.bits.wds ? "Supported" : "Not Supported");
 	} else {
 		printf("Supported:                             No\n");
 	}
@@ -1085,6 +1369,32 @@ print_controller(struct spdk_nvme_ctrlr *ctrlr, const struct spdk_nvme_transport
 	}
 	printf("Per-Namespace SMART Log:               %s\n",
 	       cdata->lpa.ns_smart ? "Yes" : "No");
+	if (cdata->cmic.ana_reporting == 0) {
+		printf("Asymmetric Namespace Access Log Page:  Not Supported\n");
+	} else {
+		printf("Asymmetric Namespace Access Log Page:  Supported\n");
+		printf("ANA Transition Time                 :  %u sec\n", cdata->anatt);
+		printf("\n");
+		printf("Aymmetric Namespace Access Capabilities\n");
+		printf("  ANA Optimized State               : %s\n",
+		       cdata->anacap.ana_optimized_state ? "Supported" : "Not Supported");
+		printf("  ANA Non-Optimized State           : %s\n",
+		       cdata->anacap.ana_non_optimized_state ? "Supported" : "Not Supported");
+		printf("  ANA Inaccessible State            : %s\n",
+		       cdata->anacap.ana_inaccessible_state ? "Supported" : "Not Supported");
+		printf("  ANA Persistent Loss State         : %s\n",
+		       cdata->anacap.ana_persistent_loss_state ? "Supported" : "Not Supported");
+		printf("  ANA Change State                  : %s\n",
+		       cdata->anacap.ana_change_state ? "Supported" : "Not Supported");
+		printf("  ANAGRPID is not changed           : %s\n",
+		       cdata->anacap.no_change_anagrpid ? "Yes" : "No");
+		printf("  Non-Zero ANAGRPID for NS Mgmt Cmd : %s\n",
+		       cdata->anacap.non_zero_anagrpid ? "Supported" : "Not Supported");
+		printf("\n");
+		printf("ANA Group Identifier Maximum        : %u\n", cdata->anagrpmax);
+		printf("Number of ANA Group Identifiers     : %u\n", cdata->nanagrpid);
+		printf("Max Number of Allowed Namespaces    : %u\n", cdata->mnan);
+	}
 	printf("Command Effects Log Page:              %s\n",
 	       cdata->lpa.celp ? "Supported" : "Not Supported");
 	printf("Get Log Page Extended Data:            %s\n",
@@ -1179,6 +1489,36 @@ print_controller(struct spdk_nvme_ctrlr *ctrlr, const struct spdk_nvme_transport
 			printf("\n");
 		}
 	}
+	printf("\n");
+
+	if (g_ana_log_page) {
+		printf("Asymmetric Namespace Access\n");
+		printf("===========================\n");
+		if (g_hex_dump) {
+			hex_dump(g_ana_log_page, g_ana_log_page_size);
+			printf("\n");
+		}
+
+		printf("Change Count                    : %" PRIx64 "\n", g_ana_log_page->change_count);
+		printf("Number of ANA Group Descriptors : %u\n", g_ana_log_page->num_ana_group_desc);
+
+		desc = (void *)((uint8_t *)g_ana_log_page + sizeof(struct spdk_nvme_ana_page));
+
+		for (i = 0; i < g_ana_log_page->num_ana_group_desc; i++) {
+			printf("ANA Group Descriptor            : %u\n", i);
+			printf("  ANA Group ID                  : %u\n", desc->ana_group_id);
+			printf("  Number of NSID Values         : %u\n", desc->num_of_nsid);
+			printf("  Change Count                  : %" PRIx64 "\n", desc->change_count);
+			printf("  ANA State                     : %u\n", desc->ana_state);
+			for (j = 0; j < desc->num_of_nsid; j++) {
+				printf("  Namespace Identifier          : %u\n", desc->nsid[j]);
+			}
+			desc = (void *)((uint8_t *)desc + sizeof(struct spdk_nvme_ana_group_descriptor) +
+					desc->num_of_nsid * sizeof(uint32_t));
+		}
+		free(g_ana_log_page);
+	}
+
 	printf("\n");
 
 	if (cdata->lpa.celp) {
@@ -1539,18 +1879,18 @@ print_controller(struct spdk_nvme_ctrlr *ctrlr, const struct spdk_nvme_transport
 	if (spdk_nvme_ctrlr_is_log_page_supported(ctrlr, SPDK_NVME_INTEL_LOG_TEMPERATURE)) {
 		printf("Intel Temperature Information\n");
 		printf("==================\n");
-		printf("Current Temperature: %lu\n", intel_temperature_page.current_temperature);
-		printf("Overtemp shutdown Flag for last critical component temperature: %lu\n",
+		printf("Current Temperature: %" PRIu64 "\n", intel_temperature_page.current_temperature);
+		printf("Overtemp shutdown Flag for last critical component temperature: %" PRIu64 "\n",
 		       intel_temperature_page.shutdown_flag_last);
-		printf("Overtemp shutdown Flag for life critical component temperature: %lu\n",
+		printf("Overtemp shutdown Flag for life critical component temperature: %" PRIu64 "\n",
 		       intel_temperature_page.shutdown_flag_life);
-		printf("Highest temperature: %lu\n", intel_temperature_page.highest_temperature);
-		printf("Lowest temperature: %lu\n", intel_temperature_page.lowest_temperature);
-		printf("Specified Maximum Operating Temperature: %lu\n",
+		printf("Highest temperature: %" PRIu64 "\n", intel_temperature_page.highest_temperature);
+		printf("Lowest temperature: %" PRIu64 "\n", intel_temperature_page.lowest_temperature);
+		printf("Specified Maximum Operating Temperature: %" PRIu64 "\n",
 		       intel_temperature_page.specified_max_op_temperature);
-		printf("Specified Minimum Operating Temperature: %lu\n",
+		printf("Specified Minimum Operating Temperature: %" PRIu64 "\n",
 		       intel_temperature_page.specified_min_op_temperature);
-		printf("Estimated offset: %ld\n", intel_temperature_page.estimated_offset);
+		printf("Estimated offset: %" PRId64 "\n", (int64_t)intel_temperature_page.estimated_offset);
 		printf("\n");
 		printf("\n");
 
@@ -1565,11 +1905,20 @@ print_controller(struct spdk_nvme_ctrlr *ctrlr, const struct spdk_nvme_transport
 		printf("\n");
 	}
 
+	if (spdk_nvme_zns_ctrlr_get_data(ctrlr)) {
+		printf("ZNS Specific Controller Data\n");
+		printf("============================\n");
+		printf("Zone Append Size Limit:      %u\n",
+		       spdk_nvme_zns_ctrlr_get_data(ctrlr)->zasl);
+		printf("\n");
+		printf("\n");
+	}
+
 	printf("Active Namespaces\n");
 	printf("=================\n");
 	for (nsid = spdk_nvme_ctrlr_get_first_active_ns(ctrlr);
 	     nsid != 0; nsid = spdk_nvme_ctrlr_get_next_active_ns(ctrlr, nsid)) {
-		print_namespace(spdk_nvme_ctrlr_get_ns(ctrlr, nsid));
+		print_namespace(ctrlr, spdk_nvme_ctrlr_get_ns(ctrlr, nsid));
 	}
 
 	if (g_discovery_page) {
@@ -1666,6 +2015,7 @@ usage(const char *program_name)
 	printf("     traddr      Transport address (e.g. 192.168.100.8)\n");
 	printf("     trsvcid     Transport service identifier (e.g. 4420)\n");
 	printf("     subnqn      Subsystem NQN (default: %s)\n", SPDK_NVMF_DISCOVERY_NQN);
+	printf("     hostnqn     Host NQN\n");
 	printf("    Example: -r 'trtype:RDMA adrfam:IPv4 traddr:192.168.100.8 trsvcid:4420'\n");
 
 	spdk_log_usage(stdout, "-L");
@@ -1673,7 +2023,9 @@ usage(const char *program_name)
 	printf(" -i         shared memory group ID\n");
 	printf(" -p         core number in decimal to run this application which started from 0\n");
 	printf(" -d         DPDK huge memory size in MB\n");
+	printf(" -g         use single file descriptor for DPDK memory segments\n");
 	printf(" -x         print hex dump of raw data\n");
+	printf(" -z         For NVMe Zoned Namespaces, dump the full zone report (-z) or the first N entries (-z N)\n");
 	printf(" -v         verbose (enable warnings)\n");
 	printf(" -V         enumerate VMD\n");
 	printf(" -H         show this usage\n");
@@ -1683,11 +2035,12 @@ static int
 parse_args(int argc, char **argv)
 {
 	int op, rc;
+	char *hostnqn;
 
-	g_trid.trtype = SPDK_NVME_TRANSPORT_PCIE;
+	spdk_nvme_trid_populate_transport(&g_trid, SPDK_NVME_TRANSPORT_PCIE);
 	snprintf(g_trid.subnqn, sizeof(g_trid.subnqn), "%s", SPDK_NVMF_DISCOVERY_NQN);
 
-	while ((op = getopt(argc, argv, "d:i:p:r:xHL:V")) != -1) {
+	while ((op = getopt(argc, argv, "d:gi:op:r:xz::HL:V")) != -1) {
 		switch (op) {
 		case 'd':
 			g_dpdk_mem = spdk_strtol(optarg, 10);
@@ -1696,6 +2049,9 @@ parse_args(int argc, char **argv)
 				return g_dpdk_mem;
 			}
 			break;
+		case 'g':
+			g_dpdk_mem_single_seg = true;
+			break;
 		case 'i':
 			g_shm_id = spdk_strtol(optarg, 10);
 			if (g_shm_id < 0) {
@@ -1703,22 +2059,56 @@ parse_args(int argc, char **argv)
 				return g_shm_id;
 			}
 			break;
+		case 'o':
+			g_ocssd_verbose = true;
+			break;
 		case 'p':
-			g_master_core = spdk_strtol(optarg, 10);
-			if (g_master_core < 0) {
+			g_main_core = spdk_strtol(optarg, 10);
+			if (g_main_core < 0) {
 				fprintf(stderr, "Invalid core number\n");
-				return g_master_core;
+				return g_main_core;
 			}
-			snprintf(g_core_mask, sizeof(g_core_mask), "0x%llx", 1ULL << g_master_core);
+			snprintf(g_core_mask, sizeof(g_core_mask), "0x%llx", 1ULL << g_main_core);
 			break;
 		case 'r':
 			if (spdk_nvme_transport_id_parse(&g_trid, optarg) != 0) {
 				fprintf(stderr, "Error parsing transport address\n");
 				return 1;
 			}
+
+			assert(optarg != NULL);
+			hostnqn = strcasestr(optarg, "hostnqn:");
+			if (hostnqn) {
+				size_t len;
+
+				hostnqn += strlen("hostnqn:");
+
+				len = strcspn(hostnqn, " \t\n");
+				if (len > (sizeof(g_hostnqn) - 1)) {
+					fprintf(stderr, "Host NQN is too long\n");
+					return 1;
+				}
+
+				memcpy(g_hostnqn, hostnqn, len);
+				g_hostnqn[len] = '\0';
+			}
 			break;
 		case 'x':
 			g_hex_dump = true;
+			break;
+		case 'z':
+			if (optarg == NULL && argv[optind] != NULL && argv[optind][0] != '-') {
+				g_zone_report_limit = spdk_strtol(argv[optind], 10);
+				++optind;
+			} else if (optarg) {
+				g_zone_report_limit = spdk_strtol(optarg, 10);
+			} else {
+				g_zone_report_limit = 0;
+			}
+			if (g_zone_report_limit < 0) {
+				fprintf(stderr, "Invalid Zone Report limit\n");
+				return g_zone_report_limit;
+			}
 			break;
 		case 'L':
 			rc = spdk_log_set_flag(optarg);
@@ -1727,17 +2117,13 @@ parse_args(int argc, char **argv)
 				usage(argv[0]);
 				exit(EXIT_FAILURE);
 			}
+#ifdef DEBUG
 			spdk_log_set_print_level(SPDK_LOG_DEBUG);
-#ifndef DEBUG
-			fprintf(stderr, "%s must be rebuilt with CONFIG_DEBUG=y for -L flag.\n",
-				argv[0]);
-			usage(argv[0]);
-			return 0;
 #endif
 			break;
 		case 'H':
 			usage(argv[0]);
-			break;
+			exit(EXIT_SUCCESS);
 		case 'V':
 			g_vmd = true;
 			break;
@@ -1754,6 +2140,7 @@ static bool
 probe_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
 	 struct spdk_nvme_ctrlr_opts *opts)
 {
+	memcpy(opts->hostnqn, g_hostnqn, sizeof(opts->hostnqn));
 	return true;
 }
 
@@ -1782,8 +2169,9 @@ int main(int argc, char **argv)
 	opts.shm_id = g_shm_id;
 	opts.mem_size = g_dpdk_mem;
 	opts.mem_channel = 1;
-	opts.master_core = g_master_core;
+	opts.main_core = g_main_core;
 	opts.core_mask = g_core_mask;
+	opts.hugepage_single_segments = g_dpdk_mem_single_seg;
 	if (g_trid.trtype != SPDK_NVME_TRANSPORT_PCIE) {
 		opts.no_pci = true;
 	}
@@ -1799,7 +2187,11 @@ int main(int argc, char **argv)
 
 	/* A specific trid is required. */
 	if (strlen(g_trid.traddr) != 0) {
-		ctrlr = spdk_nvme_connect(&g_trid, NULL, 0);
+		struct spdk_nvme_ctrlr_opts opts;
+
+		spdk_nvme_ctrlr_get_default_ctrlr_opts(&opts, sizeof(opts));
+		memcpy(opts.hostnqn, g_hostnqn, sizeof(opts.hostnqn));
+		ctrlr = spdk_nvme_connect(&g_trid, &opts, sizeof(opts));
 		if (!ctrlr) {
 			fprintf(stderr, "spdk_nvme_connect() failed\n");
 			return 1;
@@ -1815,6 +2207,10 @@ int main(int argc, char **argv)
 
 	if (g_controllers_found == 0) {
 		fprintf(stderr, "No NVMe controllers found.\n");
+	}
+
+	if (g_vmd) {
+		spdk_vmd_fini();
 	}
 
 	return 0;

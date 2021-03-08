@@ -148,31 +148,67 @@ test_base64_decode(void)
 	size_t raw_len;
 	int ret;
 
+	/* len */
+	ret = spdk_base64_decode(NULL, &raw_len, text_A);
+	CU_ASSERT_EQUAL(ret, 0);
+	CU_ASSERT_EQUAL(raw_len, sizeof(raw_A));
+
+	/* decode */
 	ret = spdk_base64_decode(raw, &raw_len, text_A);
 	CU_ASSERT_EQUAL(ret, 0);
 	CU_ASSERT_EQUAL(raw_len, sizeof(raw_A));
 	CU_ASSERT(memcmp(raw, raw_A, sizeof(raw_A)) == 0);
 
+	/* len */
+	ret = spdk_base64_decode(NULL, &raw_len, text_B);
+	CU_ASSERT_EQUAL(ret, 0);
+	CU_ASSERT_EQUAL(raw_len, sizeof(raw_B));
+
+	/* decode */
 	ret = spdk_base64_decode(raw, &raw_len, text_B);
 	CU_ASSERT_EQUAL(ret, 0);
 	CU_ASSERT_EQUAL(raw_len, sizeof(raw_B));
 	CU_ASSERT(memcmp(raw, raw_B, sizeof(raw_B)) == 0);
 
+	/* len */
+	ret = spdk_base64_decode(NULL, &raw_len, text_C);
+	CU_ASSERT_EQUAL(ret, 0);
+	CU_ASSERT_EQUAL(raw_len, sizeof(raw_C));
+
+	/* decode */
 	ret = spdk_base64_decode(raw, &raw_len, text_C);
 	CU_ASSERT_EQUAL(ret, 0);
 	CU_ASSERT_EQUAL(raw_len, sizeof(raw_C));
 	CU_ASSERT(memcmp(raw, raw_C, sizeof(raw_C)) == 0);
 
+	/* len */
+	ret = spdk_base64_decode(NULL, &raw_len, text_D);
+	CU_ASSERT_EQUAL(ret, 0);
+	CU_ASSERT_EQUAL(raw_len, sizeof(raw_D));
+
+	/* decode */
 	ret = spdk_base64_decode(raw, &raw_len, text_D);
 	CU_ASSERT_EQUAL(ret, 0);
 	CU_ASSERT_EQUAL(raw_len, sizeof(raw_D));
 	CU_ASSERT(memcmp(raw, raw_D, sizeof(raw_D)) == 0);
 
+	/* len */
+	ret = spdk_base64_decode(NULL, &raw_len, text_I);
+	CU_ASSERT_EQUAL(ret, 0);
+	CU_ASSERT_EQUAL(raw_len, sizeof(raw_I));
+
+	/* decode */
 	ret = spdk_base64_decode(raw, &raw_len, text_I);
 	CU_ASSERT_EQUAL(ret, 0);
 	CU_ASSERT_EQUAL(raw_len, sizeof(raw_I));
 	CU_ASSERT(memcmp(raw, raw_I, sizeof(raw_I)) == 0);
 
+	/* len */
+	ret = spdk_base64_decode(NULL, &raw_len, text_J);
+	CU_ASSERT_EQUAL(ret, 0);
+	CU_ASSERT_EQUAL(raw_len, sizeof(raw_J));
+
+	/* decode */
 	ret = spdk_base64_decode(raw, &raw_len, text_J);
 	CU_ASSERT_EQUAL(ret, 0);
 	CU_ASSERT_EQUAL(raw_len, sizeof(raw_J));
@@ -185,8 +221,6 @@ test_base64_decode(void)
 	ret = spdk_base64_decode(raw, &raw_len, text_G);
 	CU_ASSERT_EQUAL(ret, -EINVAL);
 	ret = spdk_base64_decode(raw, &raw_len, text_H);
-	CU_ASSERT_EQUAL(ret, -EINVAL);
-	ret = spdk_base64_decode(NULL, &raw_len, text_H);
 	CU_ASSERT_EQUAL(ret, -EINVAL);
 	ret = spdk_base64_decode(raw, &raw_len, NULL);
 	CU_ASSERT_EQUAL(ret, -EINVAL);
@@ -240,31 +274,67 @@ test_base64_urlsafe_decode(void)
 	size_t raw_len = 0;
 	int ret;
 
+	/* len */
+	ret = spdk_base64_urlsafe_decode(NULL, &raw_len, text_A);
+	CU_ASSERT_EQUAL(ret, 0);
+	CU_ASSERT_EQUAL(raw_len, sizeof(raw_A));
+
+	/* decode */
 	ret = spdk_base64_urlsafe_decode(raw, &raw_len, text_A);
 	CU_ASSERT_EQUAL(ret, 0);
 	CU_ASSERT_EQUAL(raw_len, sizeof(raw_A));
 	CU_ASSERT(memcmp(raw, raw_A, sizeof(raw_A)) == 0);
 
+	/* len */
+	ret = spdk_base64_urlsafe_decode(NULL, &raw_len, text_urlsafe_B);
+	CU_ASSERT_EQUAL(ret, 0);
+	CU_ASSERT_EQUAL(raw_len, sizeof(raw_B));
+
+	/* decode */
 	ret = spdk_base64_urlsafe_decode(raw, &raw_len, text_urlsafe_B);
 	CU_ASSERT_EQUAL(ret, 0);
 	CU_ASSERT_EQUAL(raw_len, sizeof(raw_B));
 	CU_ASSERT(memcmp(raw, raw_B, sizeof(raw_B)) == 0);
 
+	/* len */
+	ret = spdk_base64_urlsafe_decode(NULL, &raw_len, text_urlsafe_C);
+	CU_ASSERT_EQUAL(ret, 0);
+	CU_ASSERT_EQUAL(raw_len, sizeof(raw_C));
+
+	/* decode */
 	ret = spdk_base64_urlsafe_decode(raw, &raw_len, text_urlsafe_C);
 	CU_ASSERT_EQUAL(ret, 0);
 	CU_ASSERT_EQUAL(raw_len, sizeof(raw_C));
 	CU_ASSERT(memcmp(raw, raw_C, sizeof(raw_C)) == 0);
 
+	/* len */
+	ret = spdk_base64_urlsafe_decode(NULL, &raw_len, text_urlsafe_D);
+	CU_ASSERT_EQUAL(ret, 0);
+	CU_ASSERT_EQUAL(raw_len, sizeof(raw_D));
+
+	/* decode */
 	ret = spdk_base64_urlsafe_decode(raw, &raw_len, text_urlsafe_D);
 	CU_ASSERT_EQUAL(ret, 0);
 	CU_ASSERT_EQUAL(raw_len, sizeof(raw_D));
 	CU_ASSERT(memcmp(raw, raw_D, sizeof(raw_D)) == 0);
 
+	/* len */
+	ret = spdk_base64_urlsafe_decode(NULL, &raw_len, text_urlsafe_I);
+	CU_ASSERT_EQUAL(ret, 0);
+	CU_ASSERT_EQUAL(raw_len, sizeof(raw_I));
+
+	/* decode */
 	ret = spdk_base64_urlsafe_decode(raw, &raw_len, text_urlsafe_I);
 	CU_ASSERT_EQUAL(ret, 0);
 	CU_ASSERT_EQUAL(raw_len, sizeof(raw_I));
 	CU_ASSERT(memcmp(raw, raw_I, sizeof(raw_I)) == 0);
 
+	/* len */
+	ret = spdk_base64_urlsafe_decode(NULL, &raw_len, text_urlsafe_J);
+	CU_ASSERT_EQUAL(ret, 0);
+	CU_ASSERT_EQUAL(raw_len, sizeof(raw_J));
+
+	/* decode */
 	ret = spdk_base64_urlsafe_decode(raw, &raw_len, text_urlsafe_J);
 	CU_ASSERT_EQUAL(ret, 0);
 	CU_ASSERT_EQUAL(raw_len, sizeof(raw_J));
@@ -278,8 +348,6 @@ test_base64_urlsafe_decode(void)
 	CU_ASSERT_EQUAL(ret, -EINVAL);
 	ret = spdk_base64_urlsafe_decode(raw, &raw_len, text_H);
 	CU_ASSERT_EQUAL(ret, -EINVAL);
-	ret = spdk_base64_urlsafe_decode(NULL, &raw_len, text_H);
-	CU_ASSERT_EQUAL(ret, -EINVAL);
 	ret = spdk_base64_urlsafe_decode(raw, &raw_len, NULL);
 	CU_ASSERT_EQUAL(ret, -EINVAL);
 }
@@ -290,27 +358,17 @@ main(int argc, char **argv)
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	if (CU_initialize_registry() != CUE_SUCCESS) {
-		return CU_get_error();
-	}
+	CU_set_error_action(CUEA_ABORT);
+	CU_initialize_registry();
 
 	suite = CU_add_suite("base64", NULL, NULL);
-	if (suite == NULL) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
 
-	if (
-		CU_add_test(suite, "test_base64_get_encoded_strlen", test_base64_get_encoded_strlen) == NULL ||
-		CU_add_test(suite, "test_base64_get_decoded_len",
-			    test_base64_get_decoded_len) == NULL ||
-		CU_add_test(suite, "test_base64_encode", test_base64_encode) == NULL ||
-		CU_add_test(suite, "test_base64_decode", test_base64_decode) == NULL ||
-		CU_add_test(suite, "test_base64_urlsafe_encode", test_base64_urlsafe_encode) == NULL ||
-		CU_add_test(suite, "test_base64_urlsafe_decode", test_base64_urlsafe_decode) == NULL) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
+	CU_ADD_TEST(suite, test_base64_get_encoded_strlen);
+	CU_ADD_TEST(suite, test_base64_get_decoded_len);
+	CU_ADD_TEST(suite, test_base64_encode);
+	CU_ADD_TEST(suite, test_base64_decode);
+	CU_ADD_TEST(suite, test_base64_urlsafe_encode);
+	CU_ADD_TEST(suite, test_base64_urlsafe_decode);
 
 	CU_basic_set_mode(CU_BRM_VERBOSE);
 

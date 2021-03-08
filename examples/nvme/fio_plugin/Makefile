@@ -32,11 +32,14 @@
 #  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
 
-SPDK_ROOT_DIR := $(CURDIR)/../../..
+SPDK_ROOT_DIR := $(abspath $(CURDIR)/../../..)
+include $(SPDK_ROOT_DIR)/mk/spdk.common.mk
+include $(SPDK_ROOT_DIR)/mk/spdk.modules.mk
 
-APP := fio_plugin
+FIO_PLUGIN := spdk_nvme
 
-CFLAGS += -I$(CONFIG_FIO_SOURCE_DIR)
-LDFLAGS += -shared -rdynamic
+C_SRCS = fio_plugin.c
 
-include $(SPDK_ROOT_DIR)/mk/nvme.libtest.mk
+SPDK_LIB_LIST = $(SOCK_MODULES_LIST) nvme vmd
+
+include $(SPDK_ROOT_DIR)/mk/spdk.fio.mk

@@ -43,6 +43,8 @@
 #include "nvme_cuse.h"
 
 struct cuse_device {
+	bool				is_started;
+
 	char				dev_name[128];
 	uint32_t			index;
 	int				claim_fd;
@@ -55,24 +57,26 @@ struct cuse_device {
 	struct fuse_session		*session;
 
 	struct cuse_device		*ctrlr_device;
-	TAILQ_HEAD(, cuse_device)	ns_devices;
+	struct cuse_device		*ns_devices;	/**< Array of cuse ns devices */
 
 	TAILQ_ENTRY(cuse_device)	tailq;
 };
 
+static pthread_mutex_t g_cuse_mtx = PTHREAD_MUTEX_INITIALIZER;
 static TAILQ_HEAD(, cuse_device) g_ctrlr_ctx_head = TAILQ_HEAD_INITIALIZER(g_ctrlr_ctx_head);
 static struct spdk_bit_array *g_ctrlr_started;
 
 struct cuse_io_ctx {
-	struct spdk_nvme_cmd	nvme_cmd;
+	struct spdk_nvme_cmd		nvme_cmd;
+	enum spdk_nvme_data_transfer	data_transfer;
 
-	uint64_t		lba;
-	uint32_t		lba_count;
+	uint64_t			lba;
+	uint32_t			lba_count;
 
-	void			*data;
-	int			data_len;
+	void				*data;
+	int				data_len;
 
-	fuse_req_t		req;
+	fuse_req_t			req;
 };
 
 static void
@@ -98,16 +102,22 @@ cuse_nvme_admin_cmd_cb(void *arg, const struct spdk_nvme_cpl *cpl)
 	struct iovec out_iov[2];
 	struct spdk_nvme_cpl _cpl;
 
-	memcpy(&_cpl, cpl, sizeof(struct spdk_nvme_cpl));
-
-	out_iov[0].iov_base = &_cpl.cdw0;
-	out_iov[0].iov_len = sizeof(_cpl.cdw0);
-	if (ctx->data_len > 0) {
-		out_iov[1].iov_base = ctx->data;
-		out_iov[1].iov_len = ctx->data_len;
-		fuse_reply_ioctl_iov(ctx->req, 0, out_iov, 2);
+	if (ctx->data_transfer == SPDK_NVME_DATA_HOST_TO_CONTROLLER ||
+	    ctx->data_transfer == SPDK_NVME_DATA_NONE) {
+		fuse_reply_ioctl_iov(ctx->req, cpl->status.sc, NULL, 0);
 	} else {
-		fuse_reply_ioctl_iov(ctx->req, 0, out_iov, 1);
+		memcpy(&_cpl, cpl, sizeof(struct spdk_nvme_cpl));
+
+		out_iov[0].iov_base = &_cpl.cdw0;
+		out_iov[0].iov_len = sizeof(_cpl.cdw0);
+
+		if (ctx->data_len > 0) {
+			out_iov[1].iov_base = ctx->data;
+			out_iov[1].iov_len = ctx->data_len;
+			fuse_reply_ioctl_iov(ctx->req, cpl->status.sc, out_iov, 2);
+		} else {
+			fuse_reply_ioctl_iov(ctx->req, cpl->status.sc, out_iov, 1);
+		}
 	}
 
 	cuse_io_ctx_free(ctx);
@@ -128,82 +138,46 @@ cuse_nvme_admin_cmd_execute(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid, void *
 }
 
 static void
-cuse_nvme_admin_cmd(fuse_req_t req, int cmd, void *arg,
-		    struct fuse_file_info *fi, unsigned flags,
-		    const void *in_buf, size_t in_bufsz, size_t out_bufsz)
+cuse_nvme_admin_cmd_send(fuse_req_t req, struct nvme_admin_cmd *admin_cmd,
+			 const void *data)
 {
-	struct nvme_admin_cmd *admin_cmd;
-	struct iovec in_iov, out_iov[2];
 	struct cuse_io_ctx *ctx;
-	int rv;
 	struct cuse_device *cuse_device = fuse_req_userdata(req);
+	int rv;
 
-	in_iov.iov_base = (void *)arg;
-	in_iov.iov_len = sizeof(*admin_cmd);
-	if (in_bufsz == 0) {
-		fuse_reply_ioctl_retry(req, &in_iov, 1, NULL, 0);
+	ctx = (struct cuse_io_ctx *)calloc(1, sizeof(struct cuse_io_ctx));
+	if (!ctx) {
+		SPDK_ERRLOG("Cannot allocate memory for cuse_io_ctx\n");
+		fuse_reply_err(req, ENOMEM);
 		return;
 	}
 
-	admin_cmd = (struct nvme_admin_cmd *)in_buf;
+	ctx->req = req;
+	ctx->data_transfer = spdk_nvme_opc_get_data_transfer(admin_cmd->opcode);
 
-	switch (spdk_nvme_opc_get_data_transfer(admin_cmd->opcode)) {
-	case SPDK_NVME_DATA_NONE:
-		SPDK_ERRLOG("SPDK_NVME_DATA_NONE not implemented\n");
-		fuse_reply_err(req, EINVAL);
-		return;
-	case SPDK_NVME_DATA_HOST_TO_CONTROLLER:
-		SPDK_ERRLOG("SPDK_NVME_DATA_HOST_TO_CONTROLLER not implemented\n");
-		fuse_reply_err(req, EINVAL);
-		return;
-	case SPDK_NVME_DATA_CONTROLLER_TO_HOST:
-		if (out_bufsz == 0) {
-			out_iov[0].iov_base = &((struct nvme_admin_cmd *)arg)->result;
-			out_iov[0].iov_len = sizeof(uint32_t);
-			if (admin_cmd->data_len > 0) {
-				out_iov[1].iov_base = (void *)admin_cmd->addr;
-				out_iov[1].iov_len = admin_cmd->data_len;
-				fuse_reply_ioctl_retry(req, &in_iov, 1, out_iov, 2);
-			} else {
-				fuse_reply_ioctl_retry(req, &in_iov, 1, out_iov, 1);
-			}
-			return;
-		}
+	memset(&ctx->nvme_cmd, 0, sizeof(ctx->nvme_cmd));
+	ctx->nvme_cmd.opc = admin_cmd->opcode;
+	ctx->nvme_cmd.nsid = admin_cmd->nsid;
+	ctx->nvme_cmd.cdw10 = admin_cmd->cdw10;
+	ctx->nvme_cmd.cdw11 = admin_cmd->cdw11;
+	ctx->nvme_cmd.cdw12 = admin_cmd->cdw12;
+	ctx->nvme_cmd.cdw13 = admin_cmd->cdw13;
+	ctx->nvme_cmd.cdw14 = admin_cmd->cdw14;
+	ctx->nvme_cmd.cdw15 = admin_cmd->cdw15;
 
-		ctx = (struct cuse_io_ctx *)calloc(1, sizeof(struct cuse_io_ctx));
-		if (!ctx) {
-			SPDK_ERRLOG("Cannot allocate memory for cuse_io_ctx\n");
+	ctx->data_len = admin_cmd->data_len;
+
+	if (ctx->data_len > 0) {
+		ctx->data = spdk_malloc(ctx->data_len, 0, NULL, SPDK_ENV_LCORE_ID_ANY, SPDK_MALLOC_DMA);
+		if (!ctx->data) {
+			SPDK_ERRLOG("Cannot allocate memory for data\n");
 			fuse_reply_err(req, ENOMEM);
+			free(ctx);
 			return;
 		}
-
-		ctx->req = req;
-
-		memset(&ctx->nvme_cmd, 0, sizeof(ctx->nvme_cmd));
-		ctx->nvme_cmd.opc = admin_cmd->opcode;
-		ctx->nvme_cmd.nsid = admin_cmd->nsid;
-		ctx->nvme_cmd.cdw10 = admin_cmd->cdw10;
-		ctx->nvme_cmd.cdw11 = admin_cmd->cdw11;
-		ctx->nvme_cmd.cdw12 = admin_cmd->cdw12;
-		ctx->nvme_cmd.cdw13 = admin_cmd->cdw13;
-		ctx->nvme_cmd.cdw14 = admin_cmd->cdw14;
-		ctx->nvme_cmd.cdw15 = admin_cmd->cdw15;
-
-		ctx->data_len = admin_cmd->data_len;
-		if (ctx->data_len > 0) {
-			ctx->data = spdk_malloc(ctx->data_len, 0, NULL, SPDK_ENV_LCORE_ID_ANY, SPDK_MALLOC_DMA);
-			if (!ctx->data) {
-				SPDK_ERRLOG("Cannot allocate memory for data\n");
-				fuse_reply_err(req, ENOMEM);
-				free(ctx);
-				return;
-			}
+		if (data != NULL) {
+			memcpy(ctx->data, data, ctx->data_len);
 		}
-
-		break;
-	case SPDK_NVME_DATA_BIDIRECTIONAL:
-		fuse_reply_err(req, EINVAL);
-		return;
 	}
 
 	rv = nvme_io_msg_send(cuse_device->ctrlr, 0, cuse_nvme_admin_cmd_execute, ctx);
@@ -211,6 +185,61 @@ cuse_nvme_admin_cmd(fuse_req_t req, int cmd, void *arg,
 		SPDK_ERRLOG("Cannot send io msg to the controller\n");
 		fuse_reply_err(req, -rv);
 		cuse_io_ctx_free(ctx);
+		return;
+	}
+}
+
+static void
+cuse_nvme_admin_cmd(fuse_req_t req, int cmd, void *arg,
+		    struct fuse_file_info *fi, unsigned flags,
+		    const void *in_buf, size_t in_bufsz, size_t out_bufsz)
+{
+	struct nvme_admin_cmd *admin_cmd;
+	struct iovec in_iov[2], out_iov[2];
+
+	in_iov[0].iov_base = (void *)arg;
+	in_iov[0].iov_len = sizeof(*admin_cmd);
+	if (in_bufsz == 0) {
+		fuse_reply_ioctl_retry(req, in_iov, 1, NULL, 0);
+		return;
+	}
+
+	admin_cmd = (struct nvme_admin_cmd *)in_buf;
+
+	switch (spdk_nvme_opc_get_data_transfer(admin_cmd->opcode)) {
+	case SPDK_NVME_DATA_HOST_TO_CONTROLLER:
+		if (admin_cmd->addr != 0) {
+			in_iov[1].iov_base = (void *)admin_cmd->addr;
+			in_iov[1].iov_len = admin_cmd->data_len;
+			if (in_bufsz == sizeof(*admin_cmd)) {
+				fuse_reply_ioctl_retry(req, in_iov, 2, NULL, 0);
+				return;
+			}
+			cuse_nvme_admin_cmd_send(req, admin_cmd, in_buf + sizeof(*admin_cmd));
+		} else {
+			cuse_nvme_admin_cmd_send(req, admin_cmd, NULL);
+		}
+		return;
+	case SPDK_NVME_DATA_NONE:
+	case SPDK_NVME_DATA_CONTROLLER_TO_HOST:
+		if (out_bufsz == 0) {
+			out_iov[0].iov_base = &((struct nvme_admin_cmd *)arg)->result;
+			out_iov[0].iov_len = sizeof(uint32_t);
+			if (admin_cmd->data_len > 0) {
+				out_iov[1].iov_base = (void *)admin_cmd->addr;
+				out_iov[1].iov_len = admin_cmd->data_len;
+				fuse_reply_ioctl_retry(req, in_iov, 1, out_iov, 2);
+			} else {
+				fuse_reply_ioctl_retry(req, in_iov, 1, out_iov, 1);
+			}
+			return;
+		}
+
+		cuse_nvme_admin_cmd_send(req, admin_cmd, NULL);
+
+		return;
+	case SPDK_NVME_DATA_BIDIRECTIONAL:
+		fuse_reply_err(req, EINVAL);
 		return;
 	}
 }
@@ -260,7 +289,7 @@ cuse_nvme_submit_io_write_done(void *ref, const struct spdk_nvme_cpl *cpl)
 {
 	struct cuse_io_ctx *ctx = (struct cuse_io_ctx *)ref;
 
-	fuse_reply_ioctl_iov(ctx->req, 0, NULL, 0);
+	fuse_reply_ioctl_iov(ctx->req, cpl->status.sc, NULL, 0);
 
 	cuse_io_ctx_free(ctx);
 }
@@ -286,16 +315,13 @@ cuse_nvme_submit_io_write_cb(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid, void 
 }
 
 static void
-cuse_nvme_submit_io_write(fuse_req_t req, int cmd, void *arg,
-			  struct fuse_file_info *fi, unsigned flags,
+cuse_nvme_submit_io_write(struct cuse_device *cuse_device, fuse_req_t req, int cmd, void *arg,
+			  struct fuse_file_info *fi, unsigned flags, uint32_t block_size,
 			  const void *in_buf, size_t in_bufsz, size_t out_bufsz)
 {
 	const struct nvme_user_io *user_io = in_buf;
 	struct cuse_io_ctx *ctx;
-	struct spdk_nvme_ns *ns;
-	uint32_t block_size;
 	int rc;
-	struct cuse_device *cuse_device = fuse_req_userdata(req);
 
 	ctx = (struct cuse_io_ctx *)calloc(1, sizeof(struct cuse_io_ctx));
 	if (!ctx) {
@@ -305,19 +331,12 @@ cuse_nvme_submit_io_write(fuse_req_t req, int cmd, void *arg,
 	}
 
 	ctx->req = req;
-
-	ns = spdk_nvme_ctrlr_get_ns(cuse_device->ctrlr, cuse_device->nsid);
-	block_size = spdk_nvme_ns_get_sector_size(ns);
-
 	ctx->lba = user_io->slba;
 	ctx->lba_count = user_io->nblocks + 1;
 	ctx->data_len = ctx->lba_count * block_size;
 
-	ctx->data = spdk_nvme_ctrlr_alloc_cmb_io_buffer(cuse_device->ctrlr, ctx->data_len);
-	if (ctx->data == NULL) {
-		ctx->data = spdk_zmalloc(ctx->data_len, 0x1000, NULL, SPDK_ENV_SOCKET_ID_ANY,
-					 SPDK_MALLOC_DMA);
-	}
+	ctx->data = spdk_zmalloc(ctx->data_len, 0x1000, NULL, SPDK_ENV_SOCKET_ID_ANY,
+				 SPDK_MALLOC_DMA);
 	if (ctx->data == NULL) {
 		SPDK_ERRLOG("Write buffer allocation failed\n");
 		fuse_reply_err(ctx->req, ENOMEM);
@@ -345,7 +364,7 @@ cuse_nvme_submit_io_read_done(void *ref, const struct spdk_nvme_cpl *cpl)
 	iov.iov_base = ctx->data;
 	iov.iov_len = ctx->data_len;
 
-	fuse_reply_ioctl_iov(ctx->req, 0, &iov, 1);
+	fuse_reply_ioctl_iov(ctx->req, cpl->status.sc, &iov, 1);
 
 	cuse_io_ctx_free(ctx);
 }
@@ -371,16 +390,13 @@ cuse_nvme_submit_io_read_cb(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid, void *
 }
 
 static void
-cuse_nvme_submit_io_read(fuse_req_t req, int cmd, void *arg,
-			 struct fuse_file_info *fi, unsigned flags,
+cuse_nvme_submit_io_read(struct cuse_device *cuse_device, fuse_req_t req, int cmd, void *arg,
+			 struct fuse_file_info *fi, unsigned flags, uint32_t block_size,
 			 const void *in_buf, size_t in_bufsz, size_t out_bufsz)
 {
 	int rc;
 	struct cuse_io_ctx *ctx;
 	const struct nvme_user_io *user_io = in_buf;
-	struct cuse_device *cuse_device = fuse_req_userdata(req);
-	struct spdk_nvme_ns *ns;
-	uint32_t block_size;
 
 	ctx = (struct cuse_io_ctx *)calloc(1, sizeof(struct cuse_io_ctx));
 	if (!ctx) {
@@ -391,17 +407,11 @@ cuse_nvme_submit_io_read(fuse_req_t req, int cmd, void *arg,
 
 	ctx->req = req;
 	ctx->lba = user_io->slba;
-	ctx->lba_count = user_io->nblocks;
-
-	ns = spdk_nvme_ctrlr_get_ns(cuse_device->ctrlr, cuse_device->nsid);
-	block_size = spdk_nvme_ns_get_sector_size(ns);
+	ctx->lba_count = user_io->nblocks + 1;
 
 	ctx->data_len = ctx->lba_count * block_size;
-	ctx->data = spdk_nvme_ctrlr_alloc_cmb_io_buffer(cuse_device->ctrlr, ctx->data_len);
-	if (ctx->data == NULL) {
-		ctx->data = spdk_zmalloc(ctx->data_len, 0x1000, NULL, SPDK_ENV_SOCKET_ID_ANY,
-					 SPDK_MALLOC_DMA);
-	}
+	ctx->data = spdk_zmalloc(ctx->data_len, 0x1000, NULL, SPDK_ENV_SOCKET_ID_ANY,
+				 SPDK_MALLOC_DMA);
 	if (ctx->data == NULL) {
 		SPDK_ERRLOG("Read buffer allocation failed\n");
 		fuse_reply_err(ctx->req, ENOMEM);
@@ -425,6 +435,9 @@ cuse_nvme_submit_io(fuse_req_t req, int cmd, void *arg,
 {
 	const struct nvme_user_io *user_io;
 	struct iovec in_iov[2], out_iov;
+	struct cuse_device *cuse_device = fuse_req_userdata(req);
+	struct spdk_nvme_ns *ns;
+	uint32_t block_size;
 
 	in_iov[0].iov_base = (void *)arg;
 	in_iov[0].iov_len = sizeof(*user_io);
@@ -435,29 +448,31 @@ cuse_nvme_submit_io(fuse_req_t req, int cmd, void *arg,
 
 	user_io = in_buf;
 
+	ns = spdk_nvme_ctrlr_get_ns(cuse_device->ctrlr, cuse_device->nsid);
+	block_size = spdk_nvme_ns_get_sector_size(ns);
+
 	switch (user_io->opcode) {
 	case SPDK_NVME_OPC_READ:
 		out_iov.iov_base = (void *)user_io->addr;
-		out_iov.iov_len = (user_io->nblocks + 1) * 512;
+		out_iov.iov_len = (user_io->nblocks + 1) * block_size;
 		if (out_bufsz == 0) {
 			fuse_reply_ioctl_retry(req, in_iov, 1, &out_iov, 1);
 			return;
 		}
 
-		cuse_nvme_submit_io_read(req, cmd, arg, fi, flags, in_buf,
-					 in_bufsz, out_bufsz);
+		cuse_nvme_submit_io_read(cuse_device, req, cmd, arg, fi, flags,
+					 block_size, in_buf, in_bufsz, out_bufsz);
 		break;
 	case SPDK_NVME_OPC_WRITE:
 		in_iov[1].iov_base = (void *)user_io->addr;
-		in_iov[1].iov_len = (user_io->nblocks + 1) * 512;
+		in_iov[1].iov_len = (user_io->nblocks + 1) * block_size;
 		if (in_bufsz == sizeof(*user_io)) {
 			fuse_reply_ioctl_retry(req, in_iov, 2, NULL, 0);
 			return;
 		}
 
-		cuse_nvme_submit_io_write(req, cmd, arg, fi, flags, in_buf,
-					  in_bufsz, out_bufsz);
-
+		cuse_nvme_submit_io_write(cuse_device, req, cmd, arg, fi, flags,
+					  block_size, in_buf, in_bufsz, out_bufsz);
 		break;
 	default:
 		SPDK_ERRLOG("SUBMIT_IO: opc:%d not valid\n", user_io->opcode);
@@ -540,7 +555,7 @@ cuse_ctrlr_ioctl(fuse_req_t req, int cmd, void *arg,
 		return;
 	}
 
-	switch (cmd) {
+	switch ((unsigned int)cmd) {
 	case NVME_IOCTL_ADMIN_CMD:
 		cuse_nvme_admin_cmd(req, cmd, arg, fi, flags, in_buf, in_bufsz, out_bufsz);
 		break;
@@ -565,7 +580,7 @@ cuse_ns_ioctl(fuse_req_t req, int cmd, void *arg,
 		return;
 	}
 
-	switch (cmd) {
+	switch ((unsigned int)cmd) {
 	case NVME_IOCTL_ADMIN_CMD:
 		cuse_nvme_admin_cmd(req, cmd, arg, fi, flags, in_buf, in_bufsz, out_bufsz);
 		break;
@@ -650,7 +665,7 @@ cuse_thread(void *arg)
 	}
 	if (!cuse_device->session) {
 		SPDK_ERRLOG("Cannot create cuse session\n");
-		goto end;
+		goto err;
 	}
 
 	SPDK_NOTICELOG("fuse session for device %s created\n", cuse_device->dev_name);
@@ -670,9 +685,8 @@ cuse_thread(void *arg)
 	}
 	free(buf.mem);
 	fuse_session_reset(cuse_device->session);
-
-end:
 	cuse_lowlevel_teardown(cuse_device->session);
+err:
 	pthread_exit(NULL);
 }
 
@@ -681,36 +695,51 @@ end:
  */
 
 static int
-cuse_nvme_ns_start(struct cuse_device *ctrlr_device, uint32_t nsid, const char *dev_path)
+cuse_nvme_ns_start(struct cuse_device *ctrlr_device, uint32_t nsid)
 {
 	struct cuse_device *ns_device;
 	int rv;
 
-	ns_device = (struct cuse_device *)calloc(1, sizeof(struct cuse_device));
-	if (!ns_device) {
-		SPDK_ERRLOG("Cannot allocate momeory for ns_device.");
-		return -ENOMEM;
+	ns_device = &ctrlr_device->ns_devices[nsid - 1];
+	if (ns_device->is_started) {
+		return 0;
 	}
 
 	ns_device->ctrlr = ctrlr_device->ctrlr;
 	ns_device->ctrlr_device = ctrlr_device;
 	ns_device->nsid = nsid;
 	rv = snprintf(ns_device->dev_name, sizeof(ns_device->dev_name), "%sn%d",
-		      dev_path, ns_device->nsid);
+		      ctrlr_device->dev_name, ns_device->nsid);
 	if (rv < 0) {
 		SPDK_ERRLOG("Device name too long.\n");
 		free(ns_device);
-		return -1;
+		return -ENAMETOOLONG;
 	}
 
-	if (pthread_create(&ns_device->tid, NULL, cuse_thread, ns_device)) {
+	rv = pthread_create(&ns_device->tid, NULL, cuse_thread, ns_device);
+	if (rv != 0) {
 		SPDK_ERRLOG("pthread_create failed\n");
-		free(ns_device);
-		return -1;
+		return -rv;
 	}
 
-	TAILQ_INSERT_TAIL(&ctrlr_device->ns_devices, ns_device, tailq);
+	ns_device->is_started = true;
+
 	return 0;
+}
+
+static void
+cuse_nvme_ns_stop(struct cuse_device *ctrlr_device, uint32_t nsid)
+{
+	struct cuse_device *ns_device;
+
+	ns_device = &ctrlr_device->ns_devices[nsid - 1];
+	if (!ns_device->is_started) {
+		return;
+	}
+
+	fuse_session_exit(ns_device->session);
+	pthread_join(ns_device->tid, NULL);
+	ns_device->is_started = false;
 }
 
 static int
@@ -727,16 +756,16 @@ nvme_cuse_claim(struct cuse_device *ctrlr_device, uint32_t index)
 	};
 
 	snprintf(ctrlr_device->lock_name, sizeof(ctrlr_device->lock_name),
-		 "/tmp/spdk_nvme_cuse_lock_%" PRIu32, index);
+		 "/var/tmp/spdk_nvme_cuse_lock_%" PRIu32, index);
 
 	dev_fd = open(ctrlr_device->lock_name, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
 	if (dev_fd == -1) {
-		fprintf(stderr, "could not open %s\n", ctrlr_device->lock_name);
+		SPDK_ERRLOG("could not open %s\n", ctrlr_device->lock_name);
 		return -errno;
 	}
 
 	if (ftruncate(dev_fd, sizeof(int)) != 0) {
-		fprintf(stderr, "could not truncate %s\n", ctrlr_device->lock_name);
+		SPDK_ERRLOG("could not truncate %s\n", ctrlr_device->lock_name);
 		close(dev_fd);
 		return -errno;
 	}
@@ -744,15 +773,15 @@ nvme_cuse_claim(struct cuse_device *ctrlr_device, uint32_t index)
 	dev_map = mmap(NULL, sizeof(int), PROT_READ | PROT_WRITE,
 		       MAP_SHARED, dev_fd, 0);
 	if (dev_map == MAP_FAILED) {
-		fprintf(stderr, "could not mmap dev %s (%d)\n", ctrlr_device->lock_name, errno);
+		SPDK_ERRLOG("could not mmap dev %s (%d)\n", ctrlr_device->lock_name, errno);
 		close(dev_fd);
 		return -errno;
 	}
 
 	if (fcntl(dev_fd, F_SETLK, &cusedev_lock) != 0) {
 		pid = *(int *)dev_map;
-		fprintf(stderr, "Cannot create lock on device %s, probably"
-			" process %d has claimed it\n", ctrlr_device->lock_name, pid);
+		SPDK_ERRLOG("Cannot create lock on device %s, probably"
+			    " process %d has claimed it\n", ctrlr_device->lock_name, pid);
 		munmap(dev_map, sizeof(int));
 		close(dev_fd);
 		/* F_SETLK returns unspecified errnos, normalize them */
@@ -778,13 +807,11 @@ nvme_cuse_unclaim(struct cuse_device *ctrlr_device)
 static void
 cuse_nvme_ctrlr_stop(struct cuse_device *ctrlr_device)
 {
-	struct cuse_device *ns_device, *tmp;
+	uint32_t i;
+	uint32_t num_ns = spdk_nvme_ctrlr_get_num_ns(ctrlr_device->ctrlr);
 
-	TAILQ_FOREACH_SAFE(ns_device, &ctrlr_device->ns_devices, tailq, tmp) {
-		fuse_session_exit(ns_device->session);
-		pthread_join(ns_device->tid, NULL);
-		TAILQ_REMOVE(&ctrlr_device->ns_devices, ns_device, tailq);
-		free(ns_device);
+	for (i = 1; i <= num_ns; i++) {
+		cuse_nvme_ns_stop(ctrlr_device, i);
 	}
 
 	fuse_session_exit(ctrlr_device->session);
@@ -795,15 +822,37 @@ cuse_nvme_ctrlr_stop(struct cuse_device *ctrlr_device)
 		spdk_bit_array_free(&g_ctrlr_started);
 	}
 	nvme_cuse_unclaim(ctrlr_device);
+	free(ctrlr_device->ns_devices);
 	free(ctrlr_device);
+}
+
+static int
+cuse_nvme_ctrlr_update_namespaces(struct cuse_device *ctrlr_device)
+{
+	uint32_t nsid;
+	uint32_t num_ns = spdk_nvme_ctrlr_get_num_ns(ctrlr_device->ctrlr);
+
+	for (nsid = 1; nsid <= num_ns; nsid++) {
+		if (!spdk_nvme_ctrlr_is_active_ns(ctrlr_device->ctrlr, nsid)) {
+			cuse_nvme_ns_stop(ctrlr_device, nsid);
+			continue;
+		}
+
+		if (cuse_nvme_ns_start(ctrlr_device, nsid) < 0) {
+			SPDK_ERRLOG("Cannot start CUSE namespace device.");
+			return -1;
+		}
+	}
+
+	return 0;
 }
 
 static int
 nvme_cuse_start(struct spdk_nvme_ctrlr *ctrlr)
 {
-	uint32_t i, nsid;
 	int rv = 0;
 	struct cuse_device *ctrlr_device;
+	uint32_t num_ns = spdk_nvme_ctrlr_get_num_ns(ctrlr);
 
 	SPDK_NOTICELOG("Creating cuse device for controller\n");
 
@@ -811,7 +860,7 @@ nvme_cuse_start(struct spdk_nvme_ctrlr *ctrlr)
 		g_ctrlr_started = spdk_bit_array_create(128);
 		if (g_ctrlr_started == NULL) {
 			SPDK_ERRLOG("Cannot create bit array\n");
-			return -1;
+			return -ENOMEM;
 		}
 	}
 
@@ -822,7 +871,6 @@ nvme_cuse_start(struct spdk_nvme_ctrlr *ctrlr)
 		goto err2;
 	}
 
-	TAILQ_INIT(&ctrlr_device->ns_devices);
 	ctrlr_device->ctrlr = ctrlr;
 
 	/* Check if device already exists, if not increment index until success */
@@ -843,26 +891,21 @@ nvme_cuse_start(struct spdk_nvme_ctrlr *ctrlr)
 	snprintf(ctrlr_device->dev_name, sizeof(ctrlr_device->dev_name), "spdk/nvme%d",
 		 ctrlr_device->index);
 
-	if (pthread_create(&ctrlr_device->tid, NULL, cuse_thread, ctrlr_device)) {
+	rv = pthread_create(&ctrlr_device->tid, NULL, cuse_thread, ctrlr_device);
+	if (rv != 0) {
 		SPDK_ERRLOG("pthread_create failed\n");
-		rv = -1;
+		rv = -rv;
 		goto err3;
 	}
 	TAILQ_INSERT_TAIL(&g_ctrlr_ctx_head, ctrlr_device, tailq);
 
+	ctrlr_device->ns_devices = (struct cuse_device *)calloc(num_ns, sizeof(struct cuse_device));
 	/* Start all active namespaces */
-	for (i = 0; i < spdk_nvme_ctrlr_get_num_ns(ctrlr); i++) {
-		nsid = i + 1;
-		if (!spdk_nvme_ctrlr_is_active_ns(ctrlr, nsid)) {
-			continue;
-		}
-
-		if (cuse_nvme_ns_start(ctrlr_device, nsid, ctrlr_device->dev_name) < 0) {
-			SPDK_ERRLOG("Cannot start CUSE namespace device.");
-			cuse_nvme_ctrlr_stop(ctrlr_device);
-			rv = -1;
-			goto err3;
-		}
+	if (cuse_nvme_ctrlr_update_namespaces(ctrlr_device) < 0) {
+		SPDK_ERRLOG("Cannot start CUSE namespace devices.");
+		cuse_nvme_ctrlr_stop(ctrlr_device);
+		rv = -1;
+		goto err3;
 	}
 
 	return 0;
@@ -877,10 +920,10 @@ err2:
 	return rv;
 }
 
-static void
-nvme_cuse_stop(struct spdk_nvme_ctrlr *ctrlr)
+static struct cuse_device *
+nvme_cuse_get_cuse_ctrlr_device(struct spdk_nvme_ctrlr *ctrlr)
 {
-	struct cuse_device *ctrlr_device;
+	struct cuse_device *ctrlr_device = NULL;
 
 	TAILQ_FOREACH(ctrlr_device, &g_ctrlr_ctx_head, tailq) {
 		if (ctrlr_device->ctrlr == ctrlr) {
@@ -888,17 +931,72 @@ nvme_cuse_stop(struct spdk_nvme_ctrlr *ctrlr)
 		}
 	}
 
+	return ctrlr_device;
+}
+
+static struct cuse_device *
+nvme_cuse_get_cuse_ns_device(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid)
+{
+	struct cuse_device *ctrlr_device = NULL;
+	uint32_t num_ns = spdk_nvme_ctrlr_get_num_ns(ctrlr);
+
+	if (nsid < 1 || nsid > num_ns) {
+		return NULL;
+	}
+
+	ctrlr_device = nvme_cuse_get_cuse_ctrlr_device(ctrlr);
+	if (!ctrlr_device) {
+		return NULL;
+	}
+
+	if (!ctrlr_device->ns_devices[nsid - 1].is_started) {
+		return NULL;
+	}
+
+	return &ctrlr_device->ns_devices[nsid - 1];
+}
+
+static void
+nvme_cuse_stop(struct spdk_nvme_ctrlr *ctrlr)
+{
+	struct cuse_device *ctrlr_device;
+
+	pthread_mutex_lock(&g_cuse_mtx);
+
+	ctrlr_device = nvme_cuse_get_cuse_ctrlr_device(ctrlr);
 	if (!ctrlr_device) {
 		SPDK_ERRLOG("Cannot find associated CUSE device\n");
+		pthread_mutex_unlock(&g_cuse_mtx);
 		return;
 	}
 
 	cuse_nvme_ctrlr_stop(ctrlr_device);
+
+	pthread_mutex_unlock(&g_cuse_mtx);
+}
+
+static void
+nvme_cuse_update(struct spdk_nvme_ctrlr *ctrlr)
+{
+	struct cuse_device *ctrlr_device;
+
+	pthread_mutex_lock(&g_cuse_mtx);
+
+	ctrlr_device = nvme_cuse_get_cuse_ctrlr_device(ctrlr);
+	if (!ctrlr_device) {
+		pthread_mutex_unlock(&g_cuse_mtx);
+		return;
+	}
+
+	cuse_nvme_ctrlr_update_namespaces(ctrlr_device);
+
+	pthread_mutex_unlock(&g_cuse_mtx);
 }
 
 static struct nvme_io_msg_producer cuse_nvme_io_msg_producer = {
 	.name = "cuse",
 	.stop = nvme_cuse_stop,
+	.update = nvme_cuse_update,
 };
 
 int
@@ -911,73 +1009,97 @@ spdk_nvme_cuse_register(struct spdk_nvme_ctrlr *ctrlr)
 		return rc;
 	}
 
+	pthread_mutex_lock(&g_cuse_mtx);
+
 	rc = nvme_cuse_start(ctrlr);
 	if (rc) {
 		nvme_io_msg_ctrlr_unregister(ctrlr, &cuse_nvme_io_msg_producer);
 	}
 
+	pthread_mutex_unlock(&g_cuse_mtx);
+
 	return rc;
 }
 
-void
+int
 spdk_nvme_cuse_unregister(struct spdk_nvme_ctrlr *ctrlr)
 {
-	nvme_cuse_stop(ctrlr);
+	struct cuse_device *ctrlr_device;
+
+	pthread_mutex_lock(&g_cuse_mtx);
+
+	ctrlr_device = nvme_cuse_get_cuse_ctrlr_device(ctrlr);
+	if (!ctrlr_device) {
+		SPDK_ERRLOG("Cannot find associated CUSE device\n");
+		pthread_mutex_unlock(&g_cuse_mtx);
+		return -ENODEV;
+	}
+
+	cuse_nvme_ctrlr_stop(ctrlr_device);
+
+	pthread_mutex_unlock(&g_cuse_mtx);
 
 	nvme_io_msg_ctrlr_unregister(ctrlr, &cuse_nvme_io_msg_producer);
+
+	return 0;
 }
 
-char *
-spdk_nvme_cuse_get_ctrlr_name(struct spdk_nvme_ctrlr *ctrlr)
+void
+spdk_nvme_cuse_update_namespaces(struct spdk_nvme_ctrlr *ctrlr)
+{
+	nvme_cuse_update(ctrlr);
+}
+
+int
+spdk_nvme_cuse_get_ctrlr_name(struct spdk_nvme_ctrlr *ctrlr, char *name, size_t *size)
 {
 	struct cuse_device *ctrlr_device;
+	size_t req_len;
 
-	if (TAILQ_EMPTY(&g_ctrlr_ctx_head)) {
-		return NULL;
-	}
+	pthread_mutex_lock(&g_cuse_mtx);
 
-	TAILQ_FOREACH(ctrlr_device, &g_ctrlr_ctx_head, tailq) {
-		if (ctrlr_device->ctrlr == ctrlr) {
-			break;
-		}
-	}
-
+	ctrlr_device = nvme_cuse_get_cuse_ctrlr_device(ctrlr);
 	if (!ctrlr_device) {
-		return NULL;
+		pthread_mutex_unlock(&g_cuse_mtx);
+		return -ENODEV;
 	}
 
-	return ctrlr_device->dev_name;
+	req_len = strnlen(ctrlr_device->dev_name, sizeof(ctrlr_device->dev_name));
+	if (*size < req_len) {
+		*size = req_len;
+		pthread_mutex_unlock(&g_cuse_mtx);
+		return -ENOSPC;
+	}
+	snprintf(name, req_len + 1, "%s", ctrlr_device->dev_name);
+
+	pthread_mutex_unlock(&g_cuse_mtx);
+
+	return 0;
 }
 
-char *
-spdk_nvme_cuse_get_ns_name(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid)
+int
+spdk_nvme_cuse_get_ns_name(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid, char *name, size_t *size)
 {
 	struct cuse_device *ns_device;
-	struct cuse_device *ctrlr_device;
+	size_t req_len;
 
-	if (TAILQ_EMPTY(&g_ctrlr_ctx_head)) {
-		return NULL;
-	}
+	pthread_mutex_lock(&g_cuse_mtx);
 
-	TAILQ_FOREACH(ctrlr_device, &g_ctrlr_ctx_head, tailq) {
-		if (ctrlr_device->ctrlr == ctrlr) {
-			break;
-		}
-	}
-
-	if (!ctrlr_device) {
-		return NULL;
-	}
-
-	TAILQ_FOREACH(ns_device, &ctrlr_device->ns_devices, tailq) {
-		if (ns_device->nsid == nsid) {
-			break;
-		}
-	}
-
+	ns_device = nvme_cuse_get_cuse_ns_device(ctrlr, nsid);
 	if (!ns_device) {
-		return NULL;
+		pthread_mutex_unlock(&g_cuse_mtx);
+		return -ENODEV;
 	}
 
-	return ns_device->dev_name;
+	req_len = strnlen(ns_device->dev_name, sizeof(ns_device->dev_name));
+	if (*size < req_len) {
+		*size = req_len;
+		pthread_mutex_unlock(&g_cuse_mtx);
+		return -ENOSPC;
+	}
+	snprintf(name, req_len + 1, "%s", ns_device->dev_name);
+
+	pthread_mutex_unlock(&g_cuse_mtx);
+
+	return 0;
 }

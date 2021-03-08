@@ -40,16 +40,8 @@
 /* HACK: disable VTune integration so the unit test doesn't need VTune headers and libs to build */
 #undef SPDK_CONFIG_VTUNE
 
-#include "spdk_internal/thread.h"
-
 #include "bdev/bdev.c"
 #include "bdev/part.c"
-
-DEFINE_STUB(spdk_conf_find_section, struct spdk_conf_section *, (struct spdk_conf *cp,
-		const char *name), NULL);
-DEFINE_STUB(spdk_conf_section_get_nmval, char *,
-	    (struct spdk_conf_section *sp, const char *key, int idx1, int idx2), NULL);
-DEFINE_STUB(spdk_conf_section_get_intval, int, (struct spdk_conf_section *sp, const char *key), -1);
 
 struct spdk_trace_histories *g_trace_histories;
 DEFINE_STUB_V(spdk_trace_add_register_fn, (struct spdk_trace_register_fn *reg_fn));
@@ -152,22 +144,12 @@ main(int argc, char **argv)
 	CU_pSuite		suite = NULL;
 	unsigned int		num_failures;
 
-	if (CU_initialize_registry() != CUE_SUCCESS) {
-		return CU_get_error();
-	}
+	CU_set_error_action(CUEA_ABORT);
+	CU_initialize_registry();
 
 	suite = CU_add_suite("bdev_part", NULL, NULL);
-	if (suite == NULL) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
 
-	if (
-		CU_add_test(suite, "part", part_test) == NULL
-	) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
+	CU_ADD_TEST(suite, part_test);
 
 	allocate_threads(1);
 	set_thread(0);

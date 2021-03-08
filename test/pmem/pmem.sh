@@ -19,12 +19,12 @@ default_pool_file="$testdir/pool_file"
 obj_pool_file="$testdir/obj_pool_file"
 bdev_name=pmem0
 
-function usage()
-{
-	[[ -n $2 ]] && ( echo "$2"; echo ""; )
+function usage() {
+	[[ -n $2 ]] && (
+		echo "$2"
+		echo ""
+	)
 	echo "Shortcut script for automated RPC tests for PMEM"
-	echo "For test details, check test_plan.md or"
-	echo "https://review.gerrithub.io/#/c/378618/18/test/pmem/test_plan.md"
 	echo
 	echo "Usage: $(basename $1) [OPTIONS]"
 	echo
@@ -42,20 +42,35 @@ function usage()
 while getopts 'xh-:' optchar; do
 	case "$optchar" in
 		-)
-		case "$OPTARG" in
-			help) usage $0 ;;
-			info) test_info=true; test_all=false;;
-			create) test_create=true; test_all=false;;
-			delete) test_delete=true; test_all=false;;
-			construct_bdev) test_construct_bdev=true; test_all=false;;
-			delete_bdev) test_delete_bdev=true; test_all=false;;
-			all) test_all_get=true;;
-			*) usage $0 "Invalid argument '$OPTARG'" ;;
-		esac
-		;;
-	h) usage $0 ;;
-	x) enable_script_debug=true ;;
-	*) usage $0 "Invalid argument '$OPTARG'"
+			case "$OPTARG" in
+				help) usage $0 ;;
+				info)
+					test_info=true
+					test_all=false
+					;;
+				create)
+					test_create=true
+					test_all=false
+					;;
+				delete)
+					test_delete=true
+					test_all=false
+					;;
+				construct_bdev)
+					test_construct_bdev=true
+					test_all=false
+					;;
+				delete_bdev)
+					test_delete_bdev=true
+					test_all=false
+					;;
+				all) test_all_get=true ;;
+				*) usage $0 "Invalid argument '$OPTARG'" ;;
+			esac
+			;;
+		h) usage $0 ;;
+		x) enable_script_debug=true ;;
+		*) usage $0 "Invalid argument '$OPTARG'" ;;
 	esac
 done
 
@@ -71,8 +86,7 @@ fi
 #================================================
 # bdev_pmem_get_pool_info tests
 #================================================
-function bdev_pmem_get_pool_info_tc1()
-{
+function bdev_pmem_get_pool_info_tc1() {
 	pmem_print_tc_name ${FUNCNAME[0]}
 
 	if $rpc_py bdev_pmem_get_pool_info; then
@@ -82,8 +96,7 @@ function bdev_pmem_get_pool_info_tc1()
 	return 0
 }
 
-function bdev_pmem_get_pool_info_tc2()
-{
+function bdev_pmem_get_pool_info_tc2() {
 	pmem_print_tc_name ${FUNCNAME[0]}
 
 	if $rpc_py bdev_pmem_get_pool_info $rootdir/non/existing/path/non_existent_file; then
@@ -93,8 +106,7 @@ function bdev_pmem_get_pool_info_tc2()
 	return 0
 }
 
-function bdev_pmem_get_pool_info_tc3()
-{
+function bdev_pmem_get_pool_info_tc3() {
 	pmem_print_tc_name ${FUNCNAME[0]}
 	pmem_clean_pool_file $obj_pool_file
 
@@ -115,8 +127,7 @@ function bdev_pmem_get_pool_info_tc3()
 	return 0
 }
 
-function bdev_pmem_get_pool_info_tc4()
-{
+function bdev_pmem_get_pool_info_tc4() {
 	pmem_print_tc_name ${FUNCNAME[0]}
 	pmem_clean_pool_file
 
@@ -132,8 +143,7 @@ function bdev_pmem_get_pool_info_tc4()
 #================================================
 # bdev_pmem_create_pool tests
 #================================================
-function bdev_pmem_create_pool_tc1()
-{
+function bdev_pmem_create_pool_tc1() {
 	pmem_print_tc_name ${FUNCNAME[0]}
 	pmem_clean_pool_file
 
@@ -161,12 +171,11 @@ function bdev_pmem_create_pool_tc1()
 	return 0
 }
 
-function bdev_pmem_create_pool_tc2()
-{
+function bdev_pmem_create_pool_tc2() {
 	pmem_print_tc_name ${FUNCNAME[0]}
 	pmem_clean_pool_file
 
-	if  $rpc_py bdev_pmem_create_pool $rootdir/non/existing/path/non_existent_file 32 512; then
+	if $rpc_py bdev_pmem_create_pool $rootdir/non/existing/path/non_existent_file 32 512; then
 		error "Mem pool file created with incorrect path!"
 	fi
 
@@ -178,8 +187,7 @@ function bdev_pmem_create_pool_tc2()
 	return 0
 }
 
-function bdev_pmem_create_pool_tc3()
-{
+function bdev_pmem_create_pool_tc3() {
 	pmem_print_tc_name ${FUNCNAME[0]}
 	pmem_clean_pool_file
 
@@ -207,8 +215,7 @@ function bdev_pmem_create_pool_tc3()
 	return 0
 }
 
-function bdev_pmem_create_pool_tc4()
-{
+function bdev_pmem_create_pool_tc4() {
 	pmem_print_tc_name ${FUNCNAME[0]}
 
 	pmem_unmount_ramspace
@@ -238,8 +245,7 @@ function bdev_pmem_create_pool_tc4()
 	return 0
 }
 
-function bdev_pmem_create_pool_tc5()
-{
+function bdev_pmem_create_pool_tc5() {
 	pmem_print_tc_name ${FUNCNAME[0]}
 	pmem_clean_pool_file
 	local pmem_block_size
@@ -280,14 +286,12 @@ function bdev_pmem_create_pool_tc5()
 	return 0
 }
 
-function bdev_pmem_create_pool_tc6()
-{
+function bdev_pmem_create_pool_tc6() {
 	pmem_print_tc_name ${FUNCNAME[0]}
 	pmem_clean_pool_file
 	local created_pmem_block_size
 
-	for i in 511 512 1024 2048 4096 131072 262144
-	do
+	for i in 511 512 1024 2048 4096 131072 262144; do
 		if ! $rpc_py bdev_pmem_create_pool $default_pool_file 256 $i; then
 			error "Failed to create pmem pool!"
 		fi
@@ -309,8 +313,7 @@ function bdev_pmem_create_pool_tc6()
 	return 0
 }
 
-function bdev_pmem_create_pool_tc7()
-{
+function bdev_pmem_create_pool_tc7() {
 	pmem_print_tc_name ${FUNCNAME[0]}
 	pmem_clean_pool_file
 
@@ -318,7 +321,7 @@ function bdev_pmem_create_pool_tc7()
 		error "Created pmem pool with invalid size!"
 	fi
 
-	if  $rpc_py bdev_pmem_get_pool_info $default_pool_file; then
+	if $rpc_py bdev_pmem_get_pool_info $default_pool_file; then
 		error "Pmem file shouldn' exist!"
 	fi
 
@@ -326,8 +329,7 @@ function bdev_pmem_create_pool_tc7()
 	return 0
 }
 
-function bdev_pmem_create_pool_tc8()
-{
+function bdev_pmem_create_pool_tc8() {
 	pmem_print_tc_name "bdev_pmem_create_pool_tc8"
 	pmem_clean_pool_file
 
@@ -335,7 +337,7 @@ function bdev_pmem_create_pool_tc8()
 		error "Created pmem pool with invalid block number!"
 	fi
 
-	if  $rpc_py bdev_pmem_get_pool_info $default_pool_file; then
+	if $rpc_py bdev_pmem_get_pool_info $default_pool_file; then
 		error "Pmem file shouldn' exist!"
 	fi
 
@@ -343,8 +345,7 @@ function bdev_pmem_create_pool_tc8()
 	return 0
 }
 
-function bdev_pmem_create_pool_tc9()
-{
+function bdev_pmem_create_pool_tc9() {
 	pmem_print_tc_name ${FUNCNAME[0]}
 	pmem_clean_pool_file
 
@@ -371,8 +372,7 @@ function bdev_pmem_create_pool_tc9()
 #================================================
 # bdev_pmem_delete_pool tests
 #================================================
-function bdev_pmem_delete_pool_tc1()
-{
+function bdev_pmem_delete_pool_tc1() {
 	pmem_print_tc_name ${FUNCNAME[0]}
 	pmem_clean_pool_file
 
@@ -383,8 +383,7 @@ function bdev_pmem_delete_pool_tc1()
 	return 0
 }
 
-function bdev_pmem_delete_pool_tc2()
-{
+function bdev_pmem_delete_pool_tc2() {
 	pmem_print_tc_name "bdev_pmem_delete_pool_tc2"
 	pmem_clean_pool_file $obj_pool_file
 
@@ -405,8 +404,7 @@ function bdev_pmem_delete_pool_tc2()
 	return 0
 }
 
-function bdev_pmem_delete_pool_tc3()
-{
+function bdev_pmem_delete_pool_tc3() {
 	pmem_print_tc_name ${FUNCNAME[0]}
 	pmem_clean_pool_file
 
@@ -426,8 +424,7 @@ function bdev_pmem_delete_pool_tc3()
 	return 0
 }
 
-function bdev_pmem_delete_pool_tc4()
-{
+function bdev_pmem_delete_pool_tc4() {
 	pmem_print_tc_name ${FUNCNAME[0]}
 
 	bdev_pmem_delete_pool_tc3
@@ -441,8 +438,7 @@ function bdev_pmem_delete_pool_tc4()
 #================================================
 # bdev_pmem_create tests
 #================================================
-function bdev_pmem_create_tc1()
-{
+function bdev_pmem_create_tc1() {
 	pmem_print_tc_name ${FUNCNAME[0]}
 	pmem_clean_pool_file
 
@@ -455,8 +451,7 @@ function bdev_pmem_create_tc1()
 	return 0
 }
 
-function bdev_pmem_create_tc2()
-{
+function bdev_pmem_create_tc2() {
 	pmem_print_tc_name ${FUNCNAME[0]}
 	pmem_clean_pool_file
 
@@ -473,8 +468,7 @@ function bdev_pmem_create_tc2()
 	return 0
 }
 
-function bdev_pmem_create_tc3()
-{
+function bdev_pmem_create_tc3() {
 	pmem_print_tc_name ${FUNCNAME[0]}
 
 	truncate -s 32M $rootdir/test/pmem/random_file
@@ -490,8 +484,7 @@ function bdev_pmem_create_tc3()
 	return 0
 }
 
-function bdev_pmem_create_tc4()
-{
+function bdev_pmem_create_tc4() {
 	pmem_print_tc_name ${FUNCNAME[0]}
 	pmem_clean_pool_file $obj_pool_file
 
@@ -512,8 +505,7 @@ function bdev_pmem_create_tc4()
 	return 0
 }
 
-function bdev_pmem_create_tc5()
-{
+function bdev_pmem_create_tc5() {
 	pmem_print_tc_name ${FUNCNAME[0]}
 	pmem_clean_pool_file
 	pmem_create_pool_file
@@ -543,8 +535,7 @@ function bdev_pmem_create_tc5()
 	return 0
 }
 
-function bdev_pmem_create_tc6()
-{
+function bdev_pmem_create_tc6() {
 	pmem_print_tc_name ${FUNCNAME[0]}
 	local pmem_bdev_name
 	pmem_clean_pool_file
@@ -562,7 +553,7 @@ function bdev_pmem_create_tc6()
 		error "Pmem bdev not found!"
 	fi
 
-	if  $rpc_py bdev_pmem_create -n $bdev_name $default_pool_file; then
+	if $rpc_py bdev_pmem_create -n $bdev_name $default_pool_file; then
 		error "Constructed pmem bdev with occupied path!"
 	fi
 
@@ -581,8 +572,7 @@ function bdev_pmem_create_tc6()
 #================================================
 # bdev_pmem_delete tests
 #================================================
-function delete_bdev_tc1()
-{
+function delete_bdev_tc1() {
 	pmem_print_tc_name ${FUNCNAME[0]}
 	local pmem_bdev_name
 	local bdevs_names
@@ -614,8 +604,7 @@ function delete_bdev_tc1()
 	return 0
 }
 
-function delete_bdev_tc2()
-{
+function delete_bdev_tc2() {
 	pmem_print_tc_name ${FUNCNAME[0]}
 	pmem_clean_pool_file
 	pmem_create_pool_file $default_pool_file 256 512
@@ -691,5 +680,4 @@ if $test_delete_bdev || $test_all; then
 fi
 
 pmem_clean_pool_file
-report_test_completion "pmem"
 vhost_kill 0

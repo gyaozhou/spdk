@@ -39,32 +39,54 @@
 #include "spdk/config.h"
 #include "spdk/log.h"
 #include "spdk/nvmf.h"
+#include "spdk/nvmf_transport.h"
 #include "spdk/queue.h"
 #include "spdk/util.h"
 
-static const struct spdk_nvmf_transport_ops *const g_transport_ops[] = {
-#ifdef SPDK_CONFIG_RDMA
-	&spdk_nvmf_transport_rdma,
-#endif
-	&spdk_nvmf_transport_tcp,
-#ifdef SPDK_CONFIG_FC
-	&spdk_nvmf_transport_fc,
-#endif
+#define MAX_MEMPOOL_NAME_LENGTH 40
+#define NVMF_TRANSPORT_DEFAULT_ASSOCIATION_TIMEOUT_IN_MS 120000
+
+struct nvmf_transport_ops_list_element {
+	struct spdk_nvmf_transport_ops			ops;
+	TAILQ_ENTRY(nvmf_transport_ops_list_element)	link;
 };
 
-#define NUM_TRANSPORTS (SPDK_COUNTOF(g_transport_ops))
-#define MAX_MEMPOOL_NAME_LENGTH 40
+TAILQ_HEAD(nvmf_transport_ops_list, nvmf_transport_ops_list_element)
+g_spdk_nvmf_transport_ops = TAILQ_HEAD_INITIALIZER(g_spdk_nvmf_transport_ops);
 
 static inline const struct spdk_nvmf_transport_ops *
-spdk_nvmf_get_transport_ops(enum spdk_nvme_transport_type type)
+nvmf_get_transport_ops(const char *transport_name)
 {
-	size_t i;
-	for (i = 0; i != NUM_TRANSPORTS; i++) {
-		if (g_transport_ops[i]->type == type) {
-			return g_transport_ops[i];
+	struct nvmf_transport_ops_list_element *ops;
+	TAILQ_FOREACH(ops, &g_spdk_nvmf_transport_ops, link) {
+		if (strcasecmp(transport_name, ops->ops.name) == 0) {
+			return &ops->ops;
 		}
 	}
 	return NULL;
+}
+
+void
+spdk_nvmf_transport_register(const struct spdk_nvmf_transport_ops *ops)
+{
+	struct nvmf_transport_ops_list_element *new_ops;
+
+	if (nvmf_get_transport_ops(ops->name) != NULL) {
+		SPDK_ERRLOG("Double registering nvmf transport type %s.\n", ops->name);
+		assert(false);
+		return;
+	}
+
+	new_ops = calloc(1, sizeof(*new_ops));
+	if (new_ops == NULL) {
+		SPDK_ERRLOG("Unable to allocate memory to register new transport type %s.\n", ops->name);
+		assert(false);
+		return;
+	}
+
+	new_ops->ops = *ops;
+
+	TAILQ_INSERT_TAIL(&g_spdk_nvmf_transport_ops, new_ops, link);
 }
 
 const struct spdk_nvmf_transport_opts *
@@ -79,48 +101,107 @@ spdk_nvmf_get_transport_type(struct spdk_nvmf_transport *transport)
 	return transport->ops->type;
 }
 
+const char *
+spdk_nvmf_get_transport_name(struct spdk_nvmf_transport *transport)
+{
+	return transport->ops->name;
+}
+
+static void nvmf_transport_opts_copy(struct spdk_nvmf_transport_opts *opts,
+				     struct spdk_nvmf_transport_opts *opts_src,
+				     size_t opts_size)
+{
+	assert(opts);
+	assert(opts_src);
+
+	opts->opts_size = opts_size;
+
+#define SET_FIELD(field) \
+	if (offsetof(struct spdk_nvmf_transport_opts, field) + sizeof(opts->field) <= opts_size) { \
+		opts->field = opts_src->field; \
+	} \
+
+	SET_FIELD(max_queue_depth);
+	SET_FIELD(max_qpairs_per_ctrlr);
+	SET_FIELD(in_capsule_data_size);
+	SET_FIELD(max_io_size);
+	SET_FIELD(io_unit_size);
+	SET_FIELD(max_aq_depth);
+	SET_FIELD(buf_cache_size);
+	SET_FIELD(num_shared_buffers);
+	SET_FIELD(dif_insert_or_strip);
+	SET_FIELD(abort_timeout_sec);
+	SET_FIELD(association_timeout);
+	SET_FIELD(transport_specific);
+
+	/* Do not remove this statement, you should always update this statement when you adding a new field,
+	 * and do not forget to add the SET_FIELD statement for your added field. */
+	SPDK_STATIC_ASSERT(sizeof(struct spdk_nvmf_transport_opts) == 56, "Incorrect size");
+
+#undef SET_FIELD
+#undef FILED_CHECK
+}
+
 struct spdk_nvmf_transport *
-spdk_nvmf_transport_create(enum spdk_nvme_transport_type type,
-			   struct spdk_nvmf_transport_opts *opts)
+spdk_nvmf_transport_create(const char *transport_name, struct spdk_nvmf_transport_opts *opts)
 {
 	const struct spdk_nvmf_transport_ops *ops = NULL;
 	struct spdk_nvmf_transport *transport;
 	char spdk_mempool_name[MAX_MEMPOOL_NAME_LENGTH];
 	int chars_written;
+	struct spdk_nvmf_transport_opts opts_local = {};
 
-	ops = spdk_nvmf_get_transport_ops(type);
+	if (!opts) {
+		SPDK_ERRLOG("opts should not be NULL\n");
+		return NULL;
+	}
+
+	if (!opts->opts_size) {
+		SPDK_ERRLOG("The opts_size in opts structure should not be zero\n");
+		return NULL;
+	}
+
+	ops = nvmf_get_transport_ops(transport_name);
 	if (!ops) {
-		SPDK_ERRLOG("Transport type '%s' unavailable.\n",
-			    spdk_nvme_transport_id_trtype_str(type));
+		SPDK_ERRLOG("Transport type '%s' unavailable.\n", transport_name);
+		return NULL;
+	}
+	nvmf_transport_opts_copy(&opts_local, opts, opts->opts_size);
+
+	if (opts_local.max_aq_depth < SPDK_NVMF_MIN_ADMIN_MAX_SQ_SIZE) {
+		SPDK_ERRLOG("max_aq_depth %u is less than minimum defined by NVMf spec, use min value\n",
+			    opts_local.max_aq_depth);
+		opts_local.max_aq_depth = SPDK_NVMF_MIN_ADMIN_MAX_SQ_SIZE;
+	}
+
+	transport = ops->create(&opts_local);
+	if (!transport) {
+		SPDK_ERRLOG("Unable to create new transport of type %s\n", transport_name);
 		return NULL;
 	}
 
-	transport = ops->create(opts);
-	if (!transport) {
-		SPDK_ERRLOG("Unable to create new transport of type %s\n",
-			    spdk_nvme_transport_id_trtype_str(type));
-		return NULL;
-	}
+	TAILQ_INIT(&transport->listeners);
 
 	transport->ops = ops;
-	transport->opts = *opts;
+	transport->opts = opts_local;
+
 	chars_written = snprintf(spdk_mempool_name, MAX_MEMPOOL_NAME_LENGTH, "%s_%s_%s", "spdk_nvmf",
-				 spdk_nvme_transport_id_trtype_str(type), "data");
+				 transport_name, "data");
 	if (chars_written < 0) {
 		SPDK_ERRLOG("Unable to generate transport data buffer pool name.\n");
-		ops->destroy(transport);
+		ops->destroy(transport, NULL, NULL);
 		return NULL;
 	}
 
 	transport->data_buf_pool = spdk_mempool_create(spdk_mempool_name,
-				   opts->num_shared_buffers,
-				   opts->io_unit_size + NVMF_DATA_BUFFER_ALIGNMENT,
+				   opts_local.num_shared_buffers,
+				   opts_local.io_unit_size + NVMF_DATA_BUFFER_ALIGNMENT,
 				   SPDK_MEMPOOL_DEFAULT_CACHE_SIZE,
 				   SPDK_ENV_SOCKET_ID_ANY);
 
 	if (!transport->data_buf_pool) {
 		SPDK_ERRLOG("Unable to allocate buffer pool for poll group\n");
-		ops->destroy(transport);
+		ops->destroy(transport, NULL, NULL);
 		return NULL;
 	}
 
@@ -140,7 +221,8 @@ spdk_nvmf_transport_get_next(struct spdk_nvmf_transport *transport)
 }
 
 int
-spdk_nvmf_transport_destroy(struct spdk_nvmf_transport *transport)
+spdk_nvmf_transport_destroy(struct spdk_nvmf_transport *transport,
+			    spdk_nvmf_transport_destroy_done_cb cb_fn, void *cb_arg)
 {
 	if (transport->data_buf_pool != NULL) {
 		if (spdk_mempool_count(transport->data_buf_pool) !=
@@ -153,42 +235,173 @@ spdk_nvmf_transport_destroy(struct spdk_nvmf_transport *transport)
 
 	spdk_mempool_free(transport->data_buf_pool);
 
-	return transport->ops->destroy(transport);
+	return transport->ops->destroy(transport, cb_fn, cb_arg);
+}
+
+struct spdk_nvmf_listener *
+nvmf_transport_find_listener(struct spdk_nvmf_transport *transport,
+			     const struct spdk_nvme_transport_id *trid)
+{
+	struct spdk_nvmf_listener *listener;
+
+	TAILQ_FOREACH(listener, &transport->listeners, link) {
+		if (spdk_nvme_transport_id_compare(&listener->trid, trid) == 0) {
+			return listener;
+		}
+	}
+
+	return NULL;
 }
 
 int
 spdk_nvmf_transport_listen(struct spdk_nvmf_transport *transport,
-			   const struct spdk_nvme_transport_id *trid)
+			   const struct spdk_nvme_transport_id *trid, struct spdk_nvmf_listen_opts *opts)
 {
-	return transport->ops->listen(transport, trid);
+	struct spdk_nvmf_listener *listener;
+	int rc;
+
+	listener = nvmf_transport_find_listener(transport, trid);
+	if (!listener) {
+		listener = calloc(1, sizeof(*listener));
+		if (!listener) {
+			return -ENOMEM;
+		}
+
+		listener->ref = 1;
+		listener->trid = *trid;
+		TAILQ_INSERT_TAIL(&transport->listeners, listener, link);
+		rc = transport->ops->listen(transport, &listener->trid, opts);
+		if (rc != 0) {
+			TAILQ_REMOVE(&transport->listeners, listener, link);
+			free(listener);
+		}
+		return rc;
+	}
+
+	++listener->ref;
+
+	return 0;
 }
 
 int
 spdk_nvmf_transport_stop_listen(struct spdk_nvmf_transport *transport,
 				const struct spdk_nvme_transport_id *trid)
 {
-	return transport->ops->stop_listen(transport, trid);
+	struct spdk_nvmf_listener *listener;
+
+	listener = nvmf_transport_find_listener(transport, trid);
+	if (!listener) {
+		return -ENOENT;
+	}
+
+	if (--listener->ref == 0) {
+		TAILQ_REMOVE(&transport->listeners, listener, link);
+		transport->ops->stop_listen(transport, trid);
+		free(listener);
+	}
+
+	return 0;
 }
 
-void
-spdk_nvmf_transport_accept(struct spdk_nvmf_transport *transport, new_qpair_fn cb_fn, void *cb_arg)
+struct nvmf_stop_listen_ctx {
+	struct spdk_nvmf_transport *transport;
+	struct spdk_nvme_transport_id trid;
+	spdk_nvmf_tgt_subsystem_listen_done_fn cb_fn;
+	void *cb_arg;
+};
+
+static void
+nvmf_stop_listen_fini(struct spdk_io_channel_iter *i, int status)
 {
-	transport->ops->accept(transport, cb_fn, cb_arg);
+	struct nvmf_stop_listen_ctx *ctx;
+	struct spdk_nvmf_transport *transport;
+	int rc = status;
+
+	ctx = spdk_io_channel_iter_get_ctx(i);
+	transport = ctx->transport;
+	assert(transport != NULL);
+
+	rc = spdk_nvmf_transport_stop_listen(transport, &ctx->trid);
+	if (rc) {
+		SPDK_ERRLOG("Failed to stop listening on address '%s'\n", ctx->trid.traddr);
+	}
+
+	if (ctx->cb_fn) {
+		ctx->cb_fn(ctx->cb_arg, rc);
+	}
+	free(ctx);
+}
+
+static void
+nvmf_stop_listen_disconnect_qpairs(struct spdk_io_channel_iter *i)
+{
+	struct nvmf_stop_listen_ctx *ctx;
+	struct spdk_nvmf_poll_group *group;
+	struct spdk_io_channel *ch;
+	struct spdk_nvmf_qpair *qpair, *tmp_qpair;
+	struct spdk_nvme_transport_id tmp_trid;
+
+	ctx = spdk_io_channel_iter_get_ctx(i);
+	ch = spdk_io_channel_iter_get_channel(i);
+	group = spdk_io_channel_get_ctx(ch);
+
+	TAILQ_FOREACH_SAFE(qpair, &group->qpairs, link, tmp_qpair) {
+		/* skip qpairs that don't match the TRID. */
+		if (spdk_nvmf_qpair_get_listen_trid(qpair, &tmp_trid)) {
+			continue;
+		}
+
+		if (!spdk_nvme_transport_id_compare(&ctx->trid, &tmp_trid)) {
+			spdk_nvmf_qpair_disconnect(qpair, NULL, NULL);
+		}
+	}
+	spdk_for_each_channel_continue(i, 0);
+}
+
+int
+spdk_nvmf_transport_stop_listen_async(struct spdk_nvmf_transport *transport,
+				      const struct spdk_nvme_transport_id *trid,
+				      spdk_nvmf_tgt_subsystem_listen_done_fn cb_fn,
+				      void *cb_arg)
+{
+	struct nvmf_stop_listen_ctx *ctx;
+
+	ctx = calloc(1, sizeof(struct nvmf_stop_listen_ctx));
+	if (ctx == NULL) {
+		return -ENOMEM;
+	}
+
+	ctx->trid = *trid;
+	ctx->transport = transport;
+	ctx->cb_fn = cb_fn;
+	ctx->cb_arg = cb_arg;
+
+	spdk_for_each_channel(transport->tgt, nvmf_stop_listen_disconnect_qpairs, ctx,
+			      nvmf_stop_listen_fini);
+
+	return 0;
+}
+
+uint32_t
+nvmf_transport_accept(struct spdk_nvmf_transport *transport)
+{
+	return transport->ops->accept(transport);
 }
 
 void
-spdk_nvmf_transport_listener_discover(struct spdk_nvmf_transport *transport,
-				      struct spdk_nvme_transport_id *trid,
-				      struct spdk_nvmf_discovery_log_page_entry *entry)
+nvmf_transport_listener_discover(struct spdk_nvmf_transport *transport,
+				 struct spdk_nvme_transport_id *trid,
+				 struct spdk_nvmf_discovery_log_page_entry *entry)
 {
 	transport->ops->listener_discover(transport, trid, entry);
 }
 
 struct spdk_nvmf_transport_poll_group *
-spdk_nvmf_transport_poll_group_create(struct spdk_nvmf_transport *transport)
+nvmf_transport_poll_group_create(struct spdk_nvmf_transport *transport)
 {
 	struct spdk_nvmf_transport_poll_group *group;
-	struct spdk_nvmf_transport_pg_cache_buf *buf;
+	struct spdk_nvmf_transport_pg_cache_buf **bufs;
+	uint32_t i;
 
 	group = transport->ops->poll_group_create(transport);
 	if (!group) {
@@ -200,24 +413,41 @@ spdk_nvmf_transport_poll_group_create(struct spdk_nvmf_transport *transport)
 	STAILQ_INIT(&group->buf_cache);
 
 	if (transport->opts.buf_cache_size) {
-		group->buf_cache_count = 0;
 		group->buf_cache_size = transport->opts.buf_cache_size;
-		while (group->buf_cache_count < group->buf_cache_size) {
-			buf = (struct spdk_nvmf_transport_pg_cache_buf *)spdk_mempool_get(transport->data_buf_pool);
-			if (!buf) {
-				SPDK_NOTICELOG("Unable to reserve the full number of buffers for the pg buffer cache.\n");
-				break;
-			}
-			STAILQ_INSERT_HEAD(&group->buf_cache, buf, link);
-			group->buf_cache_count++;
+		bufs = calloc(group->buf_cache_size, sizeof(struct spdk_nvmf_transport_pg_cache_buf *));
+
+		if (!bufs) {
+			SPDK_ERRLOG("Memory allocation failed, can't reserve buffers for the pg buffer cache\n");
+			return group;
 		}
+
+		if (spdk_mempool_get_bulk(transport->data_buf_pool, (void **)bufs, group->buf_cache_size)) {
+			group->buf_cache_size = (uint32_t)spdk_mempool_count(transport->data_buf_pool);
+			SPDK_NOTICELOG("Unable to reserve the full number of buffers for the pg buffer cache. "
+				       "Decrease the number of cached buffers from %u to %u\n",
+				       transport->opts.buf_cache_size, group->buf_cache_size);
+			/* Sanity check */
+			assert(group->buf_cache_size <= transport->opts.buf_cache_size);
+			/* Try again with less number of buffers */
+			if (spdk_mempool_get_bulk(transport->data_buf_pool, (void **)bufs, group->buf_cache_size)) {
+				SPDK_NOTICELOG("Failed to reserve %u buffers\n", group->buf_cache_size);
+				group->buf_cache_size = 0;
+			}
+		}
+
+		for (i = 0; i < group->buf_cache_size; i++) {
+			STAILQ_INSERT_HEAD(&group->buf_cache, bufs[i], link);
+		}
+		group->buf_cache_count = group->buf_cache_size;
+
+		free(bufs);
 	}
 	return group;
 }
 
 struct spdk_nvmf_transport_poll_group *
-spdk_nvmf_transport_get_optimal_poll_group(struct spdk_nvmf_transport *transport,
-		struct spdk_nvmf_qpair *qpair)
+nvmf_transport_get_optimal_poll_group(struct spdk_nvmf_transport *transport,
+				      struct spdk_nvmf_qpair *qpair)
 {
 	if (transport->ops->get_optimal_poll_group) {
 		return transport->ops->get_optimal_poll_group(qpair);
@@ -227,7 +457,7 @@ spdk_nvmf_transport_get_optimal_poll_group(struct spdk_nvmf_transport *transport
 }
 
 void
-spdk_nvmf_transport_poll_group_destroy(struct spdk_nvmf_transport_poll_group *group)
+nvmf_transport_poll_group_destroy(struct spdk_nvmf_transport_poll_group *group)
 {
 	struct spdk_nvmf_transport_pg_cache_buf *buf, *tmp;
 
@@ -243,8 +473,8 @@ spdk_nvmf_transport_poll_group_destroy(struct spdk_nvmf_transport_poll_group *gr
 }
 
 int
-spdk_nvmf_transport_poll_group_add(struct spdk_nvmf_transport_poll_group *group,
-				   struct spdk_nvmf_qpair *qpair)
+nvmf_transport_poll_group_add(struct spdk_nvmf_transport_poll_group *group,
+			      struct spdk_nvmf_qpair *qpair)
 {
 	if (qpair->transport) {
 		assert(qpair->transport == group->transport);
@@ -259,8 +489,8 @@ spdk_nvmf_transport_poll_group_add(struct spdk_nvmf_transport_poll_group *group,
 }
 
 int
-spdk_nvmf_transport_poll_group_remove(struct spdk_nvmf_transport_poll_group *group,
-				      struct spdk_nvmf_qpair *qpair)
+nvmf_transport_poll_group_remove(struct spdk_nvmf_transport_poll_group *group,
+				 struct spdk_nvmf_qpair *qpair)
 {
 	int rc = ENOTSUP;
 
@@ -273,75 +503,88 @@ spdk_nvmf_transport_poll_group_remove(struct spdk_nvmf_transport_poll_group *gro
 }
 
 int
-spdk_nvmf_transport_poll_group_poll(struct spdk_nvmf_transport_poll_group *group)
+nvmf_transport_poll_group_poll(struct spdk_nvmf_transport_poll_group *group)
 {
 	return group->transport->ops->poll_group_poll(group);
 }
 
 int
-spdk_nvmf_transport_req_free(struct spdk_nvmf_request *req)
+nvmf_transport_req_free(struct spdk_nvmf_request *req)
 {
 	return req->qpair->transport->ops->req_free(req);
 }
 
 int
-spdk_nvmf_transport_req_complete(struct spdk_nvmf_request *req)
+nvmf_transport_req_complete(struct spdk_nvmf_request *req)
 {
 	return req->qpair->transport->ops->req_complete(req);
 }
 
 void
-spdk_nvmf_transport_qpair_fini(struct spdk_nvmf_qpair *qpair)
+nvmf_transport_qpair_fini(struct spdk_nvmf_qpair *qpair,
+			  spdk_nvmf_transport_qpair_fini_cb cb_fn,
+			  void *cb_arg)
 {
-	qpair->transport->ops->qpair_fini(qpair);
+	qpair->transport->ops->qpair_fini(qpair, cb_fn, cb_arg);
 }
 
 int
-spdk_nvmf_transport_qpair_get_peer_trid(struct spdk_nvmf_qpair *qpair,
-					struct spdk_nvme_transport_id *trid)
+nvmf_transport_qpair_get_peer_trid(struct spdk_nvmf_qpair *qpair,
+				   struct spdk_nvme_transport_id *trid)
 {
 	return qpair->transport->ops->qpair_get_peer_trid(qpair, trid);
 }
 
 int
-spdk_nvmf_transport_qpair_get_local_trid(struct spdk_nvmf_qpair *qpair,
-		struct spdk_nvme_transport_id *trid)
+nvmf_transport_qpair_get_local_trid(struct spdk_nvmf_qpair *qpair,
+				    struct spdk_nvme_transport_id *trid)
 {
 	return qpair->transport->ops->qpair_get_local_trid(qpair, trid);
 }
 
 int
-spdk_nvmf_transport_qpair_get_listen_trid(struct spdk_nvmf_qpair *qpair,
-		struct spdk_nvme_transport_id *trid)
+nvmf_transport_qpair_get_listen_trid(struct spdk_nvmf_qpair *qpair,
+				     struct spdk_nvme_transport_id *trid)
 {
 	return qpair->transport->ops->qpair_get_listen_trid(qpair, trid);
 }
 
+void
+nvmf_transport_qpair_abort_request(struct spdk_nvmf_qpair *qpair,
+				   struct spdk_nvmf_request *req)
+{
+	qpair->transport->ops->qpair_abort_request(qpair, req);
+}
+
 bool
-spdk_nvmf_transport_opts_init(enum spdk_nvme_transport_type type,
-			      struct spdk_nvmf_transport_opts *opts)
+spdk_nvmf_transport_opts_init(const char *transport_name,
+			      struct spdk_nvmf_transport_opts *opts, size_t opts_size)
 {
 	const struct spdk_nvmf_transport_ops *ops;
+	struct spdk_nvmf_transport_opts opts_local = {};
 
-	ops = spdk_nvmf_get_transport_ops(type);
+	ops = nvmf_get_transport_ops(transport_name);
 	if (!ops) {
-		SPDK_ERRLOG("Transport type %s unavailable.\n",
-			    spdk_nvme_transport_id_trtype_str(type));
+		SPDK_ERRLOG("Transport type %s unavailable.\n", transport_name);
 		return false;
 	}
 
-	ops->opts_init(opts);
-	return true;
-}
-
-int
-spdk_nvmf_transport_qpair_set_sqsize(struct spdk_nvmf_qpair *qpair)
-{
-	if (qpair->transport->ops->qpair_set_sqsize) {
-		return qpair->transport->ops->qpair_set_sqsize(qpair);
+	if (!opts) {
+		SPDK_ERRLOG("opts should not be NULL\n");
+		return false;
 	}
 
-	return 0;
+	if (!opts_size) {
+		SPDK_ERRLOG("opts_size inside opts should not be zero value\n");
+		return false;
+	}
+
+	opts_local.association_timeout = NVMF_TRANSPORT_DEFAULT_ASSOCIATION_TIMEOUT_IN_MS;
+	ops->opts_init(&opts_local);
+
+	nvmf_transport_opts_copy(opts, &opts_local, opts_size);
+
+	return true;
 }
 
 int

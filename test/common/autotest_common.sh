@@ -1,3 +1,5 @@
+#!/usr/bin/env bash
+
 function xtrace_disable() {
 	if [ "$XTRACE_DISABLED" != "yes" ]; then
 		PREV_BASH_OPTS="$-"
@@ -5,16 +7,27 @@ function xtrace_disable() {
 			XTRACE_DISABLED="yes"
 		fi
 		set +x
-        elif [ -z $XTRACE_NESTING_LEVEL ]; then
-                XTRACE_NESTING_LEVEL=1
-        else
-                XTRACE_NESTING_LEVEL=$((++XTRACE_NESTING_LEVEL))
+	elif [ -z $XTRACE_NESTING_LEVEL ]; then
+		XTRACE_NESTING_LEVEL=1
+	else
+		XTRACE_NESTING_LEVEL=$((++XTRACE_NESTING_LEVEL))
 	fi
 }
 
 xtrace_disable
 set -e
 shopt -s expand_aliases
+
+source "$rootdir/test/common/applications.sh"
+source "$rootdir/scripts/common.sh"
+if [[ -e $rootdir/test/common/build_config.sh ]]; then
+	source "$rootdir/test/common/build_config.sh"
+elif [[ -e $rootdir/mk/config.mk ]]; then
+	build_config=$(< "$rootdir/mk/config.mk")
+	source <(echo "${build_config//\?=/=}")
+else
+	source "$rootdir/CONFIG"
+fi
 
 # Dummy function to be called after restoring xtrace just so that it appears in the
 # xtrace log. This way we can consistently track when xtrace is enabled/disabled.
@@ -27,8 +40,7 @@ function xtrace_enable() {
 # Keep it as alias to avoid xtrace_enable backtrace always pointing to xtrace_restore.
 # xtrace_enable will appear as called directly from the user script, from the same line
 # that "called" xtrace_restore.
-alias xtrace_restore=\
-'if [ -z $XTRACE_NESTING_LEVEL ]; then
+alias xtrace_restore='if [ -z $XTRACE_NESTING_LEVEL ]; then
         if [[ "$PREV_BASH_OPTS" == *"x"* ]]; then
 		XTRACE_DISABLED="no"; PREV_BASH_OPTS=""; set -x; xtrace_enable;
 	fi
@@ -42,49 +54,95 @@ fi'
 : ${RUN_NIGHTLY:=0}
 export RUN_NIGHTLY
 
-: ${RUN_NIGHTLY_FAILING:=0}
-export RUN_NIGHTLY_FAILING
-
 # Set defaults for missing test config options
-: ${SPDK_BUILD_DOC=0}; export SPDK_BUILD_DOC
-: ${SPDK_BUILD_PACKAGE=0}; export SPDK_BUILD_PACKAGE
-: ${SPDK_BUILD_SHARED_OBJECT=0}; export SPDK_BUILD_SHARED_OBJECT
-: ${SPDK_RUN_CHECK_FORMAT=0}; export SPDK_RUN_CHECK_FORMAT
-: ${SPDK_RUN_SCANBUILD=0}; export SPDK_RUN_SCANBUILD
-: ${SPDK_RUN_VALGRIND=0}; export SPDK_RUN_VALGRIND
-: ${SPDK_RUN_FUNCTIONAL_TEST=0}; export SPDK_RUN_FUNCTIONAL_TEST
-: ${SPDK_TEST_UNITTEST=0}; export SPDK_TEST_UNITTEST
-: ${SPDK_TEST_ISAL=0}; export SPDK_TEST_ISAL
-: ${SPDK_TEST_ISCSI=0}; export SPDK_TEST_ISCSI
-: ${SPDK_TEST_ISCSI_INITIATOR=0}; export SPDK_TEST_ISCSI_INITIATOR
-: ${SPDK_TEST_NVME=0}; export SPDK_TEST_NVME
-: ${SPDK_TEST_NVME_CLI=0}; export SPDK_TEST_NVME_CLI
-: ${SPDK_TEST_NVME_CUSE=0}; export SPDK_TEST_NVME_CUSE
-: ${SPDK_TEST_NVMF=0}; export SPDK_TEST_NVMF
-: ${SPDK_TEST_NVMF_TRANSPORT="rdma"}; export SPDK_TEST_NVMF_TRANSPORT
-: ${SPDK_TEST_RBD=0}; export SPDK_TEST_RBD
-: ${SPDK_TEST_VHOST=0}; export SPDK_TEST_VHOST
-: ${SPDK_TEST_BLOCKDEV=0}; export SPDK_TEST_BLOCKDEV
-: ${SPDK_TEST_IOAT=0}; export SPDK_TEST_IOAT
-: ${SPDK_TEST_EVENT=0}; export SPDK_TEST_EVENT
-: ${SPDK_TEST_BLOBFS=0}; export SPDK_TEST_BLOBFS
-: ${SPDK_TEST_VHOST_INIT=0}; export SPDK_TEST_VHOST_INIT
-: ${SPDK_TEST_PMDK=0}; export SPDK_TEST_PMDK
-: ${SPDK_TEST_LVOL=0}; export SPDK_TEST_LVOL
-: ${SPDK_TEST_JSON=0}; export SPDK_TEST_JSON
-: ${SPDK_TEST_REDUCE=0}; export SPDK_TEST_REDUCE
-: ${SPDK_TEST_VPP=0}; export SPDK_TEST_VPP
-: ${SPDK_RUN_ASAN=0}; export SPDK_RUN_ASAN
-: ${SPDK_RUN_UBSAN=0}; export SPDK_RUN_UBSAN
-: ${SPDK_RUN_INSTALLED_DPDK=0}; export SPDK_RUN_INSTALLED_DPDK
-: ${SPDK_RUN_NON_ROOT=0}; export SPDK_RUN_NON_ROOT
-: ${SPDK_TEST_CRYPTO=0}; export SPDK_TEST_CRYPTO
-: ${SPDK_TEST_FTL=0}; export SPDK_TEST_FTL
-: ${SPDK_TEST_OCF=0}; export SPDK_TEST_OCF
-: ${SPDK_TEST_FTL_EXTENDED=0}; export SPDK_TEST_FTL_EXTENDED
-: ${SPDK_TEST_VMD=0}; export SPDK_TEST_VMD
-: ${SPDK_TEST_OPAL=0}; export SPDK_TEST_OPAL
-: ${SPDK_AUTOTEST_X=true}; export SPDK_AUTOTEST_X
+: ${SPDK_AUTOTEST_DEBUG_APPS:=0}
+export SPDK_AUTOTEST_DEBUG_APPS
+: ${SPDK_RUN_VALGRIND=0}
+export SPDK_RUN_VALGRIND
+: ${SPDK_RUN_FUNCTIONAL_TEST=0}
+export SPDK_RUN_FUNCTIONAL_TEST
+: ${SPDK_TEST_UNITTEST=0}
+export SPDK_TEST_UNITTEST
+: ${SPDK_TEST_AUTOBUILD=0}
+export SPDK_TEST_AUTOBUILD
+: ${SPDK_TEST_RELEASE_BUILD=0}
+export SPDK_TEST_RELEASE_BUILD
+: ${SPDK_TEST_ISAL=0}
+export SPDK_TEST_ISAL
+: ${SPDK_TEST_ISCSI=0}
+export SPDK_TEST_ISCSI
+: ${SPDK_TEST_ISCSI_INITIATOR=0}
+export SPDK_TEST_ISCSI_INITIATOR
+: ${SPDK_TEST_NVME=0}
+export SPDK_TEST_NVME
+: ${SPDK_TEST_NVME_CLI=0}
+export SPDK_TEST_NVME_CLI
+: ${SPDK_TEST_NVME_CUSE=0}
+export SPDK_TEST_NVME_CUSE
+: ${SPDK_TEST_NVMF=0}
+export SPDK_TEST_NVMF
+: ${SPDK_TEST_VFIOUSER=0}
+export SPDK_TEST_VFIOUSER
+: ${SPDK_TEST_NVMF_TRANSPORT="rdma"}
+export SPDK_TEST_NVMF_TRANSPORT
+: ${SPDK_TEST_RBD=0}
+export SPDK_TEST_RBD
+: ${SPDK_TEST_VHOST=0}
+export SPDK_TEST_VHOST
+: ${SPDK_TEST_BLOCKDEV=0}
+export SPDK_TEST_BLOCKDEV
+: ${SPDK_TEST_IOAT=0}
+export SPDK_TEST_IOAT
+: ${SPDK_TEST_BLOBFS=0}
+export SPDK_TEST_BLOBFS
+: ${SPDK_TEST_VHOST_INIT=0}
+export SPDK_TEST_VHOST_INIT
+: ${SPDK_TEST_PMDK=0}
+export SPDK_TEST_PMDK
+: ${SPDK_TEST_LVOL=0}
+export SPDK_TEST_LVOL
+: ${SPDK_TEST_JSON=0}
+export SPDK_TEST_JSON
+: ${SPDK_TEST_REDUCE=0}
+export SPDK_TEST_REDUCE
+: ${SPDK_RUN_ASAN=0}
+export SPDK_RUN_ASAN
+: ${SPDK_RUN_UBSAN=0}
+export SPDK_RUN_UBSAN
+: ${SPDK_RUN_EXTERNAL_DPDK=""}
+export SPDK_RUN_EXTERNAL_DPDK
+: ${SPDK_RUN_NON_ROOT=0}
+export SPDK_RUN_NON_ROOT
+: ${SPDK_TEST_CRYPTO=0}
+export SPDK_TEST_CRYPTO
+: ${SPDK_TEST_FTL=0}
+export SPDK_TEST_FTL
+: ${SPDK_TEST_OCF=0}
+export SPDK_TEST_OCF
+: ${SPDK_TEST_FTL_EXTENDED=0}
+export SPDK_TEST_FTL_EXTENDED
+: ${SPDK_TEST_VMD=0}
+export SPDK_TEST_VMD
+: ${SPDK_TEST_OPAL=0}
+export SPDK_TEST_OPAL
+: ${SPDK_TEST_NATIVE_DPDK}
+export SPDK_TEST_NATIVE_DPDK
+: ${SPDK_AUTOTEST_X=true}
+export SPDK_AUTOTEST_X
+: ${SPDK_TEST_RAID5=0}
+export SPDK_TEST_RAID5
+: ${SPDK_TEST_URING=0}
+export SPDK_TEST_URING
+: ${SPDK_TEST_USE_IGB_UIO:=0}
+export SPDK_TEST_USE_IGB_UIO
+: ${SPDK_TEST_SCHEDULER:=0}
+export SPDK_TEST_SCHEDULER
+
+export DPDK_LIB_DIR="${SPDK_RUN_EXTERNAL_DPDK:-$rootdir/dpdk/build}/lib"
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$SPDK_LIB_DIR:$DPDK_LIB_DIR
+
+# Tell setup.sh to wait for block devices upon each reset
+export PCI_BLOCK_SYNC_ON_RESET=yes
 
 # Export PYTHONPATH with addition of RPC framework. New scripts can be created
 # specific use cases for tests.
@@ -111,9 +169,10 @@ cat << EOL >> "$asan_suppression_file"
 leak:spdk_fs_alloc_thread_ctx
 
 # Suppress known leaks in fio project
-leak:/usr/src/fio/parse.c
-leak:/usr/src/fio/iolog.c
-leak:/usr/src/fio/init.c
+leak:$CONFIG_FIO_SOURCE_DIR/parse.c
+leak:$CONFIG_FIO_SOURCE_DIR/iolog.c
+leak:$CONFIG_FIO_SOURCE_DIR/init.c
+leak:$CONFIG_FIO_SOURCE_DIR/filesetup.c
 leak:fio_memalign
 leak:spdk_fio_io_u_init
 
@@ -134,6 +193,10 @@ else
 	export DEPENDENCY_DIR
 fi
 
+# Export location of where all the SPDK binaries are
+export SPDK_BIN_DIR="$rootdir/build/bin"
+export SPDK_EXAMPLE_DIR="$rootdir/build/examples"
+
 # pass our valgrind desire on to unittest.sh
 if [ $SPDK_RUN_VALGRIND -eq 0 ]; then
 	export valgrind=''
@@ -142,19 +205,16 @@ fi
 if [ "$(uname -s)" = "Linux" ]; then
 	MAKE="make"
 	MAKEFLAGS=${MAKEFLAGS:--j$(nproc)}
-	DPDK_LINUX_DIR=/usr/share/dpdk/x86_64-default-linuxapp-gcc
-	if [ -d $DPDK_LINUX_DIR ] && [ $SPDK_RUN_INSTALLED_DPDK -eq 1 ]; then
-		WITH_DPDK_DIR=$DPDK_LINUX_DIR
-	fi
 	# Override the default HUGEMEM in scripts/setup.sh to allocate 8GB in hugepages.
 	export HUGEMEM=8192
+	if [[ $SPDK_TEST_USE_IGB_UIO -eq 1 ]]; then
+		export DRIVER_OVERRIDE=igb_uio
+		# Building kernel modules requires root privileges
+		MAKE="sudo $MAKE"
+	fi
 elif [ "$(uname -s)" = "FreeBSD" ]; then
 	MAKE="gmake"
 	MAKEFLAGS=${MAKEFLAGS:--j$(sysctl -a | grep -E -i 'hw.ncpu' | awk '{print $2}')}
-	DPDK_FREEBSD_DIR=/usr/local/share/dpdk/x86_64-native-bsdapp-clang
-	if [ -d $DPDK_FREEBSD_DIR ] && [ $SPDK_RUN_INSTALLED_DPDK -eq 1 ]; then
-		WITH_DPDK_DIR=$DPDK_FREEBSD_DIR
-	fi
 	# FreeBSD runs a much more limited set of tests, so keep the default 2GB.
 	export HUGEMEM=2048
 else
@@ -162,114 +222,9 @@ else
 	exit 1
 fi
 
-config_params='--enable-debug --enable-werror'
-
-if echo -e "#include <libunwind.h>\nint main(int argc, char *argv[]) {return 0;}\n" | \
-	gcc -o /dev/null -lunwind -x c - 2>/dev/null; then
-	config_params+=' --enable-log-bt'
-fi
-
-# for options with dependencies but no test flag, set them here
-if [ -f /usr/include/infiniband/verbs.h ]; then
-	config_params+=' --with-rdma'
-fi
-
-if [ -d /usr/src/fio ]; then
-	config_params+=' --with-fio=/usr/src/fio'
-fi
-
-if [ -d ${DEPENDENCY_DIR}/vtune_codes ]; then
-	config_params+=' --with-vtune='${DEPENDENCY_DIR}'/vtune_codes'
-fi
-
-if [ -d /usr/include/iscsi ]; then
-	libiscsi_version=$(grep LIBISCSI_API_VERSION /usr/include/iscsi/iscsi.h | head -1 | awk '{print $3}' | awk -F '(' '{print $2}' | awk -F ')' '{print $1}')
-	if [ $libiscsi_version -ge 20150621 ]; then
-		config_params+=' --with-iscsi-initiator'
-	fi
-fi
-
-if [ $SPDK_TEST_NVME_CUSE -eq 1 ]; then
-	config_params+=' --with-nvme-cuse'
-fi
-
-# for options with both dependencies and a test flag, set them here
-if [ -f /usr/include/libpmemblk.h ] && [ $SPDK_TEST_PMDK -eq 1 ]; then
-	config_params+=' --with-pmdk'
-fi
-
-if [ -f /usr/include/libpmem.h ] && [ $SPDK_TEST_REDUCE -eq 1 ]; then
-	if [ $SPDK_TEST_ISAL -eq 1 ]; then
-		config_params+=' --with-reduce'
-	else
-		echo "reduce not enabled because isal is not enabled."
-	fi
-fi
-
-if [ -d /usr/include/rbd ] &&  [ -d /usr/include/rados ] && [ $SPDK_TEST_RBD -eq 1 ]; then
-	if [ $SPDK_TEST_ISAL -eq 0 ]; then
-		config_params+=' --with-rbd'
-	else
-		echo "rbd not enabled because isal is enabled."
-	fi
-fi
-
-if [ $SPDK_TEST_VPP -eq 1 ]; then
-	VPP_PATH="/usr/local/src/vpp-19.04/build-root/install-vpp_debug-native/vpp/"
-	export LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:${VPP_PATH}/lib/
-	export PATH=${PATH}:${VPP_PATH}/bin/
-	config_params+=" --with-vpp=${VPP_PATH}"
-fi
-
-# for options with no required dependencies, just test flags, set them here
-if [ $SPDK_TEST_CRYPTO -eq 1 ]; then
-	config_params+=' --with-crypto'
-fi
-
-if [ $SPDK_TEST_OCF -eq 1 ]; then
-	config_params+=" --with-ocf"
-fi
-
-if [ $SPDK_RUN_UBSAN -eq 1 ]; then
-	config_params+=' --enable-ubsan'
-fi
-
-if [ $SPDK_RUN_ASAN -eq 1 ]; then
-	config_params+=' --enable-asan'
-fi
-
-if [ "$(uname -s)" = "Linux" ]; then
-	config_params+=' --enable-coverage'
-fi
-
-if [ $SPDK_TEST_ISAL -eq 0 ]; then
-	config_params+=' --without-isal'
-fi
-
-if [ $SPDK_TEST_BLOBFS -eq 1 ]; then
-	if [[ -d /usr/include/fuse3 ]] && [[ -d /usr/local/include/fuse3 ]]; then
-		config_params+=' --with-fuse'
-	else
-		echo "FUSE not enabled because libfuse3 is not installed."
-	fi
-fi
-
-# By default, --with-dpdk is not set meaning the SPDK build will use the DPDK submodule.
-# If a DPDK installation is found in a well-known location though, WITH_DPDK_DIR will be
-# set which will override the default and use that DPDK installation instead.
-if [ -n "$WITH_DPDK_DIR" ]; then
-	config_params+=" --with-dpdk=$WITH_DPDK_DIR"
-fi
-
-export config_params
-
 if [ -z "$output_dir" ]; then
-	if [ -z "$rootdir" ] || [ ! -d "$rootdir/../output" ]; then
-		output_dir=.
-	else
-		output_dir=$rootdir/../output
-	fi
-	export output_dir
+	mkdir -p "$rootdir/../output"
+	export output_dir="$rootdir/../output"
 fi
 
 TEST_MODE=
@@ -286,6 +241,291 @@ for i in "$@"; do
 			;;
 	esac
 done
+
+# start rpc.py coprocess if it's not started yet
+if [[ -z $RPC_PIPE_PID ]] || ! kill -0 "$RPC_PIPE_PID" &> /dev/null; then
+	coproc RPC_PIPE { "$rootdir/scripts/rpc.py" --server; }
+	exec {RPC_PIPE_OUTPUT}<&${RPC_PIPE[0]} {RPC_PIPE_INPUT}>&${RPC_PIPE[1]}
+	# all descriptors will automatically close together with this bash
+	# process, this will make rpc.py stop reading and exit gracefully
+fi
+
+function set_test_storage() {
+	[[ -v testdir ]] || return 0
+
+	local requested_size=$1 # bytes
+	local mount target_dir
+
+	local -A mounts fss sizes avails uses
+	local source fs size avail mount use
+
+	local storage_fallback storage_candidates
+	local storage_fallback_purge
+
+	shopt -s nullglob
+	storage_fallback_purge=("${TMPDIR:-/tmp}/spdk."??????)
+	shopt -u nullglob
+
+	if ((${#storage_fallback_purge[@]} > 0)); then
+		printf '* Purging old temporary test storage (%s)\n' \
+			"${storage_fallback_purge[*]}" >&2
+		sudo rm -rf "${storage_fallback_purge[@]}"
+	fi
+
+	storage_fallback=$(mktemp -udt spdk.XXXXXX)
+	storage_candidates=(
+		"$testdir"
+		"$storage_fallback/tests/${testdir##*/}"
+		"$storage_fallback"
+	)
+
+	if [[ -n $ADD_TEST_STORAGE ]]; then
+		# List of dirs|mounts separated by whitespaces
+		storage_candidates+=($ADD_TEST_STORAGE)
+	fi
+
+	if [[ -n $DEDICATED_TEST_STORAGE ]]; then
+		# Single, dedicated dir|mount
+		storage_candidates=("$DEDICATED_TEST_STORAGE")
+	fi
+
+	mkdir -p "${storage_candidates[@]}"
+
+	# add some headroom - 64M
+	requested_size=$((requested_size + (64 << 20)))
+
+	while read -r source fs size use avail _ mount; do
+		mounts["$mount"]=$source fss["$mount"]=$fs
+		avails["$mount"]=$((avail * 1024)) sizes["$mount"]=$((size * 1024))
+		uses["$mount"]=$((use * 1024))
+	done < <(df -T | grep -v Filesystem)
+
+	printf '* Looking for test storage...\n' >&2
+
+	local target_space new_size
+	for target_dir in "${storage_candidates[@]}"; do
+		# FreeBSD's df is lacking the --output arg
+		# mount=$(df --output=target "$target_dir" | grep -v "Mounted on")
+		mount=$(df "$target_dir" | awk '$1 !~ /Filesystem/{print $6}')
+
+		target_space=${avails["$mount"]}
+		if ((target_space == 0 || target_space < requested_size)); then
+			continue
+		fi
+		if ((target_space >= requested_size)); then
+			# For in-memory fs, and / make sure our requested size won't fill most of the space.
+			if [[ ${fss["$mount"]} == tmpfs ]] || [[ ${fss["$mount"]} == ramfs ]] || [[ $mount == / ]]; then
+				new_size=$((uses["$mount"] + requested_size))
+				if ((new_size * 100 / sizes["$mount"] > 95)); then
+					continue
+				fi
+			fi
+		fi
+		export SPDK_TEST_STORAGE=$target_dir
+		printf '* Found test storage at %s\n' "$SPDK_TEST_STORAGE" >&2
+		return 0
+	done
+	printf '* Test storage is not available\n'
+	return 1
+}
+
+function get_config_params() {
+	xtrace_disable
+	config_params='--enable-debug --enable-werror'
+
+	# for options with dependencies but no test flag, set them here
+	if [ -f /usr/include/infiniband/verbs.h ]; then
+		config_params+=' --with-rdma'
+	fi
+
+	if [ $(uname -s) == "FreeBSD" ]; then
+		intel="hw.model: Intel"
+		cpu_vendor=$(sysctl -a | grep hw.model | cut -c 1-15)
+	else
+		intel="GenuineIntel"
+		cpu_vendor=$(grep -i 'vendor' /proc/cpuinfo --max-count=1)
+	fi
+	if [[ "$cpu_vendor" != *"$intel"* ]]; then
+		config_params+=" --without-idxd"
+	else
+		config_params+=" --with-idxd"
+	fi
+
+	if [[ -d $CONFIG_FIO_SOURCE_DIR ]]; then
+		config_params+=" --with-fio=$CONFIG_FIO_SOURCE_DIR"
+	fi
+
+	if [ -d ${DEPENDENCY_DIR}/vtune_codes ]; then
+		config_params+=' --with-vtune='${DEPENDENCY_DIR}'/vtune_codes'
+	fi
+
+	if [ -d /usr/include/iscsi ]; then
+		libiscsi_version=$(grep LIBISCSI_API_VERSION /usr/include/iscsi/iscsi.h | head -1 | awk '{print $3}' | awk -F '(' '{print $2}' | awk -F ')' '{print $1}')
+		if [ $libiscsi_version -ge 20150621 ]; then
+			config_params+=' --with-iscsi-initiator'
+		fi
+	fi
+
+	if [ $SPDK_TEST_UNITTEST -eq 0 ]; then
+		config_params+=' --disable-unit-tests'
+	fi
+
+	if [ $SPDK_TEST_NVME_CUSE -eq 1 ]; then
+		config_params+=' --with-nvme-cuse'
+	fi
+
+	# for options with both dependencies and a test flag, set them here
+	if [ -f /usr/include/libpmemblk.h ] && [ $SPDK_TEST_PMDK -eq 1 ]; then
+		config_params+=' --with-pmdk'
+	fi
+
+	if [ -f /usr/include/libpmem.h ] && [ $SPDK_TEST_REDUCE -eq 1 ]; then
+		if ge "$(nasm --version | awk '{print $3}')" 2.14 && [[ $SPDK_TEST_ISAL -eq 1 ]]; then
+			config_params+=' --with-reduce'
+		fi
+	fi
+
+	if [ -d /usr/include/rbd ] && [ -d /usr/include/rados ] && [ $SPDK_TEST_RBD -eq 1 ]; then
+		config_params+=' --with-rbd'
+	fi
+
+	# for options with no required dependencies, just test flags, set them here
+	if [ $SPDK_TEST_CRYPTO -eq 1 ]; then
+		config_params+=' --with-crypto'
+	fi
+
+	if [ $SPDK_TEST_OCF -eq 1 ]; then
+		config_params+=" --with-ocf"
+	fi
+
+	if [ $SPDK_RUN_UBSAN -eq 1 ]; then
+		config_params+=' --enable-ubsan'
+	fi
+
+	if [ $SPDK_RUN_ASAN -eq 1 ]; then
+		config_params+=' --enable-asan'
+	fi
+
+	if [ "$(uname -s)" = "Linux" ]; then
+		config_params+=' --enable-coverage'
+	fi
+
+	if [ $SPDK_TEST_ISAL -eq 0 ]; then
+		config_params+=' --without-isal'
+	fi
+
+	if [ $SPDK_TEST_BLOBFS -eq 1 ]; then
+		if [[ -d /usr/include/fuse3 ]] || [[ -d /usr/local/include/fuse3 ]]; then
+			config_params+=' --with-fuse'
+		fi
+	fi
+
+	if [ $SPDK_TEST_RAID5 -eq 1 ]; then
+		config_params+=' --with-raid5'
+	fi
+
+	if [ $SPDK_TEST_VFIOUSER -eq 1 ]; then
+		config_params+=' --with-vfio-user'
+	fi
+
+	# Check whether liburing library header exists
+	if [ -f /usr/include/liburing/io_uring.h ] && [ $SPDK_TEST_URING -eq 1 ]; then
+		config_params+=' --with-uring'
+	fi
+
+	if [ -n "$SPDK_RUN_EXTERNAL_DPDK" ]; then
+		config_params+=" --with-dpdk=$SPDK_RUN_EXTERNAL_DPDK"
+	fi
+
+	echo "$config_params"
+	xtrace_restore
+}
+
+function rpc_cmd() {
+	xtrace_disable
+	local rsp rc
+
+	echo "$@" >&$RPC_PIPE_INPUT
+	while read -t 5 -ru $RPC_PIPE_OUTPUT rsp; do
+		if [[ $rsp == "**STATUS="* ]]; then
+			break
+		fi
+		echo "$rsp"
+	done
+
+	rc=${rsp#*=}
+	xtrace_restore
+	[[ $rc == 0 ]]
+}
+
+function rpc_cmd_simple_data_json() {
+
+	local elems="$1[@]" elem
+	local -gA jq_out=()
+	local jq val
+
+	local lvs=(
+		"uuid"
+		"name"
+		"base_bdev"
+		"total_data_clusters"
+		"free_clusters"
+		"block_size"
+		"cluster_size"
+	)
+
+	local bdev=(
+		"name"
+		"aliases[0]"
+		"block_size"
+		"num_blocks"
+		"uuid"
+		"product_name"
+	)
+
+	[[ -v $elems ]] || return 1
+
+	for elem in "${!elems}"; do
+		jq="${jq:+$jq,\"\\n\",}\"$elem\",\" \",.[0].$elem"
+	done
+	jq+=',"\n"'
+
+	shift
+	while read -r elem val; do
+		jq_out["$elem"]=$val
+	done < <(rpc_cmd "$@" | jq -jr "$jq")
+	((${#jq_out[@]} > 0)) || return 1
+}
+
+function NOT() {
+	local es=0
+
+	"$@" || es=$?
+
+	# Logic looks like so:
+	#  - return false if command exit successfully
+	#  - return false if command exit after receiving a core signal (FIXME: or any signal?)
+	#  - return true if command exit with an error
+
+	# This naively assumes that the process doesn't exit with > 128 on its own.
+	if ((es > 128)); then
+		es=$((es & ~128))
+		case "$es" in
+			3) ;&       # SIGQUIT
+			4) ;&       # SIGILL
+			6) ;&       # SIGABRT
+			8) ;&       # SIGFPE
+			9) ;&       # SIGKILL
+			11) es=0 ;; # SIGSEGV
+			*) es=1 ;;
+		esac
+	elif [[ -n $EXIT_STATUS ]] && ((es != EXIT_STATUS)); then
+		es=0
+	fi
+
+	# invert error code of any command and also trigger ERR on 0 (unlike bash ! prefix)
+	((!es == 0))
+}
 
 function timing() {
 	direction="$1"
@@ -330,38 +570,71 @@ function timing_finish() {
 			--nametype 'Step:' \
 			--countname seconds \
 			$output_dir/timing.txt \
-			>$output_dir/timing.svg
+			> $output_dir/timing.svg
 	fi
 }
 
 function create_test_list() {
-	grep -rshI --exclude="autotest_common.sh" --exclude="$rootdir/test/common/autotest_common.sh" -e "report_test_completion" $rootdir | sed 's/report_test_completion//g; s/[[:blank:]]//g; s/"//g;' > $output_dir/all_tests.txt || true
+	xtrace_disable
+	# First search all scripts in main SPDK directory.
+	completion=$(grep -shI -d skip --include="*.sh" -e "run_test " $rootdir/*)
+	# Follow up with search in test directory recursively.
+	completion+=$(grep -rshI --include="*.sh" --exclude="autotest_common.sh" -e "run_test " $rootdir/test)
+	printf "%s" "$completion" | grep -v "#" \
+		| sed 's/^.*run_test/run_test/' | awk '{print $2}' \
+		| sed 's/\"//g' | sort > $output_dir/all_tests.txt || true
+	xtrace_restore
 }
 
-function report_test_completion() {
-	echo "$1" >> $output_dir/test_completions.txt
+function gdb_attach() {
+	gdb -q --batch \
+		-ex 'handle SIGHUP nostop pass' \
+		-ex 'handle SIGQUIT nostop pass' \
+		-ex 'handle SIGPIPE nostop pass' \
+		-ex 'handle SIGALRM nostop pass' \
+		-ex 'handle SIGTERM nostop pass' \
+		-ex 'handle SIGUSR1 nostop pass' \
+		-ex 'handle SIGUSR2 nostop pass' \
+		-ex 'handle SIGCHLD nostop pass' \
+		-ex 'set print thread-events off' \
+		-ex 'cont' \
+		-ex 'thread apply all bt' \
+		-ex 'quit' \
+		--tty=/dev/stdout \
+		-p $1
 }
 
 function process_core() {
-	ret=0
-	while IFS= read -r -d '' core;
-	do
-		exe=$(eu-readelf -n "$core" | grep psargs | sed "s/.*psargs: \([^ \'\" ]*\).*/\1/")
-		if [[ ! -f "$exe" ]]; then
-			exe=$(eu-readelf -n "$core" | grep -oP -m1 "$exe.+")
-		fi
-		echo "exe for $core is $exe"
-		if [[ -n "$exe" ]]; then
-			if hash gdb &>/dev/null; then
-				gdb -batch -ex "thread apply all bt full" $exe $core
-			fi
-			cp $exe $output_dir
-		fi
-		mv $core $output_dir
-		chmod a+r $output_dir/$core
-		ret=1
-	done < <(find . -type f \( -name 'core\.?[0-9]*' -o -name '*.core' \) -print0)
-	return $ret
+	# Note that this always was racy as we can't really sync with the kernel
+	# to see if there's any core queued up for writing. We could check if
+	# collector is running and wait for it explicitly, but it doesn't seem
+	# to be worth the effort. So assume that if we are being called via
+	# trap, as in, when some error has occurred, wait up to 5s for any
+	# potential cores. If we are called just for cleanup at the very end,
+	# don't wait since all the tests ended successfully, hence having any
+	# critical cores lying around is unlikely.
+	local es=$?
+	((es != 0)) && sleep 5s
+
+	local coredumps core
+
+	shopt -s nullglob
+	coredumps=("$output_dir/coredumps/"*.bt.txt)
+	shopt -u nullglob
+
+	((${#coredumps[@]} > 0)) || return 0
+	chmod -R a+r "$output_dir/coredumps"
+
+	for core in "${coredumps[@]}"; do
+		cat <<- BT
+			##### CORE BT ${core##*/} #####
+
+			$(<"$core")
+
+			--
+		BT
+	done
+	return 1
 }
 
 function process_shm() {
@@ -401,7 +674,7 @@ function waitforlisten() {
 	xtrace_disable
 	local ret=0
 	local i
-	for (( i = 40; i != 0; i-- )); do
+	for ((i = 40; i != 0; i--)); do
 		# if the process is no longer running, then exit the script
 		#  since it means the application crashed
 		if ! kill -s 0 $1; then
@@ -410,7 +683,7 @@ function waitforlisten() {
 			break
 		fi
 
-		if $rootdir/scripts/rpc.py -t 1 -s "$rpc_addr" rpc_get_methods &>/dev/null; then
+		if $rootdir/scripts/rpc.py -t 1 -s "$rpc_addr" rpc_get_methods &> /dev/null; then
 			break
 		fi
 
@@ -418,7 +691,7 @@ function waitforlisten() {
 	done
 
 	xtrace_restore
-	if (( i == 0 )); then
+	if ((i == 0)); then
 		echo "ERROR: timeout while waiting for process (pid: $1) to start listening on '$rpc_addr'"
 		ret=1
 	fi
@@ -429,7 +702,7 @@ function waitfornbd() {
 	local nbd_name=$1
 	local i
 
-	for ((i=1; i<=20; i++)); do
+	for ((i = 1; i <= 20; i++)); do
 		if grep -q -w $nbd_name /proc/partitions; then
 			break
 		else
@@ -442,10 +715,10 @@ function waitfornbd() {
 	#  here trying to read the first block of the nbd block device to a temp
 	#  file.  Note that dd returns success when reading an empty file, so we
 	#  need to check the size of the output file instead.
-	for ((i=1; i<=20; i++)); do
-		dd if=/dev/$nbd_name of=/tmp/nbdtest bs=4096 count=1 iflag=direct
-		size=$(stat -c %s /tmp/nbdtest)
-		rm -f /tmp/nbdtest
+	for ((i = 1; i <= 20; i++)); do
+		dd if=/dev/$nbd_name of="$SPDK_TEST_STORAGE/nbdtest" bs=4096 count=1 iflag=direct
+		size=$(stat -c %s "$SPDK_TEST_STORAGE/nbdtest")
+		rm -f "$SPDK_TEST_STORAGE/nbdtest"
 		if [ "$size" != "0" ]; then
 			return 0
 		else
@@ -460,7 +733,7 @@ function waitforbdev() {
 	local bdev_name=$1
 	local i
 
-	for ((i=1; i<=20; i++)); do
+	for ((i = 1; i <= 20; i++)); do
 		if $rpc_py bdev_get_bdevs | jq -r '.[] .name' | grep -qw $bdev_name; then
 			return 0
 		fi
@@ -475,6 +748,29 @@ function waitforbdev() {
 	return 1
 }
 
+function make_filesystem() {
+	local fstype=$1
+	local dev_name=$2
+	local i=0
+	local force
+
+	if [ $fstype = ext4 ]; then
+		force=-F
+	else
+		force=-f
+	fi
+
+	while ! mkfs.${fstype} $force ${dev_name}; do
+		if [ $i -ge 15 ]; then
+			return 1
+		fi
+		i=$((i + 1))
+		sleep 1
+	done
+
+	return 0
+}
+
 function killprocess() {
 	# $1 = process pid
 	if [ -z "$1" ]; then
@@ -482,7 +778,12 @@ function killprocess() {
 	fi
 
 	if kill -0 $1; then
-		if [ "$(ps --no-headers -o comm= $1)" = "sudo" ]; then
+		if [ $(uname) = Linux ]; then
+			process_name=$(ps --no-headers -o comm= $1)
+		else
+			process_name=$(ps -c -o command $1 | tail -1)
+		fi
+		if [ "$process_name" = "sudo" ]; then
 			# kill the child process, which is the actual app
 			# (assume $1 has just one child)
 			local child
@@ -508,6 +809,7 @@ function iscsicleanup() {
 	echo "Cleaning up iSCSI connection"
 	iscsiadm -m node --logout || true
 	iscsiadm -m node -o delete || true
+	rm -rf /var/lib/iscsi/nodes/*
 }
 
 function stop_iscsi_service() {
@@ -561,28 +863,41 @@ function rbd_cleanup() {
 	fi
 }
 
-function start_stub() {
+function _start_stub() {
 	# Disable ASLR for multi-process testing.  SPDK does support using DPDK multi-process,
 	# but ASLR can still be unreliable in some cases.
-	# We will reenable it again after multi-process testing is complete in kill_stub()
+	# We will reenable it again after multi-process testing is complete in kill_stub().
+	# Save current setting so it can be restored upon calling kill_stub().
+	_randomize_va_space=$(< /proc/sys/kernel/randomize_va_space)
 	echo 0 > /proc/sys/kernel/randomize_va_space
 	$rootdir/test/app/stub/stub $1 &
 	stubpid=$!
 	echo Waiting for stub to ready for secondary processes...
 	while ! [ -e /var/run/spdk_stub0 ]; do
+		# If stub dies while we wait, bail
+		[[ -e /proc/$stubpid ]] || return 1
 		sleep 1s
 	done
 	echo done.
 }
 
+function start_stub() {
+	if ! _start_stub "$@"; then
+		echo "stub failed" >&2
+		return 1
+	fi
+}
+
 function kill_stub() {
-	kill $1 $stubpid
-	wait $stubpid
+	if [[ -e /proc/$stubpid ]]; then
+		kill $1 $stubpid
+		wait $stubpid
+	fi 2> /dev/null || :
 	rm -f /var/run/spdk_stub0
 	# Re-enable ASLR now that we are done with multi-process testing
 	# Note: "1" enables ASLR w/o randomizing data segments, "2" adds data segment
 	#  randomizing and is the default on all recent Linux kernels
-	echo 2 > /proc/sys/kernel/randomize_va_space
+	echo "${_randomize_va_space:-2}" > /proc/sys/kernel/randomize_va_space
 }
 
 function run_test() {
@@ -596,6 +911,12 @@ function run_test() {
 	local test_name="$1"
 	shift
 
+	if [ -n "$test_domain" ]; then
+		export test_domain="${test_domain}.${test_name}"
+	else
+		export test_domain="$test_name"
+	fi
+
 	timing_enter $test_name
 	echo "************************************"
 	echo "START TEST $test_name"
@@ -606,14 +927,32 @@ function run_test() {
 	echo "************************************"
 	echo "END TEST $test_name"
 	echo "************************************"
-
 	timing_exit $test_name
+
+	export test_domain=${test_domain%"$test_name"}
+	if [ -n "$test_domain" ]; then
+		export test_domain=${test_domain%?}
+	fi
+
+	if [ -z "$test_domain" ]; then
+		echo "top_level $test_name" >> $output_dir/test_completions.txt
+	else
+		echo "$test_domain $test_name" >> $output_dir/test_completions.txt
+	fi
 	xtrace_restore
+}
+
+function skip_run_test_with_warning() {
+	echo "WARNING: $1"
+	echo "Test run may fail if run with autorun.sh"
+	echo "Please check your $rootdir/test/common/skipped_tests.txt"
 }
 
 function print_backtrace() {
 	# if errexit is not enabled, don't print a backtrace
 	[[ "$-" =~ e ]] || return 0
+
+	local args=("${BASH_ARGV[@]}")
 
 	xtrace_disable
 	echo "========== Backtrace start: =========="
@@ -622,10 +961,29 @@ function print_backtrace() {
 		local func="${FUNCNAME[$i]}"
 		local line_nr="${BASH_LINENO[$((i - 1))]}"
 		local src="${BASH_SOURCE[$i]}"
-		echo "in $src:$line_nr -> $func()"
+		local bt="" cmdline=()
+
+		if [[ -f $src ]]; then
+			bt=$(nl -w 4 -ba -nln $src | grep -B 5 -A 5 "^${line_nr}[^0-9]" \
+				| sed "s/^/   /g" | sed "s/^   $line_nr /=> $line_nr /g")
+		fi
+
+		# If extdebug set the BASH_ARGC[i], try to fetch all the args
+		if ((BASH_ARGC[i] > 0)); then
+			# Use argc as index to reverse the stack
+			local argc=${BASH_ARGC[i]} arg
+			for arg in "${args[@]::BASH_ARGC[i]}"; do
+				cmdline[argc--]="[\"$arg\"]"
+			done
+			args=("${args[@]:BASH_ARGC[i]}")
+		fi
+
+		echo "in $src:$line_nr -> $func($(
+			IFS=","
+			printf '%s\n' "${cmdline[*]:-[]}"
+		))"
 		echo "     ..."
-		nl -w 4 -ba -nln $src | grep -B 5 -A 5 "^${line_nr}[^0-9]" | \
-			sed "s/^/   /g" | sed "s/^   $line_nr /=> $line_nr /g"
+		echo "${bt:-backtrace unavailable}"
 		echo "     ..."
 	done
 	echo ""
@@ -634,115 +992,33 @@ function print_backtrace() {
 	return 0
 }
 
-function part_dev_by_gpt () {
-	if [ $(uname -s) = Linux ] && hash sgdisk && modprobe nbd; then
-		conf=$1
-		devname=$2
-		rootdir=$3
-		operation=$4
-		local nbd_path=/dev/nbd0
-		local rpc_server=/var/tmp/spdk-gpt-bdevs.sock
-
-		if [ ! -e $conf ]; then
-			return 1
-		fi
-
-		if [ -z "$operation" ]; then
-			operation="create"
-		fi
-
-		cp $conf ${conf}.gpt
-		echo "[Gpt]" >> ${conf}.gpt
-		echo "  Disable Yes" >> ${conf}.gpt
-
-		$rootdir/test/app/bdev_svc/bdev_svc -r $rpc_server -i 0 -c ${conf}.gpt &
-		nbd_pid=$!
-		echo "Process nbd pid: $nbd_pid"
-		waitforlisten $nbd_pid $rpc_server
-
-		# Start bdev as an nbd device
-		nbd_start_disks "$rpc_server" $devname $nbd_path
-
-		waitfornbd ${nbd_path:5}
-
-		if [ "$operation" = create ]; then
-			parted -s $nbd_path mklabel gpt mkpart first '0%' '50%' mkpart second '50%' '100%'
-
-			# change the GUID to SPDK GUID value
-			SPDK_GPT_GUID=$(grep SPDK_GPT_PART_TYPE_GUID $rootdir/module/bdev/gpt/gpt.h \
-				| awk -F "(" '{ print $2}' | sed 's/)//g' \
-				| awk -F ", " '{ print $1 "-" $2 "-" $3 "-" $4 "-" $5}' | sed 's/0x//g')
-			sgdisk -t 1:$SPDK_GPT_GUID $nbd_path
-			sgdisk -t 2:$SPDK_GPT_GUID $nbd_path
-		elif [ "$operation" = reset ]; then
-			# clear the partition table
-			dd if=/dev/zero of=$nbd_path bs=4096 count=8 oflag=direct
-		fi
-
-		nbd_stop_disks "$rpc_server" $nbd_path
-
-		killprocess $nbd_pid
-		rm -f ${conf}.gpt
-	fi
-
-	return 0
-}
-
-function discover_bdevs()
-{
-	local rootdir=$1
-	local config_file=$2
-	local rpc_server=/var/tmp/spdk-discover-bdevs.sock
-
-	if [ ! -e $config_file ]; then
-		echo "Invalid Configuration File: $config_file"
-		return 1
-	fi
-
-	# Start the bdev service to query for the list of available
-	# bdevs.
-	$rootdir/test/app/bdev_svc/bdev_svc -r $rpc_server -i 0 \
-		-c $config_file &>/dev/null &
-	stubpid=$!
-	while ! [ -e /var/run/spdk_bdev0 ]; do
-		sleep 1
-	done
-
-	# Get all of the bdevs
-	if [ -z "$rpc_server" ]; then
-		$rootdir/scripts/rpc.py bdev_get_bdevs
-	else
-		$rootdir/scripts/rpc.py -s "$rpc_server" bdev_get_bdevs
-	fi
-
-	# Shut down the bdev service
-	kill $stubpid
-	wait $stubpid
-	rm -f /var/run/spdk_bdev0
-}
-
-function waitforblk()
-{
+function waitforserial() {
 	local i=0
-	while ! lsblk -l -o NAME | grep -q -w $1; do
+	local nvme_device_counter=1
+	if [[ -n "$2" ]]; then
+		nvme_device_counter=$2
+	fi
+
+	while [ $(lsblk -l -o NAME,SERIAL | grep -c $1) -lt $nvme_device_counter ]; do
 		[ $i -lt 15 ] || break
-		i=$((i+1))
+		i=$((i + 1))
+		echo "Waiting for devices"
 		sleep 1
 	done
 
-	if ! lsblk -l -o NAME | grep -q -w $1; then
+	if [[ $(lsblk -l -o NAME,SERIAL | grep -c $1) -lt $nvme_device_counter ]]; then
 		return 1
 	fi
 
 	return 0
 }
 
-function waitforblk_disconnect()
-{
+function waitforserial_disconnect() {
 	local i=0
-	while lsblk -l -o NAME | grep -q -w $1; do
+	while lsblk -o NAME,SERIAL | grep -q -w $1; do
 		[ $i -lt 15 ] || break
-		i=$((i+1))
+		i=$((i + 1))
+		echo "Waiting for disconnect devices"
 		sleep 1
 	done
 
@@ -753,12 +1029,41 @@ function waitforblk_disconnect()
 	return 0
 }
 
-function waitforfile()
-{
+function waitforblk() {
+	local i=0
+	while ! lsblk -l -o NAME | grep -q -w $1; do
+		[ $i -lt 15 ] || break
+		i=$((i + 1))
+		sleep 1
+	done
+
+	if ! lsblk -l -o NAME | grep -q -w $1; then
+		return 1
+	fi
+
+	return 0
+}
+
+function waitforblk_disconnect() {
+	local i=0
+	while lsblk -l -o NAME | grep -q -w $1; do
+		[ $i -lt 15 ] || break
+		i=$((i + 1))
+		sleep 1
+	done
+
+	if lsblk -l -o NAME | grep -q -w $1; then
+		return 1
+	fi
+
+	return 0
+}
+
+function waitforfile() {
 	local i=0
 	while [ ! -e $1 ]; do
 		[ $i -lt 200 ] || break
-		i=$((i+1))
+		i=$((i + 1))
 		sleep 0.1
 	done
 
@@ -769,12 +1074,11 @@ function waitforfile()
 	return 0
 }
 
-function fio_config_gen()
-{
+function fio_config_gen() {
 	local config_file=$1
 	local workload=$2
 	local bdev_type=$3
-	local fio_dir="/usr/src/fio"
+	local fio_dir=$CONFIG_FIO_SOURCE_DIR
 
 	if [ -e "$config_file" ]; then
 		echo "Configuration File Already Exists!: $config_file"
@@ -800,9 +1104,9 @@ EOL
 
 	if [ "$workload" == "verify" ]; then
 		cat <<- EOL >> $config_file
-		verify=sha1
-		verify_backlog=1024
-		rw=randwrite
+			verify=sha1
+			verify_backlog=1024
+			rw=randwrite
 		EOL
 
 		# To avoid potential data race issue due to the AIO device
@@ -820,30 +1124,10 @@ EOL
 	fi
 }
 
-function fio_config_add_job()
-{
-	config_file=$1
-	filename=$2
-
-	if [ ! -e "$config_file" ]; then
-		echo "Configuration File Doesn't Exist: $config_file"
-		return 1
-	fi
-
-	if [ -z "$filename" ]; then
-		echo "No filename provided"
-		return 1
-	fi
-
-	echo "[job_$filename]" >> $config_file
-	echo "filename=$filename" >> $config_file
-}
-
-function fio_bdev()
-{
+function fio_bdev() {
 	# Setup fio binary cmd line
-	local fio_dir="/usr/src/fio"
-	local bdev_plugin="$rootdir/examples/bdev/fio_plugin/fio_plugin"
+	local fio_dir=$CONFIG_FIO_SOURCE_DIR
+	local bdev_plugin="$rootdir/build/fio/spdk_bdev"
 
 	# Preload AddressSanitizer library to fio if fio_plugin was compiled with it
 	local asan_lib
@@ -852,11 +1136,10 @@ function fio_bdev()
 	LD_PRELOAD="$asan_lib $bdev_plugin" "$fio_dir"/fio "$@"
 }
 
-function fio_nvme()
-{
+function fio_nvme() {
 	# Setup fio binary cmd line
-	local fio_dir="/usr/src/fio"
-	local nvme_plugin="$rootdir/examples/nvme/fio_plugin/fio_plugin"
+	local fio_dir=$CONFIG_FIO_SOURCE_DIR
+	local nvme_plugin="$rootdir/build/fio/spdk_nvme"
 
 	# Preload AddressSanitizer library to fio if fio_plugin was compiled with it
 	asan_lib=$(ldd $nvme_plugin | grep libasan | awk '{print $3}')
@@ -864,8 +1147,7 @@ function fio_nvme()
 	LD_PRELOAD="$asan_lib $nvme_plugin" "$fio_dir"/fio "$@"
 }
 
-function get_lvs_free_mb()
-{
+function get_lvs_free_mb() {
 	local lvs_uuid=$1
 	local lvs_info
 	local fc
@@ -875,12 +1157,11 @@ function get_lvs_free_mb()
 	cs=$(jq ".[] | select(.uuid==\"$lvs_uuid\") .cluster_size" <<< "$lvs_info")
 
 	# Change to MB's
-	free_mb=$((fc*cs/1024/1024))
+	free_mb=$((fc * cs / 1024 / 1024))
 	echo "$free_mb"
 }
 
-function get_bdev_size()
-{
+function get_bdev_size() {
 	local bdev_name=$1
 	local bdev_info
 	local bs
@@ -890,40 +1171,49 @@ function get_bdev_size()
 	nb=$(jq ".[] .num_blocks" <<< "$bdev_info")
 
 	# Change to MB's
-	bdev_size=$((bs*nb/1024/1024))
+	bdev_size=$((bs * nb / 1024 / 1024))
 	echo "$bdev_size"
 }
 
-function autotest_cleanup()
-{
+function autotest_cleanup() {
 	$rootdir/scripts/setup.sh reset
 	$rootdir/scripts/setup.sh cleanup
 	if [ $(uname -s) = "Linux" ]; then
-		if grep -q '#define SPDK_CONFIG_IGB_UIO_DRIVER 1' $rootdir/include/spdk/config.h; then
-			rmmod igb_uio
+		if [[ $SPDK_TEST_USE_IGB_UIO -eq 1 ]]; then
+			[[ -e /sys/module/igb_uio ]] && rmmod igb_uio
 		else
 			modprobe -r uio_pci_generic
 		fi
 	fi
 	rm -rf "$asan_suppression_file"
+	if [[ -n $old_core_pattern ]]; then
+		echo "$old_core_pattern" > /proc/sys/kernel/core_pattern
+	fi
+	if [[ -e /proc/$udevadm_pid/status ]]; then
+		kill "$udevadm_pid" || :
+	fi
+	revert_soft_roce
 }
 
-function freebsd_update_contigmem_mod()
-{
+function freebsd_update_contigmem_mod() {
 	if [ $(uname) = FreeBSD ]; then
 		kldunload contigmem.ko || true
-		if [ -n "$WITH_DPDK_DIR" ]; then
+		if [ -n "$SPDK_RUN_EXTERNAL_DPDK" ]; then
 			echo "Warning: SPDK only works on FreeBSD with patches that only exist in SPDK's dpdk submodule"
-			cp -f "$WITH_DPDK_DIR/kmod/contigmem.ko" /boot/modules/
-			cp -f "$WITH_DPDK_DIR/kmod/contigmem.ko" /boot/kernel/
+			cp -f "$SPDK_RUN_EXTERNAL_DPDK/kmod/contigmem.ko" /boot/modules/
+			cp -f "$SPDK_RUN_EXTERNAL_DPDK/kmod/contigmem.ko" /boot/kernel/
+			cp -f "$SPDK_RUN_EXTERNAL_DPDK/kmod/nic_uio.ko" /boot/modules/
+			cp -f "$SPDK_RUN_EXTERNAL_DPDK/kmod/nic_uio.ko" /boot/kernel/
 		else
 			cp -f "$rootdir/dpdk/build/kmod/contigmem.ko" /boot/modules/
 			cp -f "$rootdir/dpdk/build/kmod/contigmem.ko" /boot/kernel/
+			cp -f "$rootdir/dpdk/build/kmod/nic_uio.ko" /boot/modules/
+			cp -f "$rootdir/dpdk/build/kmod/nic_uio.ko" /boot/kernel/
 		fi
 	fi
 }
 
-function get_nvme_name_from_bdf {
+function get_nvme_name_from_bdf() {
 	blkname=()
 
 	nvme_devs=$(lsblk -d --output NAME | grep "^nvme") || true
@@ -944,22 +1234,128 @@ function get_nvme_name_from_bdf {
 	printf '%s\n' "${blkname[@]}"
 }
 
-function opal_revert_cleanup {
-	$rootdir/app/spdk_tgt/spdk_tgt &
+function get_nvme_ctrlr_from_bdf() {
+	bdf_sysfs_path=$(readlink -f /sys/class/nvme/nvme* | grep "$1/nvme/nvme")
+	if [[ -z "$bdf_sysfs_path" ]]; then
+		return
+	fi
+
+	printf '%s\n' "$(basename $bdf_sysfs_path)"
+}
+
+# Get BDF addresses of all NVMe drives currently attached to
+# uio-pci-generic or vfio-pci
+function get_nvme_bdfs() {
+	xtrace_disable
+	bdfs=$(jq -r .config[].params.traddr <<< $($rootdir/scripts/gen_nvme.sh))
+	if [[ -z $bdfs ]]; then
+		echo "No devices to test on!"
+		exit 1
+	fi
+	echo "$bdfs"
+	xtrace_restore
+}
+
+# Same as function above, but just get the first disks BDF address
+function get_first_nvme_bdf() {
+	head -1 <<< "$(get_nvme_bdfs)"
+}
+
+function nvme_namespace_revert() {
+	$rootdir/scripts/setup.sh
+	sleep 1
+	bdfs=$(get_nvme_bdfs)
+
+	$rootdir/scripts/setup.sh reset
+
+	for bdf in $bdfs; do
+		nvme_ctrlr=/dev/$(get_nvme_ctrlr_from_bdf ${bdf})
+		if [[ -z "$nvme_ctrlr" ]]; then
+			continue
+		fi
+
+		# Check Optional Admin Command Support for Namespace Management
+		oacs=$(nvme id-ctrl ${nvme_ctrlr} | grep oacs | cut -d: -f2)
+		oacs_ns_manage=$((oacs & 0x8))
+
+		if [[ "$oacs_ns_manage" -ne 0 ]]; then
+			# This assumes every NVMe controller contains single namespace,
+			# encompassing Total NVM Capacity and formatted as 512 block size.
+			# 512 block size is needed for test/vhost/vhost_boot.sh to
+			# succesfully run.
+
+			unvmcap=$(nvme id-ctrl ${nvme_ctrlr} | grep unvmcap | cut -d: -f2)
+			if [[ "$unvmcap" -eq 0 ]]; then
+				# All available space already used
+				continue
+			fi
+			tnvmcap=$(nvme id-ctrl ${nvme_ctrlr} | grep tnvmcap | cut -d: -f2)
+			blksize=512
+
+			size=$((tnvmcap / blksize))
+
+			nvme detach-ns ${nvme_ctrlr} -n 0xffffffff -c 0 || true
+			nvme delete-ns ${nvme_ctrlr} -n 0xffffffff || true
+			nvme create-ns ${nvme_ctrlr} -s ${size} -c ${size} -b ${blksize}
+			nvme attach-ns ${nvme_ctrlr} -n 1 -c 0
+			nvme reset ${nvme_ctrlr}
+			waitforfile "${nvme_ctrlr}n1"
+		fi
+	done
+}
+
+# Get BDFs based on device ID, such as 0x0a54
+function get_nvme_bdfs_by_id() {
+	local bdfs=()
+
+	for bdf in $(get_nvme_bdfs); do
+		device=$(cat /sys/bus/pci/devices/$bdf/device) || true
+		if [[ "$device" == "$1" ]]; then
+			bdfs+=($bdf)
+		fi
+	done
+
+	printf '%s\n' "${bdfs[@]}"
+}
+
+function opal_revert_cleanup() {
+	# The OPAL CI tests is only used for P4510 devices.
+	mapfile -t bdfs < <(get_nvme_bdfs_by_id 0x0a54)
+	if [[ -z ${bdfs[0]} ]]; then
+		return 0
+	fi
+
+	$SPDK_BIN_DIR/spdk_tgt &
 	spdk_tgt_pid=$!
 	waitforlisten $spdk_tgt_pid
 
-	# OPAL test only runs on the first NVMe device
-	# So we just revert the first one here
-	bdf=$($rootdir/scripts/gen_nvme.sh --json | jq -r '.config[].params | select(.name=="Nvme0").traddr')
-	$rootdir/scripts/rpc.py bdev_nvme_attach_controller -b "nvme0" -t "pcie" -a $bdf
-	# Ignore if this fails.
-	$rootdir/scripts/rpc.py bdev_nvme_opal_revert -b nvme0 -p test || true
+	bdf_id=0
+	for bdf in "${bdfs[@]}"; do
+		$rootdir/scripts/rpc.py bdev_nvme_attach_controller -b "nvme"${bdf_id} -t "pcie" -a ${bdf}
+		# Ignore if this fails.
+		$rootdir/scripts/rpc.py bdev_nvme_opal_revert -b "nvme"${bdf_id} -p test || true
+		((++bdf_id))
+	done
 
 	killprocess $spdk_tgt_pid
 }
 
+function pap() {
+	while read -r file; do
+		cat <<- FILE
+			--- $file ---
+			$(<"$file")
+			--- $file ---
+		FILE
+		rm -f "$file"
+	done < <(find "$@" -type f | sort -u)
+}
+
+# Define temp storage for all the tests. Look for 2GB at minimum
+set_test_storage "${TEST_MIN_STORAGE_SIZE:-$((1 << 31))}"
+
 set -o errtrace
+shopt -s extdebug
 trap "trap - ERR; print_backtrace >&2" ERR
 
 PS4=' \t	\$ '

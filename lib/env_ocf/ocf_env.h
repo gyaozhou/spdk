@@ -49,7 +49,7 @@
 #include "spdk/likely.h"
 #include "spdk/env.h"
 #include "spdk/util.h"
-#include "spdk_internal/log.h"
+#include "spdk/log.h"
 
 #include "ocf_env_list.h"
 #include "ocf/ocf_err.h"
@@ -112,6 +112,9 @@ typedef uint64_t sector_t;
 		} \
 	})
 
+#define ENV_BUILD_BUG_ON(cond)		_Static_assert(!(cond), "static "\
+					"assertion failure")
+
 #define container_of(ptr, type, member) SPDK_CONTAINEROF(ptr, type, member)
 
 static inline void *env_malloc(size_t size, int flags)
@@ -145,6 +148,11 @@ static inline void *env_vzalloc(size_t size)
 			    SPDK_MALLOC_DMA);
 }
 
+static inline void *env_vzalloc_flags(size_t size, int flags)
+{
+	return env_vzalloc(size);
+}
+
 static inline void *env_secure_alloc(size_t size)
 {
 	return spdk_zmalloc(size, 0, NULL, SPDK_ENV_LCORE_ID_ANY,
@@ -163,8 +171,7 @@ static inline void env_vfree(const void *ptr)
 
 static inline uint64_t env_get_free_memory(void)
 {
-	/* TODO: do we need implementation for this function? */
-	return sysconf(_SC_PAGESIZE) * sysconf(_SC_AVPHYS_PAGES);
+	return -1;
 }
 
 /* *** ALLOCATOR *** */
@@ -228,13 +235,28 @@ static inline int env_mutex_is_locked(env_mutex *mutex)
 	return 1;
 }
 
+static inline int env_mutex_destroy(env_mutex *mutex)
+{
+	if (pthread_mutex_destroy(&mutex->m)) {
+		return 1;
+	}
+
+	return 0;
+}
+
 /* *** RECURSIVE MUTEX *** */
 
 typedef env_mutex env_rmutex;
 
 static inline int env_rmutex_init(env_rmutex *rmutex)
 {
-	return env_mutex_init(rmutex);
+	pthread_mutexattr_t attr;
+
+	pthread_mutexattr_init(&attr);
+	pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+	pthread_mutex_init(&rmutex->m, &attr);
+
+	return 0;
 }
 
 static inline void env_rmutex_lock(env_rmutex *rmutex)
@@ -260,6 +282,11 @@ static inline void env_rmutex_unlock(env_rmutex *rmutex)
 static inline int env_rmutex_is_locked(env_rmutex *rmutex)
 {
 	return env_mutex_is_locked(rmutex);
+}
+
+static inline int env_rmutex_destroy(env_rmutex *rmutex)
+{
+	return env_mutex_destroy(rmutex);
 }
 
 /* *** RW SEMAPHORE *** */
@@ -319,6 +346,11 @@ static inline int env_rwsem_down_read_interruptible(env_rwsem *s)
 static inline int env_rwsem_down_write_interruptible(env_rwsem *s)
 {
 	return pthread_rwlock_wrlock(&s->lock);
+}
+
+static inline int env_rwsem_destroy(env_rwsem *s)
+{
+	return pthread_rwlock_destroy(&s->lock);
 }
 
 /* *** ATOMIC VARIABLES *** */
@@ -485,84 +517,103 @@ static inline long env_atomic64_cmpxchg(env_atomic64 *a, long old, long new)
 }
 
 /* *** COMPLETION *** */
-struct completion {
-	env_atomic atom;
-};
+typedef struct completion {
+	sem_t sem;
+} env_completion;
 
-typedef struct completion env_completion;
+static inline void env_completion_init(env_completion *completion)
+{
+	sem_init(&completion->sem, 0, 0);
+}
 
-void env_completion_init(env_completion *completion);
-void env_completion_wait(env_completion *completion);
-void env_completion_complete(env_completion *completion);
+static inline void env_completion_wait(env_completion *completion)
+{
+	sem_wait(&completion->sem);
+}
+
+static inline void env_completion_complete(env_completion *completion)
+{
+	sem_post(&completion->sem);
+}
+
+static inline void env_completion_destroy(env_completion *completion)
+{
+	sem_destroy(&completion->sem);
+}
 
 /* *** SPIN LOCKS *** */
 
-typedef env_mutex env_spinlock;
+typedef struct {
+	pthread_spinlock_t lock;
+} env_spinlock;
 
-static inline void env_spinlock_init(env_spinlock *l)
+static inline int env_spinlock_init(env_spinlock *l)
 {
-	env_mutex_init(l);
+	return pthread_spin_init(&l->lock, 0);
+}
+
+static inline int env_spinlock_trylock(env_spinlock *l)
+{
+	return pthread_spin_trylock(&l->lock) ? -OCF_ERR_NO_LOCK : 0;
 }
 
 static inline void env_spinlock_lock(env_spinlock *l)
 {
-	env_mutex_lock(l);
+	ENV_BUG_ON(pthread_spin_lock(&l->lock));
 }
 
 static inline void env_spinlock_unlock(env_spinlock *l)
 {
-	env_mutex_unlock(l);
+	ENV_BUG_ON(pthread_spin_unlock(&l->lock));
 }
 
-static inline void env_spinlock_lock_irq(env_spinlock *l)
-{
-	env_spinlock_lock(l);
-}
+#define env_spinlock_lock_irqsave(l, flags) \
+		(void)flags; \
+		env_spinlock_lock(l)
 
-static inline void env_spinlock_unlock_irq(env_spinlock *l)
-{
-	env_spinlock_unlock(l);
-}
+#define env_spinlock_unlock_irqrestore(l, flags) \
+		(void)flags; \
+		env_spinlock_unlock(l)
 
-static inline void env_spinlock_lock_irqsave(env_spinlock *l, int flags)
+static inline void env_spinlock_destroy(env_spinlock *l)
 {
-	env_spinlock_lock(l);
-	(void)flags;
-}
-
-static inline void env_spinlock_unlock_irqrestore(env_spinlock *l, int flags)
-{
-	env_spinlock_unlock(l);
-	(void)flags;
+	ENV_BUG_ON(pthread_spin_destroy(&l->lock));
 }
 
 /* *** RW LOCKS *** */
 
-typedef env_rwsem env_rwlock;
+typedef struct {
+	pthread_rwlock_t lock;
+} env_rwlock;
 
 static inline void env_rwlock_init(env_rwlock *l)
 {
-	env_rwsem_init(l);
+	ENV_BUG_ON(pthread_rwlock_init(&l->lock, NULL));
 }
 
 static inline void env_rwlock_read_lock(env_rwlock *l)
 {
-	env_rwsem_down_read(l);
+	ENV_BUG_ON(pthread_rwlock_rdlock(&l->lock));
 }
 
 static inline void env_rwlock_read_unlock(env_rwlock *l)
 {
-	env_rwsem_up_read(l);
+	ENV_BUG_ON(pthread_rwlock_unlock(&l->lock));
 }
 
 static inline void env_rwlock_write_lock(env_rwlock *l)
 {
-	env_rwsem_down_write(l);
+	ENV_BUG_ON(pthread_rwlock_wrlock(&l->lock));
 }
 
 static inline void env_rwlock_write_unlock(env_rwlock *l)
 {
-	env_rwsem_up_write(l);
+	ENV_BUG_ON(pthread_rwlock_unlock(&l->lock));
+}
+
+static inline void env_rwlock_destroy(env_rwlock *l)
+{
+	ENV_BUG_ON(pthread_rwlock_destroy(&l->lock));
 }
 
 static inline void env_bit_set(int nr, volatile void *addr)
@@ -578,8 +629,7 @@ static inline void env_bit_clear(int nr, volatile void *addr)
 	char *byte = (char *)addr + (nr >> 3);
 	char mask = 1 << (nr & 7);
 
-	mask = ~mask;
-	__sync_and_and_fetch(byte, mask);
+	__sync_and_and_fetch(byte, ~mask);
 }
 
 static inline bool env_bit_test(int nr, const volatile unsigned long *addr)
@@ -732,7 +782,7 @@ static inline int env_strncpy(char *dest, size_t dmax, const char *src, size_t l
 	return 0;
 }
 
-#define env_strncmp strncmp
+#define env_strncmp(s1, slen1, s2, slen2) strncmp(s1, s2, min(slen1, slen2))
 
 static inline char *env_strdup(const char *src, int flags)
 {
@@ -774,5 +824,10 @@ static inline void env_touch_softlockup_wd(void)
 /* *** CRC *** */
 
 uint32_t env_crc32(uint32_t crc, uint8_t const *data, size_t len);
+
+/* EXECUTION CONTEXTS */
+unsigned env_get_execution_context(void);
+void env_put_execution_context(unsigned ctx);
+unsigned env_get_execution_context_count(void);
 
 #endif /* __OCF_ENV_H__ */

@@ -20,7 +20,7 @@ properties:
   because you don't have to change the data model from the single-threaded
   version. You add a lock around the data.
 * You can write your program as a synchronous, imperative list of statements
-that you read from top to bottom.
+  that you read from top to bottom.
 * The scheduler can interrupt threads, allowing for efficient time-sharing
   of CPU resources.
 
@@ -117,14 +117,10 @@ framework for all of the example applications it shipped with, in the interest
 of supporting the widest variety of frameworks possible. But the applications do
 of course require something that implements an asynchronous event loop in order
 to run, so enter the `event` framework located in `lib/event`. This framework
-includes things like spawning one thread per core, pinning each thread to a
-unique core, polling and scheduling the lightweight threads, installing signal
-handlers to cleanly shutdown, and basic command line option parsing. When
-started through spdk_app_start(), the library automatically spawns all of the
-threads requested, pins them, and is ready for lightweight threads to be
-created. This makes it much easier to implement a brand new SPDK application and
-is the recommended method for those starting out. Only established applications
-should consider directly integrating the lower level libraries.
+includes things like polling and scheduling the lightweight threads, installing
+signal handlers to cleanly shutdown, and basic command line option parsing.
+Only established applications should consider directly integrating the lower
+level libraries.
 
 # Limitations of the C Language
 

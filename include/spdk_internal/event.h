@@ -63,26 +63,61 @@ enum spdk_reactor_state {
 
 struct spdk_lw_thread {
 	TAILQ_ENTRY(spdk_lw_thread)	link;
+	uint64_t			tsc_start;
+	uint32_t                        lcore;
+	uint32_t                        new_lcore;
+	bool				resched;
+	struct spdk_thread_stats	current_stats;
+	struct spdk_thread_stats	snapshot_stats;
+	struct spdk_thread_stats	last_stats;
 };
+
+/**
+ * Completion callback to set reactor into interrupt mode or poll mode.
+ *
+ * \param cb_arg Argument to pass to the callback function.
+ */
+typedef void (*spdk_reactor_set_interrupt_mode_cb)(void *cb_arg);
 
 // zhou: used to present work thread for each core.
 struct spdk_reactor {
 	/* Lightweight threads running on this reactor */
 	TAILQ_HEAD(, spdk_lw_thread)			threads;
+	uint32_t					thread_count;
 
 	/* Logical core number for this reactor. */
 	uint32_t					lcore;
 
 	struct {
 		uint32_t				is_valid : 1;
-		uint32_t				reserved : 31;
+		uint32_t				is_scheduling : 1;
+		uint32_t				reserved : 30;
 	} flags;
+
+	uint64_t					tsc_last;
 
     // zhou: event list, used to inter-ractor(thread) event sending
 	struct spdk_ring				*events;
+	int						events_fd;
 
 	/* The last known rusage values */
 	struct rusage					rusage;
+	uint64_t					last_rusage;
+
+	uint64_t					busy_tsc;
+	uint64_t					idle_tsc;
+
+	/* Each bit of cpuset indicates whether a reactor probably requires event notification */
+	struct spdk_cpuset				notify_cpuset;
+	/* Indicate whether this reactor currently runs in interrupt */
+	bool						in_interrupt;
+	bool						set_interrupt_mode_in_progress;
+	bool						new_in_interrupt;
+	spdk_reactor_set_interrupt_mode_cb		set_interrupt_mode_cb_fn;
+	void						*set_interrupt_mode_cb_arg;
+
+	struct spdk_fd_group				*fgrp;
+	int						resched_fd;
 } __attribute__((aligned(SPDK_CACHE_LINE_SIZE)));
 
 int spdk_reactors_init(void);
@@ -92,6 +127,8 @@ void spdk_reactors_start(void);
 void spdk_reactors_stop(void *arg1);
 
 struct spdk_reactor *spdk_reactor_get(uint32_t lcore);
+
+struct spdk_reactor *_spdk_get_scheduling_reactor(void);
 
 /**
  * Allocate and pass an event to each reactor, serially.
@@ -107,12 +144,34 @@ struct spdk_reactor *spdk_reactor_get(uint32_t lcore);
  */
 void spdk_for_each_reactor(spdk_event_fn fn, void *arg1, void *arg2, spdk_event_fn cpl);
 
+/**
+ * Set reactor into interrupt mode or back to poll mode.
+ *
+ * Currently, this function is only permitted within spdk application thread.
+ * Also it requires the corresponding reactor does not have any spdk_thread.
+ *
+ * \param lcore CPU core index of specified reactor.
+ * \param new_in_interrupt Set interrupt mode for true, or poll mode for false.
+ * \param cb_fn This will be called on spdk application thread after setting interupt mode.
+ * \param cb_arg Argument will be passed to cb_fn when called.
+ *
+ * \return 0 on success, negtive errno on failure.
+ */
+int spdk_reactor_set_interrupt_mode(uint32_t lcore, bool new_in_interrupt,
+				    spdk_reactor_set_interrupt_mode_cb cb_fn, void *cb_arg);
+
+/**
+ * Get a handle to spdk application thread.
+ *
+ * \return a pointer to spdk application thread on success or NULL on failure.
+ */
+struct spdk_thread *_spdk_get_app_thread(void);
+
 struct spdk_subsystem {
 	const char *name;
 	/* User must call spdk_subsystem_init_next() when they are done with their initialization. */
 	void (*init)(void);
 	void (*fini)(void);
-	void (*config)(FILE *fp);
 
 	/**
 	 * Write JSON configuration handler.
@@ -123,10 +182,9 @@ struct spdk_subsystem {
 	TAILQ_ENTRY(spdk_subsystem) tailq;
 };
 
-TAILQ_HEAD(spdk_subsystem_list, spdk_subsystem);
-extern struct spdk_subsystem_list g_subsystems;
-
-struct spdk_subsystem *spdk_subsystem_find(struct spdk_subsystem_list *list, const char *name);
+struct spdk_subsystem *spdk_subsystem_find(const char *name);
+struct spdk_subsystem *spdk_subsystem_get_first(void);
+struct spdk_subsystem *spdk_subsystem_get_next(struct spdk_subsystem *cur_subsystem);
 
 struct spdk_subsystem_depend {
 	const char *name;
@@ -134,8 +192,9 @@ struct spdk_subsystem_depend {
 	TAILQ_ENTRY(spdk_subsystem_depend) tailq;
 };
 
-TAILQ_HEAD(spdk_subsystem_depend_list, spdk_subsystem_depend);
-extern struct spdk_subsystem_depend_list g_subsystems_deps;
+struct spdk_subsystem_depend *spdk_subsystem_get_first_depend(void);
+struct spdk_subsystem_depend *spdk_subsystem_get_next_depend(struct spdk_subsystem_depend
+		*cur_depend);
 
 void spdk_add_subsystem(struct spdk_subsystem *subsystem);
 void spdk_add_subsystem_depend(struct spdk_subsystem_depend *depend);
@@ -145,9 +204,9 @@ void spdk_subsystem_init(spdk_subsystem_init_fn cb_fn, void *cb_arg);
 void spdk_subsystem_fini(spdk_msg_fn cb_fn, void *cb_arg);
 void spdk_subsystem_init_next(int rc);
 void spdk_subsystem_fini_next(void);
-void spdk_subsystem_config(FILE *fp);
 void spdk_app_json_config_load(const char *json_config_file, const char *rpc_addr,
-			       spdk_subsystem_init_fn cb_fn, void *cb_arg);
+			       spdk_subsystem_init_fn cb_fn, void *cb_arg,
+			       bool stop_on_error);
 
 /**
  * Save pointed \c subsystem configuration to the JSON write context \c w. In case of
@@ -161,7 +220,206 @@ void spdk_subsystem_config_json(struct spdk_json_write_ctx *w, struct spdk_subsy
 void spdk_rpc_initialize(const char *listen_addr);
 void spdk_rpc_finish(void);
 
-// zhou: will be executed before main() running.
+struct spdk_governor_capabilities {
+	bool freq_change;
+	bool freq_getset;
+	bool freq_up;
+	bool freq_down;
+	bool freq_max;
+	bool freq_min;
+	bool turbo_set;
+	bool turbo_available;
+	bool priority;
+};
+
+/** Cores governor */
+struct spdk_governor {
+	char *name;
+
+	/* freqs - the buffer array to save the frequencies; num - the number of frequencies to get; return - the number of available frequencies */
+	uint32_t (*get_core_freqs)(uint32_t lcore_id, uint32_t *freqs, uint32_t num);
+
+	/* return - current frequency */
+	uint32_t (*get_core_curr_freq)(uint32_t lcore_id);
+
+	/**
+	 * freq_index - index of available frequencies returned from get_core_freqs call
+	 *
+	 * return
+	 *  - 1 on success with frequency changed.
+	 *  - 0 on success without frequency changed.
+	 *  - Negative on error.
+	 */
+	int (*set_core_freq)(uint32_t lcore_id, uint32_t freq_index);
+	int (*core_freq_up)(uint32_t lcore_id);
+	int (*core_freq_down)(uint32_t lcore_id);
+	int (*set_core_freq_max)(uint32_t lcore_id);
+	int (*set_core_freq_min)(uint32_t lcore_id);
+
+	/**
+	 * return
+	 *  - 1 Turbo Boost is enabled for this lcore.
+	 *  - 0 Turbo Boost is disabled for this lcore.
+	 *  - Negative on error.
+	 */
+	int (*get_core_turbo_status)(uint32_t lcore_id);
+
+	/* return - 0 on success; negative on error */
+	int (*enable_core_turbo)(uint32_t lcore_id);
+	int (*disable_core_turbo)(uint32_t lcore_id);
+	int (*get_core_capabilities)(uint32_t lcore_id, struct spdk_governor_capabilities *capabilities);
+	int (*init_core)(uint32_t lcore_id);
+	int (*deinit_core)(uint32_t lcore_id);
+	int (*init)(void);
+	int (*deinit)(void);
+
+	TAILQ_ENTRY(spdk_governor) link;
+};
+
+/**
+ * Add the given governor to the list of registered governors.
+ * This function should be invoked by referencing the macro
+ * SPDK_GOVERNOR_REGISTER in the governor c file.
+ *
+ * \param governor Governor to be added.
+ *
+ * \return 0 on success or non-zero on failure.
+ */
+void _spdk_governor_list_add(struct spdk_governor *governor);
+
+/**
+ * Change current governor.
+ *
+ * \param name Name of the governor to be used.
+ *
+ * \return 0 on success or non-zero on failure.
+ */
+int _spdk_governor_set(char *name);
+
+/**
+ * Get currently set governor.
+ *
+ */
+struct spdk_governor *_spdk_governor_get(void);
+
+/**
+ * Macro used to register new cores governor.
+ */
+#define SPDK_GOVERNOR_REGISTER(governor) \
+	static void __attribute__((constructor)) _spdk_governor_register_##name(void) \
+	{ \
+		_spdk_governor_list_add(governor); \
+	} \
+
+/**
+ * A list of cores and threads which is used for scheduling.
+ */
+struct spdk_scheduler_core_info {
+	uint64_t core_idle_tsc;
+	uint64_t core_busy_tsc;
+	uint32_t lcore;
+	uint32_t threads_count;
+	uint32_t pending_threads_count;
+	bool interrupt_mode;
+	struct spdk_lw_thread **threads;
+};
+
+/**
+ * Scheduler balance function type.
+ * Accepts array of core_info which is of size 'count' and returns updated array.
+ */
+typedef void (*spdk_scheduler_balance_fn)(struct spdk_scheduler_core_info *core_info, int count,
+		struct spdk_governor *governor);
+
+/**
+ * Scheduler init function type.
+ * Called on scheduler module initialization.
+ */
+typedef int (*spdk_scheduler_init_fn)(struct spdk_governor *governor);
+
+/**
+ * Scheduler deinitialization function type.
+ * Called on reactor fini.
+ */
+typedef int (*spdk_scheduler_deinit_fn)(struct spdk_governor *governor);
+
+/** Thread scheduler */
+struct spdk_scheduler {
+	char                        *name;
+	spdk_scheduler_init_fn       init;
+	spdk_scheduler_deinit_fn     deinit;
+	spdk_scheduler_balance_fn    balance;
+	TAILQ_ENTRY(spdk_scheduler)  link;
+};
+
+/**
+ * Add the given scheduler to the list of registered schedulers.
+ * This function should be invoked by referencing the macro
+ * SPDK_SCHEDULER_REGISTER in the scheduler c file.
+ *
+ * \param scheduler Scheduler to be added.
+ */
+void _spdk_scheduler_list_add(struct spdk_scheduler *scheduler);
+
+/**
+ * Change current scheduler.
+ *
+ * \param name Name of the scheduler to be used.
+ *
+ * \return 0 on success or non-zero on failure.
+ */
+int _spdk_scheduler_set(char *name);
+
+/**
+ * Get currently set scheduler.
+ *
+ */
+struct spdk_scheduler *_spdk_scheduler_get(void);
+
+/**
+ * Change current scheduling period.
+ *
+ * \param period New period (microseconds).
+ */
+void _spdk_scheduler_period_set(uint64_t period);
+
+/**
+ * Disable the scheduler.
+ */
+void _spdk_scheduler_disable(void);
+
+/**
+ * Get period of currently set scheduler.
+ */
+uint64_t _spdk_scheduler_period_get(void);
+
+/*
+ * Macro used to register new reactor balancer.
+ */
+#define SPDK_SCHEDULER_REGISTER(scheduler) \
+static void __attribute__((constructor)) _spdk_scheduler_register_ ## scheduler (void) \
+{ \
+	_spdk_scheduler_list_add(&scheduler); \
+} \
+
+/**
+ * Set new CPU core index. Used for scheduling, assigns new CPU core index and marks it =
+ * for rescheduling - does not actually change it. Can be used with SPDK_ENV_LCORE_ID_ANY
+ *
+ * \param thread thread to change core.
+ * \param lcore new CPU core index.
+ */
+void _spdk_lw_thread_set_core(struct spdk_lw_thread *thread, uint32_t lcore);
+
+/**
+ * Get threads stats
+ *
+ * \param thread thread that stats regards to.
+ * \param stats Output parameter for accumulated TSC counts while the thread was busy.
+ */
+void _spdk_lw_thread_get_current_stats(struct spdk_lw_thread *thread,
+				       struct spdk_thread_stats *stats);
+
 /**
  * \brief Register a new subsystem
  */

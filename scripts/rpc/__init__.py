@@ -1,10 +1,14 @@
 import json
+import os
 import sys
+
+from io import IOBase as io
 
 from . import app
 from . import bdev
 from . import blobfs
 from . import env_dpdk
+from . import idxd
 from . import ioat
 from . import iscsi
 from . import log
@@ -19,6 +23,7 @@ from . import subsystem
 from . import trace
 from . import vhost
 from . import vmd
+from . import sock
 from . import client as rpc_client
 from .helpers import deprecated_alias
 
@@ -67,6 +72,17 @@ def _json_dump(config, fd, indent):
     fd.write('\n')
 
 
+def _json_load(j):
+    if j == sys.stdin or isinstance(j, io):
+        json_conf = json.load(j)
+    elif os.path.exists(j):
+        with open(j, "r") as j:
+            json_conf = json.load(j)
+    else:
+        json_conf = json.loads(j)
+    return json_conf
+
+
 def save_config(client, fd, indent=2):
     """Write current (live) configuration of SPDK subsystems and targets to stdout.
     Args:
@@ -93,7 +109,7 @@ def load_config(client, fd, include_aliases=False):
     Args:
         fd: opened file descriptor where data will be taken from
     """
-    json_config = json.load(fd)
+    json_config = _json_load(fd)
 
     # remove subsystems with no config
     subsystems = json_config['subsystems']
@@ -124,7 +140,7 @@ def load_config(client, fd, include_aliases=False):
                 if 'method' not in elem or elem['method'] not in allowed_methods:
                     continue
 
-                client.call(elem['method'], elem['params'])
+                client.call(**elem)
                 config.remove(elem)
                 allowed_found = True
 
@@ -162,7 +178,7 @@ def load_subsystem_config(client, fd):
     Args:
         fd: opened file descriptor where data will be taken from
     """
-    subsystem = json.load(fd)
+    subsystem = _json_load(fd)
 
     if not subsystem['config']:
         return
@@ -178,7 +194,7 @@ def load_subsystem_config(client, fd):
         if 'method' not in elem or elem['method'] not in allowed_methods:
             continue
 
-        client.call(elem['method'], elem['params'])
+        client.call(**elem)
         config.remove(elem)
 
     if config:

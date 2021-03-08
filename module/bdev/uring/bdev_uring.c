@@ -37,7 +37,6 @@
 
 #include "spdk/barrier.h"
 #include "spdk/bdev.h"
-#include "spdk/conf.h"
 #include "spdk/env.h"
 #include "spdk/fd.h"
 #include "spdk/likely.h"
@@ -46,7 +45,7 @@
 #include "spdk/util.h"
 #include "spdk/string.h"
 
-#include "spdk_internal/log.h"
+#include "spdk/log.h"
 #include "spdk_internal/uring.h"
 
 struct bdev_uring_io_channel {
@@ -76,10 +75,8 @@ struct bdev_uring {
 static int bdev_uring_init(void);
 static void bdev_uring_fini(void);
 static void uring_free_bdev(struct bdev_uring *uring);
-static void bdev_uring_get_spdk_running_config(FILE *fp);
-
 // zhou: list of disks
-static TAILQ_HEAD(, bdev_uring) g_uring_bdev_head;
+static TAILQ_HEAD(, bdev_uring) g_uring_bdev_head = TAILQ_HEAD_INITIALIZER(g_uring_bdev_head);
 
 #define SPDK_URING_QUEUE_DEPTH 512
 #define MAX_EVENTS_PER_POLL 32
@@ -94,7 +91,6 @@ static struct spdk_bdev_module uring_if = {
 	.name		= "uring",
 	.module_init	= bdev_uring_init,
 	.module_fini	= bdev_uring_fini,
-	.config_text	= bdev_uring_get_spdk_running_config,
 	.get_ctx_size	= bdev_uring_get_ctx_size,
 };
 
@@ -160,7 +156,7 @@ bdev_uring_readv(struct bdev_uring *uring, struct spdk_io_channel *ch,
 	uring_task->len = nbytes;
 	uring_task->ch = uring_ch;
 
-	SPDK_DEBUGLOG(SPDK_LOG_URING, "read %d iovs size %lu to off: %#lx\n",
+	SPDK_DEBUGLOG(uring, "read %d iovs size %lu to off: %#lx\n",
 		      iovcnt, nbytes, offset);
 
 	group_ch->io_pending++;
@@ -183,7 +179,7 @@ bdev_uring_writev(struct bdev_uring *uring, struct spdk_io_channel *ch,
 	uring_task->len = nbytes;
 	uring_task->ch = uring_ch;
 
-	SPDK_DEBUGLOG(SPDK_LOG_URING, "write %d iovs size %lu from off: %#lx\n",
+	SPDK_DEBUGLOG(uring, "write %d iovs size %lu from off: %#lx\n",
 		      iovcnt, nbytes, offset);
 
 	group_ch->io_pending++;
@@ -251,34 +247,30 @@ bdev_uring_group_poll(void *arg)
 	int count, ret;
 
 	to_submit = group_ch->io_pending;
-	to_complete = group_ch->io_inflight;
 
-	ret = 0;
 	if (to_submit > 0) {
 		/* If there are I/O to submit, use io_uring_submit here.
 		 * It will automatically call spdk_io_uring_enter appropriately. */
 		ret = io_uring_submit(&group_ch->uring);
+		if (ret < 0) {
+			return SPDK_POLLER_BUSY;
+		}
+
 		group_ch->io_pending = 0;
 		group_ch->io_inflight += to_submit;
-
-	} else if (to_complete > 0) {
-
-		/* If there are I/O in flight but none to submit, we need to
-		 * call io_uring_enter ourselves. */
-		ret = spdk_io_uring_enter(group_ch->uring.ring_fd, 0, 0,
-					  IORING_ENTER_GETEVENTS);
 	}
 
-	if (ret < 0) {
-		return 1;
-	}
-
+	to_complete = group_ch->io_inflight;
 	count = 0;
 	if (to_complete > 0) {
 		count = bdev_uring_reap(&group_ch->uring, to_complete);
 	}
 
-	return (count + to_submit);
+	if (count + to_submit > 0) {
+		return SPDK_POLLER_BUSY;
+	} else {
+		return SPDK_POLLER_IDLE;
+	}
 }
 
 static void bdev_uring_get_buf_cb(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io,
@@ -431,12 +423,14 @@ bdev_uring_group_create_cb(void *io_device, void *ctx_buf)
 {
 	struct bdev_uring_group_channel *ch = ctx_buf;
 
-	if (io_uring_queue_init(SPDK_URING_QUEUE_DEPTH, &ch->uring, IORING_SETUP_IOPOLL) < 0) {
+	/* Do not use IORING_SETUP_IOPOLL until the Linux kernel can support not only
+	 * local devices but also devices attached from remote target */
+	if (io_uring_queue_init(SPDK_URING_QUEUE_DEPTH, &ch->uring, 0) < 0) {
 		SPDK_ERRLOG("uring I/O context setup failure\n");
 		return -1;
 	}
 
-	ch->poller = spdk_poller_register(bdev_uring_group_poll, ch, 0);
+	ch->poller = SPDK_POLLER_REGISTER(bdev_uring_group_poll, ch, 0);
 	return 0;
 }
 
@@ -445,7 +439,6 @@ bdev_uring_group_destroy_cb(void *io_device, void *ctx_buf)
 {
 	struct bdev_uring_group_channel *ch = ctx_buf;
 
-	close(ch->uring.ring_fd);
 	io_uring_queue_exit(&ch->uring);
 
 	spdk_poller_unregister(&ch->poller);
@@ -587,62 +580,8 @@ delete_uring_bdev(struct spdk_bdev *bdev, spdk_delete_uring_complete cb_fn, void
 static int
 bdev_uring_init(void)
 {
-	size_t i;
-	struct spdk_conf_section *sp;
-	struct spdk_bdev *bdev;
-
-    // zhou: disk list
-	TAILQ_INIT(&g_uring_bdev_head);
-
 	spdk_io_device_register(&uring_if, bdev_uring_group_create_cb, bdev_uring_group_destroy_cb,
-				sizeof(struct bdev_uring_group_channel),
-				"uring_module");
-
-	sp = spdk_conf_find_section(NULL, "URING");
-	if (!sp) {
-		return 0;
-	}
-
-	i = 0;
-	while (true) {
-		const char *file;
-		const char *name;
-		const char *block_size_str;
-		uint32_t block_size = 0;
-		long int tmp;
-
-		file = spdk_conf_section_get_nmval(sp, "URING", i, 0);
-		if (!file) {
-			break;
-		}
-
-		name = spdk_conf_section_get_nmval(sp, "URING", i, 1);
-		if (!name) {
-			SPDK_ERRLOG("No name provided for URING bdev with file %s\n", file);
-			i++;
-			continue;
-		}
-
-		block_size_str = spdk_conf_section_get_nmval(sp, "URING", i, 2);
-		if (block_size_str) {
-			tmp = spdk_strtol(block_size_str, 10);
-			if (tmp < 0) {
-				SPDK_ERRLOG("Invalid block size for URING bdev with file %s\n", file);
-				i++;
-				continue;
-			}
-			block_size = (uint32_t)tmp;
-		}
-
-		bdev = create_uring_bdev(name, file, block_size);
-		if (!bdev) {
-			SPDK_ERRLOG("Unable to create URING bdev from file %s\n", file);
-			i++;
-			continue;
-		}
-
-		i++;
-	}
+				sizeof(struct bdev_uring_group_channel), "uring_module");
 
 	return 0;
 }
@@ -653,32 +592,4 @@ bdev_uring_fini(void)
 	spdk_io_device_unregister(&uring_if, NULL);
 }
 
-static void
-bdev_uring_get_spdk_running_config(FILE *fp)
-{
-	char *file;
-	char *name;
-	uint32_t block_size;
-	struct bdev_uring *uring;
-
-	fprintf(fp,
-		"\n"
-		"# Users must change this section to match the /dev/sdX devices to be\n"
-		"# exported as iSCSI LUNs. The devices are accessed using io_uring.\n"
-		"# The format is:\n"
-		"# URING <file name> <bdev name> [<block size>]\n"
-		"# The file name is the backing device\n"
-		"# The bdev name can be referenced from elsewhere in the configuration file.\n"
-		"# Block size may be omitted to automatically detect the block size of a bdev.\n"
-		"[URING]\n");
-
-	TAILQ_FOREACH(uring, &g_uring_bdev_head, link) {
-		file = uring->filename;
-		name = uring->bdev.name;
-		block_size = uring->bdev.blocklen;
-		fprintf(fp, "  URING %s %s %d\n", file, name, block_size);
-	}
-	fprintf(fp, "\n");
-}
-
-SPDK_LOG_REGISTER_COMPONENT("uring", SPDK_LOG_URING)
+SPDK_LOG_REGISTER_COMPONENT(uring)

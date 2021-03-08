@@ -13,9 +13,11 @@
 *.so.*
 *.swp
 *.DS_Store
+build/
 ut_coverage/
 tags
 cscope.out
+cscope.files
 dpdk-*
 CUnit-Memory-Dump.xml
 include/spdk/config.h
@@ -25,11 +27,11 @@ CONFIG.local
 .project
 .cproject
 .settings
+.gitreview
 mk/cc.mk
 mk/config.mk
 mk/cc.flags.mk
 PYTHON_COMMAND
-
-cscope.files
-zhou/*.png
-zhou/*.pdf
+test_completions.txt
+timing.txt
+test/common/build_config.sh

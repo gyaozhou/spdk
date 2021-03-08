@@ -308,7 +308,7 @@ parse_args(int argc, char **argv)
 	int op, rc;
 	long int val;
 
-	g_trid.trtype = SPDK_NVME_TRANSPORT_PCIE;
+	spdk_nvme_trid_populate_transport(&g_trid, SPDK_NVME_TRANSPORT_PCIE);
 	snprintf(g_trid.subnqn, sizeof(g_trid.subnqn), "%s", SPDK_NVMF_DISCOVERY_NQN);
 
 	while ((op = getopt(argc, argv, "n:r:t:HL:T")) != -1) {
@@ -337,18 +337,16 @@ parse_args(int argc, char **argv)
 				usage(argv[0]);
 				exit(EXIT_FAILURE);
 			}
+#ifdef DEBUG
 			spdk_log_set_print_level(SPDK_LOG_DEBUG);
-#ifndef DEBUG
-			fprintf(stderr, "%s must be rebuilt with CONFIG_DEBUG=y for -L flag.\n",
-				argv[0]);
-			usage(argv[0]);
-			return 0;
 #endif
 			break;
 		case 'T':
 			g_enable_temp_test = 1;
 			break;
 		case 'H':
+			usage(argv[0]);
+			exit(EXIT_SUCCESS);
 		default:
 			usage(argv[0]);
 			return 1;
@@ -525,9 +523,9 @@ spdk_aer_changed_ns_test(void)
 int main(int argc, char **argv)
 {
 	struct dev		*dev;
-	int			i;
 	struct spdk_env_opts	opts;
 	int			rc;
+	struct spdk_nvme_detach_ctx *detach_ctx = NULL;
 
 	rc = parse_args(argc, argv);
 	if (rc != 0) {
@@ -597,10 +595,12 @@ int main(int argc, char **argv)
 		spdk_nvme_ctrlr_register_aer_callback(dev->ctrlr, NULL, NULL);
 	}
 
-	for (i = 0; i < g_num_devs; i++) {
-		struct dev *dev = &g_devs[i];
+	foreach_dev(dev) {
+		spdk_nvme_detach_async(dev->ctrlr, &detach_ctx);
+	}
 
-		spdk_nvme_detach(dev->ctrlr);
+	while (detach_ctx && spdk_nvme_detach_poll_async(detach_ctx) == -EAGAIN) {
+		;
 	}
 
 done:

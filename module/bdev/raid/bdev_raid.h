@@ -39,6 +39,7 @@
 enum raid_level {
 	INVALID_RAID_LEVEL	= -1,
 	RAID0			= 0,
+	RAID5			= 5,
 };
 
 /*
@@ -83,6 +84,9 @@ struct raid_base_bdev_info {
 	 * descriptor will be closed
 	 */
 	bool			remove_scheduled;
+
+	/* thread where base device is opened */
+	struct spdk_thread	*thread;
 };
 
 /*
@@ -100,9 +104,8 @@ struct raid_bdev_io {
 	struct raid_bdev_io_channel	*raid_ch;
 
 	/* Used for tracking progress on io requests sent to member disks. */
+	uint64_t			base_bdev_io_remaining;
 	uint8_t				base_bdev_io_submitted;
-	uint8_t				base_bdev_io_completed;
-	uint8_t				base_bdev_io_expected;
 	uint8_t				base_bdev_io_status;
 };
 
@@ -159,7 +162,13 @@ struct raid_bdev {
 
 	/* Module for RAID-level specific operations */
 	struct raid_bdev_module		*module;
+
+	/* Private data for the raid module */
+	void				*module_private;
 };
+
+#define RAID_FOR_EACH_BASE_BDEV(r, i) \
+	for (i = r->base_bdev_info; i < r->base_bdev_info + r->num_base_bdevs; i++)
 
 /*
  * raid_base_bdev_config is the per base bdev data structure which contains
@@ -171,7 +180,7 @@ struct raid_base_bdev_config {
 };
 
 /*
- * raid_bdev_config contains the raid bdev  config related information after
+ * raid_bdev_config contains the raid bdev config related information after
  * parsing the config file
  */
 struct raid_bdev_config {
@@ -253,6 +262,15 @@ struct raid_bdev_module {
 	/* RAID level implemented by this module */
 	enum raid_level level;
 
+	/* Minimum required number of base bdevs. Must be > 0. */
+	uint8_t base_bdevs_min;
+
+	/*
+	 * Maximum number of base bdevs that can be removed without failing
+	 * the array.
+	 */
+	uint8_t base_bdevs_max_degraded;
+
 	/*
 	 * Called when the raid is starting, right before changing the state to
 	 * online and registering the bdev. Parameters of the bdev like blockcnt
@@ -271,7 +289,7 @@ struct raid_bdev_module {
 	/* Handler for R/W requests */
 	void (*submit_rw_request)(struct raid_bdev_io *raid_io);
 
-	/* Handler for requests without payload (flush, unmap) */
+	/* Handler for requests without payload (flush, unmap). Optional. */
 	void (*submit_null_payload_request)(struct raid_bdev_io *raid_io);
 
 	TAILQ_ENTRY(raid_bdev_module) link;
@@ -289,8 +307,9 @@ __RAID_MODULE_REGISTER(__LINE__)(void)					\
     raid_bdev_module_list_add(_module);					\
 }
 
-void
-raid_bdev_base_io_completion(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg);
+bool
+raid_bdev_io_complete_part(struct raid_bdev_io *raid_io, uint64_t completed,
+			   enum spdk_bdev_io_status status);
 void
 raid_bdev_queue_io_wait(struct raid_bdev_io *raid_io, struct spdk_bdev *bdev,
 			struct spdk_io_channel *ch, spdk_bdev_io_wait_cb cb_fn);

@@ -38,7 +38,6 @@
 #include "spdk/barrier.h"
 #include "spdk/bdev.h"
 #include "spdk/bdev_module.h"
-#include "spdk/conf.h"
 #include "spdk/env.h"
 #include "spdk/fd.h"
 #include "spdk/likely.h"
@@ -47,8 +46,9 @@
 #include "spdk/util.h"
 #include "spdk/string.h"
 
-#include "spdk_internal/log.h"
+#include "spdk/log.h"
 
+#include <sys/eventfd.h>
 #include <libaio.h>
 
 // zhou: "AIO bdev module can now reap I/O completions directly from userspace,
@@ -58,16 +58,6 @@
 struct bdev_aio_io_channel {
     // zhou: outstanding IO number.
 	uint64_t				io_inflight;
-
-    // zhou: refer to shared "struct bdev_aio_group_channel" of this thread.
-	struct bdev_aio_group_channel		*group_ch;
-};
-
-// zhou: I/O device for this subsystem's I/O channel private workspace.
-struct bdev_aio_group_channel {
-    // zhou: poller for per thread.
-	struct spdk_poller			*poller;
-
     // zhou: shared by all underlying device within this thread.
     //       Only SPDK_AIO_QUEUE_DEPTH allocated for this context.
     //
@@ -75,6 +65,21 @@ struct bdev_aio_group_channel {
     //       Because, "poller" has to poll more than one "io_context_t",
     //       althrough it's not a big problem.
 	io_context_t				io_ctx;
+    // zhou: refer to shared "struct bdev_aio_group_channel" of this thread.
+	struct bdev_aio_group_channel		*group_ch;
+	TAILQ_ENTRY(bdev_aio_io_channel)	link;
+};
+
+// zhou: I/O device for this subsystem's I/O channel private workspace.
+struct bdev_aio_group_channel {
+	/* eventfd for io completion notification in interrupt mode.
+	 * Negative value like '-1' indicates it is invalid or unused.
+	 */
+	int					efd;
+	struct spdk_interrupt			*intr;
+    // zhou: poller for per thread.
+	struct spdk_poller			*poller;
+	TAILQ_HEAD(, bdev_aio_io_channel)	io_ch_head;
 };
 
 // zhou: driver workspace for each "struct spdk_bdev_io".
@@ -121,10 +126,8 @@ struct spdk_aio_ring {
 static int bdev_aio_initialize(void);
 static void bdev_aio_fini(void);
 static void aio_free_disk(struct file_disk *fdisk);
-static void bdev_aio_get_spdk_running_config(FILE *fp);
-
 // zhou: list header with type "struct file_disk"
-static TAILQ_HEAD(, file_disk) g_aio_disk_head;
+static TAILQ_HEAD(, file_disk) g_aio_disk_head = TAILQ_HEAD_INITIALIZER(g_aio_disk_head);
 
 // zhou: where 128 comes from?
 #define SPDK_AIO_QUEUE_DEPTH 128
@@ -142,7 +145,6 @@ static struct spdk_bdev_module aio_if = {
 	.name		= "aio",
 	.module_init	= bdev_aio_initialize,
 	.module_fini	= bdev_aio_fini,
-	.config_text	= bdev_aio_get_spdk_running_config,
 	.get_ctx_size	= bdev_aio_get_ctx_size,
 };
 
@@ -206,22 +208,24 @@ bdev_aio_readv(struct file_disk *fdisk, struct spdk_io_channel *ch,
 
     // zhou: libaio support scatter memory.
 	io_prep_preadv(iocb, fdisk->fd, iov, iovcnt, offset);
-
+	if (aio_ch->group_ch->efd >= 0) {
+		io_set_eventfd(iocb, aio_ch->group_ch->efd);
+	}
     // zhou: struct iocb.data, context for io_submit()
 	iocb->data = aio_task;
 	aio_task->len = nbytes;
 	aio_task->ch = aio_ch;
 
-	SPDK_DEBUGLOG(SPDK_LOG_AIO, "read %d iovs size %lu to off: %#lx\n",
+	SPDK_DEBUGLOG(aio, "read %d iovs size %lu to off: %#lx\n",
 		      iovcnt, nbytes, offset);
 
     // zhou: will not submit several IO at one time.
-	rc = io_submit(aio_ch->group_ch->io_ctx, 1, &iocb);
+	rc = io_submit(aio_ch->io_ctx, 1, &iocb);
 	if (rc < 0) {
 		if (rc == -EAGAIN) {
 			spdk_bdev_io_complete(spdk_bdev_io_from_ctx(aio_task), SPDK_BDEV_IO_STATUS_NOMEM);
 		} else {
-			spdk_bdev_io_complete(spdk_bdev_io_from_ctx(aio_task), SPDK_BDEV_IO_STATUS_FAILED);
+			spdk_bdev_io_complete_aio_status(spdk_bdev_io_from_ctx(aio_task), rc);
 			SPDK_ERRLOG("%s: io_submit returned %d\n", __func__, rc);
 		}
 		return -1;
@@ -242,19 +246,22 @@ bdev_aio_writev(struct file_disk *fdisk, struct spdk_io_channel *ch,
 	int rc;
 
 	io_prep_pwritev(iocb, fdisk->fd, iov, iovcnt, offset);
+	if (aio_ch->group_ch->efd >= 0) {
+		io_set_eventfd(iocb, aio_ch->group_ch->efd);
+	}
 	iocb->data = aio_task;
 	aio_task->len = len;
 	aio_task->ch = aio_ch;
 
-	SPDK_DEBUGLOG(SPDK_LOG_AIO, "write %d iovs size %lu from off: %#lx\n",
+	SPDK_DEBUGLOG(aio, "write %d iovs size %lu from off: %#lx\n",
 		      iovcnt, len, offset);
 
-	rc = io_submit(aio_ch->group_ch->io_ctx, 1, &iocb);
+	rc = io_submit(aio_ch->io_ctx, 1, &iocb);
 	if (rc < 0) {
 		if (rc == -EAGAIN) {
 			spdk_bdev_io_complete(spdk_bdev_io_from_ctx(aio_task), SPDK_BDEV_IO_STATUS_NOMEM);
 		} else {
-			spdk_bdev_io_complete(spdk_bdev_io_from_ctx(aio_task), SPDK_BDEV_IO_STATUS_FAILED);
+			spdk_bdev_io_complete_aio_status(spdk_bdev_io_from_ctx(aio_task), rc);
 			SPDK_ERRLOG("%s: io_submit returned %d\n", __func__, rc);
 		}
 		return -1;
@@ -268,8 +275,11 @@ bdev_aio_flush(struct file_disk *fdisk, struct bdev_aio_task *aio_task)
 {
 	int rc = fsync(fdisk->fd);
 
-	spdk_bdev_io_complete(spdk_bdev_io_from_ctx(aio_task),
-			      rc == 0 ? SPDK_BDEV_IO_STATUS_SUCCESS : SPDK_BDEV_IO_STATUS_FAILED);
+	if (rc == 0) {
+		spdk_bdev_io_complete(spdk_bdev_io_from_ctx(aio_task), SPDK_BDEV_IO_STATUS_SUCCESS);
+	} else {
+		spdk_bdev_io_complete_aio_status(spdk_bdev_io_from_ctx(aio_task), -errno);
+	}
 }
 
 static int
@@ -361,39 +371,88 @@ bdev_user_io_getevents(io_context_t io_ctx, unsigned int max, struct io_event *u
 
 // zhou: main loop of IO function for per thread,
 static int
-bdev_aio_group_poll(void *arg)
+bdev_aio_io_channel_poll(struct bdev_aio_io_channel *io_ch)
 {
-	struct bdev_aio_group_channel *group_ch = arg;
 	int nr, i = 0;
-	enum spdk_bdev_io_status status;
 	struct bdev_aio_task *aio_task;
 	struct io_event events[SPDK_AIO_QUEUE_DEPTH];
+	uint64_t io_result;
 
     // zhou: all AIO disk will share one "io_ctx" in one thread.
-	nr = bdev_user_io_getevents(group_ch->io_ctx, SPDK_AIO_QUEUE_DEPTH, events);
+	nr = bdev_user_io_getevents(io_ch->io_ctx, SPDK_AIO_QUEUE_DEPTH, events);
 
 	if (nr < 0) {
-		return -1;
+		return 0;
 	}
 
+#define MAX_AIO_ERRNO 256
 	for (i = 0; i < nr; i++) {
         // zhou: with io_submit() context, get "struct bdev_aio_task" which allocated
         //       with "struct spdk_bdev_io".
 		aio_task = events[i].data;
+		aio_task->ch->io_inflight--;
 
         //       io_submit() must return all data request, otherwise means error happen!!!
-		if (events[i].res != aio_task->len) {
-			status = SPDK_BDEV_IO_STATUS_FAILED;
+
+		io_result = events[i].res;
+		if (io_result == aio_task->len) {
+			spdk_bdev_io_complete(spdk_bdev_io_from_ctx(aio_task), SPDK_BDEV_IO_STATUS_SUCCESS);
+		} else if (io_result < MAX_AIO_ERRNO) {
+			/* Linux AIO will return its errno to io_event.res */
+			int aio_errno = io_result;
+
+			spdk_bdev_io_complete_aio_status(spdk_bdev_io_from_ctx(aio_task), -aio_errno);
 		} else {
-			status = SPDK_BDEV_IO_STATUS_SUCCESS;
+			SPDK_ERRLOG("failed to complete aio: requested len is %lu, but completed len is %lu.\n",
+				    aio_task->len, io_result);
+			spdk_bdev_io_complete(spdk_bdev_io_from_ctx(aio_task), SPDK_BDEV_IO_STATUS_FAILED);
 		}
-
-		spdk_bdev_io_complete(spdk_bdev_io_from_ctx(aio_task), status);
-
-		aio_task->ch->io_inflight--;
 	}
 
 	return nr;
+}
+
+static int
+bdev_aio_group_poll(void *arg)
+{
+	struct bdev_aio_group_channel *group_ch = arg;
+	struct bdev_aio_io_channel *io_ch;
+	int nr = 0;
+
+	TAILQ_FOREACH(io_ch, &group_ch->io_ch_head, link) {
+		nr += bdev_aio_io_channel_poll(io_ch);
+	}
+
+	return nr > 0 ? SPDK_POLLER_BUSY : SPDK_POLLER_IDLE;
+}
+
+static int
+bdev_aio_group_interrupt(void *arg)
+{
+	struct bdev_aio_group_channel *group_ch = arg;
+	int rc;
+	uint64_t num_events;
+
+	assert(group_ch->efd >= 0);
+
+	/* if completed IO number is larger than SPDK_AIO_QUEUE_DEPTH,
+	 * io_getevent should be called again to ensure all completed IO are processed.
+	 */
+	rc = read(group_ch->efd, &num_events, sizeof(num_events));
+	if (rc < 0) {
+		SPDK_ERRLOG("failed to acknowledge aio group: %s.\n", spdk_strerror(errno));
+		return -errno;
+	}
+
+	if (num_events > SPDK_AIO_QUEUE_DEPTH) {
+		num_events -= SPDK_AIO_QUEUE_DEPTH;
+		rc = write(group_ch->efd, &num_events, sizeof(num_events));
+		if (rc < 0) {
+			SPDK_ERRLOG("failed to notify aio group: %s.\n", spdk_strerror(errno));
+		}
+	}
+
+	return bdev_aio_group_poll(group_ch);
 }
 
 static void
@@ -422,7 +481,7 @@ _bdev_aio_get_io_inflight_done(struct spdk_io_channel_iter *i, int status)
 
     // zhou: need to check again for a while.
 	if (status == -1) {
-		fdisk->reset_retry_timer = spdk_poller_register(bdev_aio_reset_retry_timer, fdisk, 500);
+		fdisk->reset_retry_timer = SPDK_POLLER_REGISTER(bdev_aio_reset_retry_timer, fdisk, 500);
 		return;
 	}
 
@@ -446,7 +505,7 @@ bdev_aio_reset_retry_timer(void *arg)
 			      fdisk,
 			      _bdev_aio_get_io_inflight_done);
 
-	return -1;
+	return SPDK_POLLER_BUSY;
 }
 
 static void
@@ -553,9 +612,16 @@ bdev_aio_create_cb(void *io_device, void *ctx_buf)
 {
 	struct bdev_aio_io_channel *ch = ctx_buf;
 
+	if (io_setup(SPDK_AIO_QUEUE_DEPTH, &ch->io_ctx) < 0) {
+		SPDK_ERRLOG("async I/O context setup failure\n");
+		return -1;
+	}
+
     // zhou: just fetch the shared "struct bdev_aio_group_channel" which is I/O channel
     //       of AIO subsystem I/O device.
+
 	ch->group_ch = spdk_io_channel_get_ctx(spdk_get_io_channel(&aio_if));
+	TAILQ_INSERT_TAIL(&ch->group_ch->io_ch_head, ch, link);
 
 	return 0;
 }
@@ -564,6 +630,11 @@ static void
 bdev_aio_destroy_cb(void *io_device, void *ctx_buf)
 {
 	struct bdev_aio_io_channel *ch = ctx_buf;
+
+	io_destroy(ch->io_ctx);
+
+	assert(ch->group_ch);
+	TAILQ_REMOVE(&ch->group_ch->io_ch_head, ch, link);
 
 	spdk_put_io_channel(spdk_io_channel_from_ctx(ch->group_ch));
 }
@@ -639,19 +710,47 @@ static void aio_free_disk(struct file_disk *fdisk)
 }
 
 static int
+bdev_aio_register_interrupt(struct bdev_aio_group_channel *ch)
+{
+	int efd;
+
+	efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+	if (efd < 0) {
+		return -1;
+	}
+
+	ch->intr = SPDK_INTERRUPT_REGISTER(efd, bdev_aio_group_interrupt, ch);
+	if (ch->intr == NULL) {
+		close(efd);
+		return -1;
+	}
+	ch->efd = efd;
+
+	return 0;
+}
+
+static void
+bdev_aio_unregister_interrupt(struct bdev_aio_group_channel *ch)
+{
+	spdk_interrupt_unregister(&ch->intr);
+	close(ch->efd);
+	ch->efd = -1;
+}
+
+static int
 bdev_aio_group_create_cb(void *io_device, void *ctx_buf)
 {
 	struct bdev_aio_group_channel *ch = ctx_buf;
 
-    // zhou: queue depth 128 for all underlying IO of this thread.
-	if (io_setup(SPDK_AIO_QUEUE_DEPTH, &ch->io_ctx) < 0) {
+	TAILQ_INIT(&ch->io_ch_head);
+	/* Initialize ch->efd to be invalid and unused. */
+	ch->efd = -1;
 
-		SPDK_ERRLOG("async I/O context setup failure\n");
-		return -1;
+	if (spdk_interrupt_mode_is_enabled()) {
+		return bdev_aio_register_interrupt(ch);
 	}
-
     // zhou: epoll fd polling will run repeatly.
-	ch->poller = spdk_poller_register(bdev_aio_group_poll, ch, 0);
+	ch->poller = SPDK_POLLER_REGISTER(bdev_aio_group_poll, ch, 0);
 
 	return 0;
 }
@@ -661,7 +760,14 @@ bdev_aio_group_destroy_cb(void *io_device, void *ctx_buf)
 {
 	struct bdev_aio_group_channel *ch = ctx_buf;
 
-	io_destroy(ch->io_ctx);
+	if (!TAILQ_EMPTY(&ch->io_ch_head)) {
+		SPDK_ERRLOG("Group channel of bdev aio has uncleared io channel\n");
+	}
+
+	if (ch->intr) {
+		bdev_aio_unregister_interrupt(ch);
+		return;
+	}
 
 	spdk_poller_unregister(&ch->poller);
 }
@@ -755,7 +861,13 @@ create_aio_bdev(const char *name, const char *filename, uint32_t block_size)
     // zhou: README, why ask READ/WRITE buffer keep align with this value ???
     //       No performance gain here.
     //       I suppose, align with 8 bytes is enough and mandatory.
-	fdisk->disk.required_alignment = spdk_u32log2(block_size);
+
+	if (fdisk->block_size_override && detected_block_size) {
+		fdisk->disk.required_alignment = spdk_u32log2(detected_block_size);
+	} else {
+		fdisk->disk.required_alignment = spdk_u32log2(block_size);
+	}
+>>>>>>> master
 
 	if (disk_size % fdisk->disk.blocklen != 0) {
 		SPDK_ERRLOG("Disk size %" PRIu64 " is not a multiple of block size %" PRIu32 "\n",
@@ -836,62 +948,9 @@ bdev_aio_delete(struct spdk_bdev *bdev, delete_aio_bdev_complete cb_fn, void *cb
 static int
 bdev_aio_initialize(void)
 {
-	size_t i;
-	struct spdk_conf_section *sp;
-	int rc = 0;
-
-	TAILQ_INIT(&g_aio_disk_head);
-
     // zhou: register I/O device using "aio_if" as key.
 	spdk_io_device_register(&aio_if, bdev_aio_group_create_cb, bdev_aio_group_destroy_cb,
-				sizeof(struct bdev_aio_group_channel),
-				"aio_module");
-
-
-    // zhou: all of below, handle configuration file,
-	sp = spdk_conf_find_section(NULL, "AIO");
-	if (!sp) {
-		return 0;
-	}
-
-	i = 0;
-	while (true) {
-		const char *file;
-		const char *name;
-		const char *block_size_str;
-		uint32_t block_size = 0;
-		long int tmp;
-
-		file = spdk_conf_section_get_nmval(sp, "AIO", i, 0);
-		if (!file) {
-			break;
-		}
-
-		name = spdk_conf_section_get_nmval(sp, "AIO", i, 1);
-		if (!name) {
-			SPDK_ERRLOG("No name provided for AIO disk with file %s\n", file);
-			i++;
-			continue;
-		}
-
-		block_size_str = spdk_conf_section_get_nmval(sp, "AIO", i, 2);
-		if (block_size_str) {
-			tmp = spdk_strtol(block_size_str, 10);
-			if (tmp < 0) {
-				SPDK_ERRLOG("Invalid block size for AIO disk with file %s\n", file);
-				i++;
-				continue;
-			}
-			block_size = (uint32_t)tmp;
-		}
-
-		rc = create_aio_bdev(name, file, block_size);
-		if (rc) {
-			SPDK_ERRLOG("Unable to create AIO bdev from file %s, err is %s\n", file, spdk_strerror(-rc));
-		}
-
-		i++;
-	}
+				sizeof(struct bdev_aio_group_channel), "aio_module");
 
 	return 0;
 }
@@ -902,36 +961,4 @@ bdev_aio_fini(void)
 	spdk_io_device_unregister(&aio_if, NULL);
 }
 
-static void
-bdev_aio_get_spdk_running_config(FILE *fp)
-{
-	char			*file;
-	char			*name;
-	uint32_t		block_size;
-	struct file_disk	*fdisk;
-
-	fprintf(fp,
-		"\n"
-		"# Users must change this section to match the /dev/sdX devices to be\n"
-		"# exported as iSCSI LUNs. The devices are accessed using Linux AIO.\n"
-		"# The format is:\n"
-		"# AIO <file name> <bdev name> [<block size>]\n"
-		"# The file name is the backing device\n"
-		"# The bdev name can be referenced from elsewhere in the configuration file.\n"
-		"# Block size may be omitted to automatically detect the block size of a disk.\n"
-		"[AIO]\n");
-
-	TAILQ_FOREACH(fdisk, &g_aio_disk_head, link) {
-		file = fdisk->filename;
-		name = fdisk->disk.name;
-		block_size = fdisk->disk.blocklen;
-		fprintf(fp, "  AIO %s %s ", file, name);
-		if (fdisk->block_size_override) {
-			fprintf(fp, "%d", block_size);
-		}
-		fprintf(fp, "\n");
-	}
-	fprintf(fp, "\n");
-}
-
-SPDK_LOG_REGISTER_COMPONENT("aio", SPDK_LOG_AIO)
+SPDK_LOG_REGISTER_COMPONENT(aio)

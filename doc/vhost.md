@@ -91,13 +91,13 @@ be restricted to run on a subset of these CPU cores. See @ref vhost_vdev_create 
 details.
 
 ~~~{.sh}
-app/vhost/vhost -S /var/tmp -m 0x3
+build/bin/vhost -S /var/tmp -m 0x3
 ~~~
 
 To list all available vhost options use the following command.
 
 ~~~{.sh}
-app/vhost/vhost -h
+build/bin/vhost -h
 ~~~
 
 # SPDK Configuration {#vhost_config}
@@ -105,7 +105,7 @@ app/vhost/vhost -h
 ## Create bdev (block device) {#vhost_bdev_create}
 
 SPDK bdevs are block devices which will be exposed to the guest OS.
-For vhost-scsi, bdevs are exposed as as SCSI LUNs on SCSI devices attached to the
+For vhost-scsi, bdevs are exposed as SCSI LUNs on SCSI devices attached to the
 vhost-scsi controller in the guest OS.
 For vhost-blk, bdevs are exposed directly as block devices in the guest OS and are
 not associated at all with SCSI.
@@ -171,26 +171,6 @@ extra `-r` or `--readonly` parameter.
 scripts/rpc.py vhost_create_blk_controller --cpumask 0x1 -r vhost.1 Malloc0
 ~~~
 
-### Vhost-NVMe (experimental)
-
-The following RPC will attach the Malloc0 bdev to the vhost.0 vhost-nvme
-controller. Malloc0 will appear as Namespace 1 of vhost.0 controller. Users
-can use `--cpumask` parameter to specify which cores should be used for this
-controller. Users must specify the maximum I/O queues supported for the
-controller, at least 1 Namespace is required for each controller.
-
-~~~{.sh}
-$rpc_py vhost_create_nvme_controller --cpumask 0x1 vhost.2 16
-$rpc_py vhost_nvme_controller_add_ns vhost.2 Malloc0
-~~~
-
-Users can use the following command to remove the controller, all the block
-devices attached to controller's Namespace will be removed automatically.
-
-~~~{.sh}
-$rpc_py vhost_delete_controller vhost.2
-~~~
-
 ## QEMU {#vhost_qemu_config}
 
 Now the virtual machine can be started with QEMU.  The following command-line
@@ -229,13 +209,6 @@ Finally, specify the SPDK vhost devices:
 -device vhost-user-blk-pci,id=blk0,chardev=char1
 ~~~
 
-### Vhost-NVMe (experimental)
-
-~~~{.sh}
--chardev socket,id=char2,path=/var/tmp/vhost.2
--device vhost-user-nvme,id=nvme0,chardev=char2,num_io_queues=4
-~~~
-
 ## Example output {#vhost_example}
 
 This example uses an NVMe bdev alongside Mallocs. SPDK vhost application is started
@@ -247,9 +220,9 @@ host:~# HUGEMEM=2048 ./scripts/setup.sh
 ~~~
 
 ~~~{.sh}
-host:~# ./app/vhost/vhost -S /var/tmp -s 1024 -m 0x3 &
+host:~# ./build/bin/vhost -S /var/tmp -s 1024 -m 0x3 &
 Starting DPDK 17.11.0 initialization...
-[ DPDK EAL parameters: vhost -c 3 -m 1024 --master-lcore=1 --file-prefix=spdk_pid156014 ]
+[ DPDK EAL parameters: vhost -c 3 -m 1024 --main-lcore=1 --file-prefix=spdk_pid156014 ]
 EAL: Detected 48 lcore(s)
 EAL: Probing VFIO support...
 EAL: VFIO support initialized
@@ -337,7 +310,6 @@ vhost.c:1006:session_shutdown: *NOTICE*: Exiting
 We can see that `sdb` and `sdc` are SPDK vhost-scsi LUNs, and `vda` is SPDK a
 vhost-blk disk.
 
-
 # Advanced Topics {#vhost_advanced_topics}
 
 ## Multi-Queue Block Layer (blk-mq) {#vhost_multiqueue}
@@ -347,9 +319,9 @@ To enable it on Linux, it is required to modify kernel options inside the
 virtual machine.
 
 Instructions below for Ubuntu OS:
+
 1. `vi /etc/default/grub`
-2. Make sure mq is enabled:
-`GRUB_CMDLINE_LINUX="scsi_mod.use_blk_mq=1"`
+2. Make sure mq is enabled: `GRUB_CMDLINE_LINUX="scsi_mod.use_blk_mq=1"`
 3. `sudo update-grub`
 4. Reboot virtual machine
 
@@ -374,7 +346,7 @@ be aborted - possibly flooding a VM with syslog warnings and errors.
 
 ### Hot-attach
 
-Hot-attach is is done by simply attaching a bdev to a vhost controller with a QEMU VM
+Hot-attach is done by simply attaching a bdev to a vhost controller with a QEMU VM
 already started. No other extra action is necessary.
 
 ~~~{.sh}
@@ -412,5 +384,6 @@ See the [bug report](https://bugzilla.redhat.com/show_bug.cgi?id=1411092) for
 more information.
 
 ## QEMU vhost-user-blk
+
 QEMU [vhost-user-blk](https://git.qemu.org/?p=qemu.git;a=commit;h=00343e4b54ba) is
 supported from version 2.12.

@@ -23,13 +23,17 @@ def sort_json_object(o):
 
 def filter_methods(do_remove_global_rpcs):
     global_rpcs = [
+        'idxd_scan_accel_engine',
         'iscsi_set_options',
         'nvmf_set_config',
         'nvmf_set_max_subsystems',
         'nvmf_create_transport',
         'bdev_set_options',
+        'bdev_wait_for_examine',
         'bdev_nvme_set_options',
         'bdev_nvme_set_hotplug',
+        'sock_impl_set_options',
+        'sock_set_default_impl',
     ]
 
     data = json.loads(sys.stdin.read())

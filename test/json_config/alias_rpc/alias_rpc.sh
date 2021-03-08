@@ -6,12 +6,12 @@ source $rootdir/test/common/autotest_common.sh
 
 trap 'killprocess $spdk_tgt_pid; exit 1' ERR
 
-$rootdir/app/spdk_tgt/spdk_tgt &
+$SPDK_BIN_DIR/spdk_tgt &
 spdk_tgt_pid=$!
 waitforlisten $spdk_tgt_pid
 
 # Test deprecated rpcs in json
-cat $testdir/conf.json | $rootdir/scripts/rpc.py load_config -i
+$rootdir/scripts/rpc.py load_config -i < $testdir/conf.json
 
 # Test deprecated rpcs in rpc.py
 $rootdir/scripts/rpc.py delete_malloc_bdev "Malloc0"

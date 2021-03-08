@@ -42,8 +42,6 @@
 #include "blobfs/tree.c"
 #include "blob/blobstore.h"
 
-#include "spdk_internal/thread.h"
-
 #include "unit/lib/blob/bs_dev_common.c"
 
 struct spdk_filesystem *g_fs;
@@ -57,20 +55,6 @@ DEFINE_STUB_V(spdk_trace_register_description, (const char *name,
 		uint8_t arg1_is_ptr, const char *arg1_name));
 DEFINE_STUB_V(_spdk_trace_record, (uint64_t tsc, uint16_t tpoint_id, uint16_t poller_id,
 				   uint32_t size, uint64_t object_id, uint64_t arg1));
-
-/* Return NULL to test hardcoded defaults. */
-struct spdk_conf_section *
-spdk_conf_find_section(struct spdk_conf *cp, const char *name)
-{
-	return NULL;
-}
-
-/* Return -1 to test hardcoded defaults. */
-int
-spdk_conf_section_get_intval(struct spdk_conf_section *sp, const char *key)
-{
-	return -1;
-}
 
 static void
 fs_op_complete(void *ctx, int fserrno)
@@ -86,6 +70,13 @@ fs_op_with_handle_complete(void *ctx, struct spdk_filesystem *fs, int fserrno)
 }
 
 static void
+fs_poll_threads(void)
+{
+	poll_threads();
+	while (spdk_thread_poll(g_cache_pool_thread, 0, 0) > 0) {}
+}
+
+static void
 fs_init(void)
 {
 	struct spdk_filesystem *fs;
@@ -94,7 +85,7 @@ fs_init(void)
 	dev = init_dev();
 
 	spdk_fs_init(dev, NULL, NULL, fs_op_with_handle_complete, NULL);
-	poll_threads();
+	fs_poll_threads();
 	SPDK_CU_ASSERT_FATAL(g_fs != NULL);
 	CU_ASSERT(g_fserrno == 0);
 	fs = g_fs;
@@ -102,7 +93,7 @@ fs_init(void)
 
 	g_fserrno = 1;
 	spdk_fs_unload(fs, fs_op_complete, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == 0);
 }
 
@@ -138,7 +129,7 @@ fs_open(void)
 	memset(name, 'a', sizeof(name) - 1);
 
 	spdk_fs_init(dev, NULL, NULL, fs_op_with_handle_complete, NULL);
-	poll_threads();
+	fs_poll_threads();
 	SPDK_CU_ASSERT_FATAL(g_fs != NULL);
 	CU_ASSERT(g_fserrno == 0);
 	fs = g_fs;
@@ -147,18 +138,18 @@ fs_open(void)
 	g_fserrno = 0;
 	/* Open should fail, because the file name is too long. */
 	spdk_fs_open_file_async(fs, name, SPDK_BLOBFS_OPEN_CREATE, open_cb, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == -ENAMETOOLONG);
 
 	g_fserrno = 0;
 	spdk_fs_open_file_async(fs, "file1", 0, open_cb, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == -ENOENT);
 
 	g_file = NULL;
 	g_fserrno = 1;
 	spdk_fs_open_file_async(fs, "file1", SPDK_BLOBFS_OPEN_CREATE, open_cb, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == 0);
 	SPDK_CU_ASSERT_FATAL(g_file != NULL);
 	CU_ASSERT(!strcmp("file1", g_file->name));
@@ -175,19 +166,19 @@ fs_open(void)
 	g_fserrno = 0;
 	/* Delete should successful, we will mark the file as deleted. */
 	spdk_fs_delete_file_async(fs, "file1", delete_cb, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == 0);
 	CU_ASSERT(!TAILQ_EMPTY(&fs->files));
 
 	g_fserrno = 1;
 	spdk_file_close_async(g_file, fs_op_complete, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == 0);
 	CU_ASSERT(TAILQ_EMPTY(&fs->files));
 
 	g_fserrno = 1;
 	spdk_fs_unload(fs, fs_op_complete, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == 0);
 }
 
@@ -202,7 +193,7 @@ fs_create(void)
 	memset(name, 'a', sizeof(name) - 1);
 
 	spdk_fs_init(dev, NULL, NULL, fs_op_with_handle_complete, NULL);
-	poll_threads();
+	fs_poll_threads();
 	SPDK_CU_ASSERT_FATAL(g_fs != NULL);
 	CU_ASSERT(g_fserrno == 0);
 	fs = g_fs;
@@ -211,28 +202,28 @@ fs_create(void)
 	g_fserrno = 0;
 	/* Create should fail, because the file name is too long. */
 	spdk_fs_create_file_async(fs, name, create_cb, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == -ENAMETOOLONG);
 
 	g_fserrno = 1;
 	spdk_fs_create_file_async(fs, "file1", create_cb, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == 0);
 
 	g_fserrno = 1;
 	spdk_fs_create_file_async(fs, "file1", create_cb, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == -EEXIST);
 
 	g_fserrno = 1;
 	spdk_fs_delete_file_async(fs, "file1", delete_cb, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == 0);
 	CU_ASSERT(TAILQ_EMPTY(&fs->files));
 
 	g_fserrno = 1;
 	spdk_fs_unload(fs, fs_op_complete, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == 0);
 }
 
@@ -245,7 +236,7 @@ fs_truncate(void)
 	dev = init_dev();
 
 	spdk_fs_init(dev, NULL, NULL, fs_op_with_handle_complete, NULL);
-	poll_threads();
+	fs_poll_threads();
 	SPDK_CU_ASSERT_FATAL(g_fs != NULL);
 	CU_ASSERT(g_fserrno == 0);
 	fs = g_fs;
@@ -254,43 +245,43 @@ fs_truncate(void)
 	g_file = NULL;
 	g_fserrno = 1;
 	spdk_fs_open_file_async(fs, "file1", SPDK_BLOBFS_OPEN_CREATE, open_cb, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == 0);
 	SPDK_CU_ASSERT_FATAL(g_file != NULL);
 
 	g_fserrno = 1;
 	spdk_file_truncate_async(g_file, 18 * 1024 * 1024 + 1, fs_op_complete, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == 0);
 	CU_ASSERT(g_file->length == 18 * 1024 * 1024 + 1);
 
 	g_fserrno = 1;
 	spdk_file_truncate_async(g_file, 1, fs_op_complete, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == 0);
 	CU_ASSERT(g_file->length == 1);
 
 	g_fserrno = 1;
 	spdk_file_truncate_async(g_file, 18 * 1024 * 1024 + 1, fs_op_complete, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == 0);
 	CU_ASSERT(g_file->length == 18 * 1024 * 1024 + 1);
 
 	g_fserrno = 1;
 	spdk_file_close_async(g_file, fs_op_complete, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == 0);
 	CU_ASSERT(g_file->ref_count == 0);
 
 	g_fserrno = 1;
 	spdk_fs_delete_file_async(fs, "file1", delete_cb, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == 0);
 	CU_ASSERT(TAILQ_EMPTY(&fs->files));
 
 	g_fserrno = 1;
 	spdk_fs_unload(fs, fs_op_complete, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == 0);
 }
 
@@ -304,7 +295,7 @@ fs_rename(void)
 	dev = init_dev();
 
 	spdk_fs_init(dev, NULL, NULL, fs_op_with_handle_complete, NULL);
-	poll_threads();
+	fs_poll_threads();
 	SPDK_CU_ASSERT_FATAL(g_fs != NULL);
 	CU_ASSERT(g_fserrno == 0);
 	fs = g_fs;
@@ -312,13 +303,13 @@ fs_rename(void)
 
 	g_fserrno = 1;
 	spdk_fs_create_file_async(fs, "file1", create_cb, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == 0);
 
 	g_file = NULL;
 	g_fserrno = 1;
 	spdk_fs_open_file_async(fs, "file1", 0, open_cb, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == 0);
 	SPDK_CU_ASSERT_FATAL(g_file != NULL);
 	CU_ASSERT(g_file->ref_count == 1);
@@ -327,14 +318,14 @@ fs_rename(void)
 	g_file = NULL;
 	g_fserrno = 1;
 	spdk_file_close_async(file, fs_op_complete, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == 0);
 	SPDK_CU_ASSERT_FATAL(file->ref_count == 0);
 
 	g_file = NULL;
 	g_fserrno = 1;
 	spdk_fs_open_file_async(fs, "file2", SPDK_BLOBFS_OPEN_CREATE, open_cb, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == 0);
 	SPDK_CU_ASSERT_FATAL(g_file != NULL);
 	CU_ASSERT(g_file->ref_count == 1);
@@ -343,7 +334,7 @@ fs_rename(void)
 	g_file = NULL;
 	g_fserrno = 1;
 	spdk_file_close_async(file2, fs_op_complete, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == 0);
 	SPDK_CU_ASSERT_FATAL(file2->ref_count == 0);
 
@@ -353,7 +344,7 @@ fs_rename(void)
 	 */
 	g_fserrno = 1;
 	spdk_fs_rename_file_async(fs, "file1", "file2", fs_op_complete, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == 0);
 	CU_ASSERT(file->ref_count == 0);
 	CU_ASSERT(!strcmp(file->name, "file2"));
@@ -362,7 +353,7 @@ fs_rename(void)
 
 	g_fserrno = 0;
 	spdk_fs_delete_file_async(fs, "file1", delete_cb, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == -ENOENT);
 	CU_ASSERT(!TAILQ_EMPTY(&fs->files));
 	TAILQ_FOREACH(file_iter, &fs->files, tailq) {
@@ -373,13 +364,13 @@ fs_rename(void)
 
 	g_fserrno = 1;
 	spdk_fs_delete_file_async(fs, "file2", delete_cb, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == 0);
 	CU_ASSERT(TAILQ_EMPTY(&fs->files));
 
 	g_fserrno = 1;
 	spdk_fs_unload(fs, fs_op_complete, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == 0);
 }
 
@@ -394,7 +385,7 @@ fs_rw_async(void)
 	dev = init_dev();
 
 	spdk_fs_init(dev, NULL, NULL, fs_op_with_handle_complete, NULL);
-	poll_threads();
+	fs_poll_threads();
 	SPDK_CU_ASSERT_FATAL(g_fs != NULL);
 	CU_ASSERT(g_fserrno == 0);
 	fs = g_fs;
@@ -403,7 +394,7 @@ fs_rw_async(void)
 	g_file = NULL;
 	g_fserrno = 1;
 	spdk_fs_open_file_async(fs, "file1", SPDK_BLOBFS_OPEN_CREATE, open_cb, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == 0);
 	SPDK_CU_ASSERT_FATAL(g_file != NULL);
 
@@ -413,7 +404,7 @@ fs_rw_async(void)
 	memset(w_buf, 0x5a, sizeof(w_buf));
 	spdk_file_write_async(g_file, fs->sync_target.sync_io_channel, w_buf, 0, 4096,
 			      fs_op_complete, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == 0);
 	CU_ASSERT(g_file->length == 4096);
 
@@ -422,18 +413,18 @@ fs_rw_async(void)
 	memset(r_buf, 0x0, sizeof(r_buf));
 	spdk_file_read_async(g_file, fs->sync_target.sync_io_channel, r_buf, 0, 4096,
 			     fs_op_complete, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == 0);
 	CU_ASSERT(memcmp(r_buf, w_buf, sizeof(r_buf)) == 0);
 
 	g_fserrno = 1;
 	spdk_file_close_async(g_file, fs_op_complete, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == 0);
 
 	g_fserrno = 1;
 	spdk_fs_unload(fs, fs_op_complete, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == 0);
 }
 
@@ -450,7 +441,7 @@ fs_writev_readv_async(void)
 	dev = init_dev();
 
 	spdk_fs_init(dev, NULL, NULL, fs_op_with_handle_complete, NULL);
-	poll_threads();
+	fs_poll_threads();
 	SPDK_CU_ASSERT_FATAL(g_fs != NULL);
 	CU_ASSERT(g_fserrno == 0);
 	fs = g_fs;
@@ -459,7 +450,7 @@ fs_writev_readv_async(void)
 	g_file = NULL;
 	g_fserrno = 1;
 	spdk_fs_open_file_async(fs, "file1", SPDK_BLOBFS_OPEN_CREATE, open_cb, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == 0);
 	SPDK_CU_ASSERT_FATAL(g_file != NULL);
 
@@ -473,7 +464,7 @@ fs_writev_readv_async(void)
 	w_iov[1].iov_len = 2048;
 	spdk_file_writev_async(g_file, fs->sync_target.sync_io_channel,
 			       w_iov, 2, 0, 4096, fs_op_complete, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == 0);
 	CU_ASSERT(g_file->length == 4096);
 
@@ -486,7 +477,7 @@ fs_writev_readv_async(void)
 	r_iov[1].iov_len = 2048;
 	spdk_file_readv_async(g_file, fs->sync_target.sync_io_channel,
 			      r_iov, 2, 0, 4096, fs_op_complete, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == 0);
 	CU_ASSERT(memcmp(r_buf, w_buf, sizeof(r_buf)) == 0);
 
@@ -499,7 +490,7 @@ fs_writev_readv_async(void)
 	w_iov[1].iov_len = 2048;
 	spdk_file_writev_async(g_file, fs->sync_target.sync_io_channel,
 			       w_iov, 2, 0, 4096, fs_op_complete, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == 0);
 	CU_ASSERT(g_file->length == 4096);
 
@@ -512,18 +503,18 @@ fs_writev_readv_async(void)
 	r_iov[1].iov_len = 2048;
 	spdk_file_readv_async(g_file, fs->sync_target.sync_io_channel,
 			      r_iov, 2, 0, 4096, fs_op_complete, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == 0);
 	CU_ASSERT(memcmp(r_buf, w_buf, sizeof(r_buf)) == 0);
 
 	g_fserrno = 1;
 	spdk_file_close_async(g_file, fs_op_complete, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == 0);
 
 	g_fserrno = 1;
 	spdk_fs_unload(fs, fs_op_complete, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == 0);
 }
 
@@ -569,38 +560,38 @@ tree_find_buffer_ut(void)
 	level1_0->u.tree[12] = level0_0_12;
 	level1_0->present_mask |= (1ULL << 12);
 
-	buffer = spdk_tree_find_buffer(NULL, 0);
+	buffer = tree_find_buffer(NULL, 0);
 	CU_ASSERT(buffer == NULL);
 
-	buffer = spdk_tree_find_buffer(level0_0_0, 0);
+	buffer = tree_find_buffer(level0_0_0, 0);
 	CU_ASSERT(buffer == NULL);
 
-	buffer = spdk_tree_find_buffer(level0_0_0, CACHE_TREE_LEVEL_SIZE(0) + 1);
+	buffer = tree_find_buffer(level0_0_0, CACHE_TREE_LEVEL_SIZE(0) + 1);
 	CU_ASSERT(buffer == NULL);
 
-	buffer = spdk_tree_find_buffer(level0_0_0, leaf_0_0_4->offset);
+	buffer = tree_find_buffer(level0_0_0, leaf_0_0_4->offset);
 	CU_ASSERT(buffer == leaf_0_0_4);
 
-	buffer = spdk_tree_find_buffer(level1_0, leaf_0_0_4->offset);
+	buffer = tree_find_buffer(level1_0, leaf_0_0_4->offset);
 	CU_ASSERT(buffer == leaf_0_0_4);
 
-	buffer = spdk_tree_find_buffer(level1_0, leaf_0_12_8->offset);
+	buffer = tree_find_buffer(level1_0, leaf_0_12_8->offset);
 	CU_ASSERT(buffer == leaf_0_12_8);
 
-	buffer = spdk_tree_find_buffer(level1_0, leaf_0_12_8->offset + CACHE_BUFFER_SIZE - 1);
+	buffer = tree_find_buffer(level1_0, leaf_0_12_8->offset + CACHE_BUFFER_SIZE - 1);
 	CU_ASSERT(buffer == leaf_0_12_8);
 
-	buffer = spdk_tree_find_buffer(level1_0, leaf_0_12_8->offset - 1);
+	buffer = tree_find_buffer(level1_0, leaf_0_12_8->offset - 1);
 	CU_ASSERT(buffer == NULL);
 
 	leaf_9_23_15->offset = CACHE_TREE_LEVEL_SIZE(2) * 9 +
 			       CACHE_TREE_LEVEL_SIZE(1) * 23 +
 			       CACHE_BUFFER_SIZE * 15;
-	root = spdk_tree_insert_buffer(level1_0, leaf_9_23_15);
+	root = tree_insert_buffer(level1_0, leaf_9_23_15);
 	CU_ASSERT(root != level1_0);
-	buffer = spdk_tree_find_buffer(root, leaf_9_23_15->offset);
+	buffer = tree_find_buffer(root, leaf_9_23_15->offset);
 	CU_ASSERT(buffer == leaf_9_23_15);
-	spdk_tree_free_buffers(root);
+	tree_free_buffers(root);
 	free(root);
 }
 
@@ -614,7 +605,7 @@ channel_ops(void)
 	dev = init_dev();
 
 	spdk_fs_init(dev, NULL, NULL, fs_op_with_handle_complete, NULL);
-	poll_threads();
+	fs_poll_threads();
 	SPDK_CU_ASSERT_FATAL(g_fs != NULL);
 	CU_ASSERT(g_fserrno == 0);
 	fs = g_fs;
@@ -627,7 +618,7 @@ channel_ops(void)
 
 	g_fserrno = 1;
 	spdk_fs_unload(fs, fs_op_complete, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == 0);
 	g_fs = NULL;
 }
@@ -642,7 +633,7 @@ channel_ops_sync(void)
 	dev = init_dev();
 
 	spdk_fs_init(dev, NULL, NULL, fs_op_with_handle_complete, NULL);
-	poll_threads();
+	fs_poll_threads();
 	SPDK_CU_ASSERT_FATAL(g_fs != NULL);
 	CU_ASSERT(g_fserrno == 0);
 	fs = g_fs;
@@ -655,7 +646,7 @@ channel_ops_sync(void)
 
 	g_fserrno = 1;
 	spdk_fs_unload(fs, fs_op_complete, NULL);
-	poll_threads();
+	fs_poll_threads();
 	CU_ASSERT(g_fserrno == 0);
 	g_fs = NULL;
 }
@@ -665,31 +656,21 @@ int main(int argc, char **argv)
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	if (CU_initialize_registry() != CUE_SUCCESS) {
-		return CU_get_error();
-	}
+	CU_set_error_action(CUEA_ABORT);
+	CU_initialize_registry();
 
 	suite = CU_add_suite("blobfs_async_ut", NULL, NULL);
-	if (suite == NULL) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
 
-	if (
-		CU_add_test(suite, "fs_init", fs_init) == NULL ||
-		CU_add_test(suite, "fs_open", fs_open) == NULL ||
-		CU_add_test(suite, "fs_create", fs_create) == NULL ||
-		CU_add_test(suite, "fs_truncate", fs_truncate) == NULL ||
-		CU_add_test(suite, "fs_rename", fs_rename) == NULL ||
-		CU_add_test(suite, "fs_rw_async", fs_rw_async) == NULL ||
-		CU_add_test(suite, "fs_writev_readv_async", fs_writev_readv_async) == NULL ||
-		CU_add_test(suite, "tree_find_buffer", tree_find_buffer_ut) == NULL ||
-		CU_add_test(suite, "channel_ops", channel_ops) == NULL ||
-		CU_add_test(suite, "channel_ops_sync", channel_ops_sync) == NULL
-	) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
+	CU_ADD_TEST(suite, fs_init);
+	CU_ADD_TEST(suite, fs_open);
+	CU_ADD_TEST(suite, fs_create);
+	CU_ADD_TEST(suite, fs_truncate);
+	CU_ADD_TEST(suite, fs_rename);
+	CU_ADD_TEST(suite, fs_rw_async);
+	CU_ADD_TEST(suite, fs_writev_readv_async);
+	CU_ADD_TEST(suite, tree_find_buffer_ut);
+	CU_ADD_TEST(suite, channel_ops);
+	CU_ADD_TEST(suite, channel_ops_sync);
 
 	allocate_threads(1);
 	set_thread(0);

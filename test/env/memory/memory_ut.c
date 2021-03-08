@@ -51,20 +51,20 @@ DEFINE_STUB(spdk_env_dpdk_external_init, bool, (void), true);
 DEFINE_STUB(rte_mem_event_callback_register, int,
 	    (const char *name, rte_mem_event_callback_t clb, void *arg), 0);
 DEFINE_STUB(rte_mem_virt2iova, rte_iova_t, (const void *virtaddr), 0);
-
-void *
-rte_malloc(const char *type, size_t size, unsigned align)
-{
-	CU_ASSERT(type == NULL);
-	CU_ASSERT(align == 0);
-	return malloc(size);
-}
-
-void
-rte_free(void *ptr)
-{
-	free(ptr);
-}
+DEFINE_STUB(rte_eal_iova_mode, enum rte_iova_mode, (void), RTE_IOVA_VA);
+DEFINE_STUB(rte_vfio_is_enabled, int, (const char *modname), 0);
+DEFINE_STUB(rte_vfio_noiommu_is_enabled, int, (void), 0);
+DEFINE_STUB(rte_memseg_get_fd_thread_unsafe, int, (const struct rte_memseg *ms), 0);
+DEFINE_STUB(rte_memseg_get_fd_offset_thread_unsafe, int,
+	    (const struct rte_memseg *ms, size_t *offset), 0);
+DEFINE_STUB(rte_dev_iterator_init, int, (struct rte_dev_iterator *it, const char *dev_str), 0);
+DEFINE_STUB(rte_dev_iterator_next, struct rte_device *, (struct rte_dev_iterator *it), NULL);
+DEFINE_STUB(rte_dev_event_callback_register, int, (const char *device_name,
+		rte_dev_event_cb_fn cb_fn, void *cb_arg), 0);
+DEFINE_STUB(rte_dev_event_callback_unregister, int, (const char *device_name,
+		rte_dev_event_cb_fn cb_fn, void *cb_arg), 0);
+DEFINE_STUB(rte_dev_event_monitor_start, int, (void), 0);
+DEFINE_STUB(rte_dev_event_monitor_stop, int, (void), 0);
 
 static int
 test_mem_map_notify(void *cb_ctx, struct spdk_mem_map *map,
@@ -503,7 +503,7 @@ main(int argc, char **argv)
 	g_page_array = spdk_bit_array_create(PAGE_ARRAY_SIZE);
 
 	/* Initialize the memory map */
-	if (spdk_mem_map_init(false) < 0) {
+	if (mem_map_init(false) < 0) {
 		return CUE_NOMEMORY;
 	}
 

@@ -339,45 +339,19 @@ bdev_blob_destroy(struct spdk_bs_dev *bs_dev)
 	free(bs_dev);
 }
 
-// zhou: set blobstore backend block device, "struct spdk_bs_dev" represent a
-//       BlobStore backend storage
-//       Used by lvol vbdev_lvs_create() and blobfs spdk_mkfs_run().
-//       Open "struct spdk_bdev", represent as "struct blob_bdev", "struct spdk_bs_dev"
-/*
-	    "spdk_bs_init() requires us to fill out the structure
-	     spdk_bs_dev with a set of callbacks. These callbacks
-	     implement read, write, and other operations on the
-	     underlying disks. As a convenience, a utility function
-	     is provided that creates an spdk_bs_dev that implements
-	     all of the callbacks by forwarding the I/O to the
-	     SPDK bdev layer. Other helper functions are also
-	     available in the blob lib in blob_bdev.c that simply
-	     make it easier to layer blobstore on top of a bdev.
-	     However blobstore can be more tightly integrated into
-	     any lower layer, such as NVMe for example."
- */
-struct spdk_bs_dev *
-spdk_bdev_create_bs_dev(struct spdk_bdev *bdev, spdk_bdev_remove_cb_t remove_cb, void *remove_ctx)
+static struct spdk_bdev *
+bdev_blob_get_base_bdev(struct spdk_bs_dev *bs_dev)
 {
-	struct blob_bdev *b;
-	struct spdk_bdev_desc *desc;
-	int rc;
+	return __get_bdev(bs_dev);
+}
 
-	b = calloc(1, sizeof(*b));
+static void
+blob_bdev_init(struct blob_bdev *b, struct spdk_bdev_desc *desc)
+{
+	struct spdk_bdev *bdev;
 
-	if (b == NULL) {
-		SPDK_ERRLOG("could not allocate blob_bdev\n");
-		return NULL;
-	}
-
-    // zhou: get the bdev handler by open it. Just like file, could be opened
-    //       more than one time. And there is a reference count to prevent shut
-    //       down device until all users close it.
-	rc = spdk_bdev_open(bdev, true, remove_cb, remove_ctx, &desc);
-	if (rc != 0) {
-		free(b);
-		return NULL;
-	}
+	bdev = spdk_bdev_desc_get_bdev(desc);
+	assert(bdev != NULL);
 
 	b->bdev = bdev;
 	b->desc = desc;
@@ -402,39 +376,33 @@ spdk_bdev_create_bs_dev(struct spdk_bdev *bdev, spdk_bdev_remove_cb_t remove_cb,
 	b->bs_dev.writev = bdev_blob_writev;
 	b->bs_dev.write_zeroes = bdev_blob_write_zeroes;
 	b->bs_dev.unmap = bdev_blob_unmap;
-
-	return &b->bs_dev;
+	b->bs_dev.get_base_bdev = bdev_blob_get_base_bdev;
 }
 
-struct spdk_bs_dev *
-spdk_bdev_create_bs_dev_from_desc(struct spdk_bdev_desc *desc)
+int
+spdk_bdev_create_bs_dev_ext(const char *bdev_name, spdk_bdev_event_cb_t event_cb,
+			    void *event_ctx, struct spdk_bs_dev **_bs_dev)
 {
 	struct blob_bdev *b;
-	struct spdk_bdev *bdev;
+	struct spdk_bdev_desc *desc;
+	int rc;
 
 	b = calloc(1, sizeof(*b));
 
 	if (b == NULL) {
 		SPDK_ERRLOG("could not allocate blob_bdev\n");
-		return NULL;
+		return -ENOMEM;
 	}
 
-	bdev = spdk_bdev_desc_get_bdev(desc);
-	assert(bdev != NULL);
+	rc = spdk_bdev_open_ext(bdev_name, true, event_cb, event_ctx, &desc);
+	if (rc != 0) {
+		free(b);
+		return rc;
+	}
 
-	b->bdev = bdev;
-	b->desc = desc;
-	b->bs_dev.blockcnt = spdk_bdev_get_num_blocks(bdev);
-	b->bs_dev.blocklen = spdk_bdev_get_block_size(bdev);
-	b->bs_dev.create_channel = bdev_blob_create_channel;
-	b->bs_dev.destroy_channel = bdev_blob_destroy_channel;
-	b->bs_dev.destroy = bdev_blob_destroy;
-	b->bs_dev.read = bdev_blob_read;
-	b->bs_dev.write = bdev_blob_write;
-	b->bs_dev.readv = bdev_blob_readv;
-	b->bs_dev.writev = bdev_blob_writev;
-	b->bs_dev.write_zeroes = bdev_blob_write_zeroes;
-	b->bs_dev.unmap = bdev_blob_unmap;
+	blob_bdev_init(b, desc);
 
-	return &b->bs_dev;
+	*_bs_dev = &b->bs_dev;
+
+	return 0;
 }

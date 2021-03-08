@@ -32,7 +32,6 @@
  */
 
 #include "spdk/stdinc.h"
-#include "spdk/conf.h"
 #include "spdk/env.h"
 #include "spdk/json.h"
 #include "spdk/event.h"
@@ -1010,7 +1009,7 @@ start_io(void *ctx)
 
 	dev_ctx->timeout_tsc = fuzz_refresh_timeout();
 
-	dev_ctx->poller = spdk_poller_register(poll_dev, dev_ctx, 0);
+	dev_ctx->poller = SPDK_POLLER_REGISTER(poll_dev, dev_ctx, 0);
 	if (dev_ctx->poller == NULL) {
 		return;
 	}
@@ -1041,7 +1040,7 @@ begin_fuzz(void *ctx)
 		goto out;
 	}
 
-	g_run_poller = spdk_poller_register(end_fuzz, NULL, 0);
+	g_run_poller = SPDK_POLLER_REGISTER(end_fuzz, NULL, 0);
 	if (g_run_poller == NULL) {
 		fprintf(stderr, "Failed to register a poller for test completion checking.\n");
 	}
@@ -1113,7 +1112,7 @@ main(int argc, char **argv)
 	struct spdk_app_opts opts = {};
 	int rc;
 
-	spdk_app_opts_init(&opts);
+	spdk_app_opts_init(&opts, sizeof(opts));
 	opts.name = "vhost_fuzz";
 	g_runtime = DEFAULT_RUNTIME;
 

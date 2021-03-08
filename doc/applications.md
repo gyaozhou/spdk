@@ -35,26 +35,22 @@ Param    | Long Param             | Type     | Default                | Descript
 -i       | --shm-id               | integer  |                        | @ref cmd_arg_multi_process
 -m       | --cpumask              | CPU mask | 0x1                    | application @ref cpu_mask
 -n       | --mem-channels         | integer  | all channels           | number of memory channels used for DPDK
--p       | --master-core          | integer  | first core in CPU mask | master (primary) core for DPDK
+-p       | --main-core            | integer  | first core in CPU mask | main (primary) core for DPDK
 -r       | --rpc-socket           | string   | /var/tmp/spdk.sock     | RPC listen address
 -s       | --mem-size             | integer  | all hugepage memory    | @ref cmd_arg_memory_size
 |        | --silence-noticelog    | flag     |                        | disable notice level logging to `stderr`
 -u       | --no-pci               | flag     |                        | @ref cmd_arg_disable_pci_access.
 |        | --wait-for-rpc         | flag     |                        | @ref cmd_arg_deferred_initialization
--B       | --pci-blacklist        | B:D:F    |                        | @ref cmd_arg_pci_blacklist_whitelist.
--W       | --pci-whitelist        | B:D:F    |                        | @ref cmd_arg_pci_blacklist_whitelist.
+-B       | --pci-blocked          | B:D:F    |                        | @ref cmd_arg_pci_blocked_allowed.
+-A       | --pci-allowed          | B:D:F    |                        | @ref cmd_arg_pci_blocked_allowed.
 -R       | --huge-unlink          | flag     |                        | @ref cmd_arg_huge_unlink
 |        | --huge-dir             | string   | the first discovered   | allocate hugepages from a specific mount
--L       | --logflag              | string   |                        | @ref cmd_arg_debug_log_flags
-
+-L       | --logflag              | string   |                        | @ref cmd_arg_log_flags
 
 ### Configuration file {#cmd_arg_config_file}
 
-Historically, the SPDK applications were configured using a configuration file.
-This is still supported, but is considered deprecated in favor of JSON RPC
-configuration. See @ref jsonrpc for details.
-
-Note that `--config` and `--wait-for-rpc` cannot be used at the same time.
+SPDK applications are configured using a JSON RPC configuration file.
+See @ref jsonrpc for details.
 
 ### Limit coredump {#cmd_arg_limit_coredump}
 
@@ -125,12 +121,12 @@ If SPDK is run with PCI access disabled it won't detect any PCI devices. This
 includes primarily NVMe and IOAT devices. Also, the VFIO and UIO kernel modules
 are not required in this mode.
 
-### PCI address blacklist and whitelist {#cmd_arg_pci_blacklist_whitelist}
+### PCI address blocked and allowed lists {#cmd_arg_pci_blocked_allowed}
 
-If blacklist is used, then all devices with the provided PCI address will be
-ignored. If a whitelist is used, only whitelisted devices will be probed.
-`-B` or `-W` can be used more than once, but cannot be mixed together. That is,
-`-B` and `-W` cannot be used at the same time.
+If blocked list is used, then all devices with the provided PCI address will be
+ignored. If an allowed list is used, only allowed devices will be probed.
+`-B` or `-A` can be used more than once, but cannot be mixed together. That is,
+`-B` and `-A` cannot be used at the same time.
 
 ### Unlink hugepage files after initialization {#cmd_arg_huge_unlink}
 
@@ -138,11 +134,11 @@ By default, each DPDK-based application tries to remove any orphaned hugetlbfs
 files during its initialization. This option removes hugetlbfs files of the current
 process as soon as they're created, but is not compatible with `--shm-id`.
 
-### Debug log {#cmd_arg_debug_log_flags}
+### Log flag {#cmd_arg_log_flags}
 
-Enable a specific debug log type. This option can be used more than once. A list of
+Enable a specific log type. This option can be used more than once. A list of
 all available types is provided in the `--help` output, with `--logflag all`
-enabling all of them. Debug logs are only available in debug builds of SPDK.
+enabling all of them. Additionally enables debug print level in debug builds of SPDK.
 
 ## CPU mask {#cpu_mask}
 

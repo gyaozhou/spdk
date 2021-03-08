@@ -34,7 +34,7 @@
 SPDK_ROOT_DIR := $(abspath $(CURDIR)/../..)
 include $(SPDK_ROOT_DIR)/mk/spdk.common.mk
 
-DIRS-y += delay error gpt lvol malloc null nvme passthru raid rpc split zone_block
+DIRS-y += delay error gpt lvol malloc null nvme passthru raid split zone_block
 
 DIRS-$(CONFIG_CRYPTO) += crypto
 
@@ -45,7 +45,7 @@ DIRS-$(CONFIG_REDUCE) += compress
 DIRS-$(CONFIG_URING) += uring
 
 ifeq ($(OS),Linux)
-DIRS-y += aio
+DIRS-y += aio ftl
 DIRS-$(CONFIG_ISCSI_INITIATOR) += iscsi
 DIRS-$(CONFIG_VIRTIO) += virtio
 DIRS-$(CONFIG_PMDK) += pmem

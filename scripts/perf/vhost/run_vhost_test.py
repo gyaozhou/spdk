@@ -40,7 +40,7 @@ def gen_spdk_cpu_mask_config(spdk_cpu_list):
     cpu_indexes.sort()
     print(cpu_indexes)
 
-    pr_core = "vhost_0_master_core=%s" % (cpu_indexes[0])
+    pr_core = "vhost_0_main_core=%s" % (cpu_indexes[0])
     return "\n".join([cpus, pr_core, "\n"])
 
 
@@ -152,7 +152,7 @@ parser.add_argument('-d', '--max-disks', default=0, type=int,
                     each virtual machine gets it's own bdev to work on.")
 parser.add_argument('-v', '--vm-count', default=1, type=int,
                     help="How many VMs to run in test. Default: 1")
-parser.add_argument('-i', '--vm-image', default="$HOME/vhost_vm_image.qcow2",
+parser.add_argument('-i', '--vm-image', default="$HOME/spdk_test_image.qcow2",
                     type=str, help="VM image to use for running VMs.")
 
 subparsers = parser.add_subparsers()
@@ -177,7 +177,7 @@ cpu_cfg_load = subparsers.add_parser('load_cpu_cfg',
                                      test/vhost/common/autotest.config")
 cpu_cfg_load.add_argument('custom_mask_file', default=None,
                           help="Path to file with custom values for vhost's\
-                          reactor mask and master core, and each VM's qemu mask\
+                          reactor mask and main core, and each VM's qemu mask\
                           and qemu numa node")
 
 args = parser.parse_args()

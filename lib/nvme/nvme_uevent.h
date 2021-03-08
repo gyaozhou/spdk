@@ -41,6 +41,7 @@
 #ifndef SPDK_UEVENT_H_
 #define SPDK_UEVENT_H_
 
+#define SPDK_NVME_UEVENT_SUBSYSTEM_UNRECOGNIZED 0
 #define SPDK_NVME_UEVENT_SUBSYSTEM_UIO 1
 #define SPDK_NVME_UEVENT_SUBSYSTEM_VFIO 2
 
@@ -55,7 +56,7 @@ struct spdk_uevent {
 	char traddr[SPDK_NVMF_TRADDR_MAX_LEN + 1];
 };
 
-int spdk_uevent_connect(void);
-int spdk_get_uevent(int fd, struct spdk_uevent *uevent);
+int nvme_uevent_connect(void);
+int nvme_get_uevent(int fd, struct spdk_uevent *uevent);
 
 #endif /* SPDK_UEVENT_H_ */

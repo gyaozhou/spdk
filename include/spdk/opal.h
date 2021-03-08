@@ -39,83 +39,16 @@
 #include "spdk/log.h"
 #include "spdk/endian.h"
 #include "spdk/string.h"
+#include "spdk/opal_spec.h"
 
-#define SPDK_OPAL_NOT_SUPPORTED 0xFF
-
-#define MAX_PASSWORD_SIZE 32 /* in byte */
-
-/*
- * TCG Storage Architecture Core Spec v2.01 r1.00
- * 5.1.5 Method Status Codes
- */
-#define SPDK_OPAL_FAILED 0x3F
-
-static const char *const spdk_opal_errors[] = {
-	"SUCCESS",
-	"NOT AUTHORIZED",
-	"OBSOLETE/UNKNOWN ERROR",
-	"SP BUSY",
-	"SP FAILED",
-	"SP DISABLED",
-	"SP FROZEN",
-	"NO SESSIONS AVAILABLE",
-	"UNIQUENESS CONFLICT",
-	"INSUFFICIENT SPACE",
-	"INSUFFICIENT ROWS",
-	"UNKNOWN ERROR",
-	"INVALID PARAMETER",
-	"OBSOLETE/UNKNOWN ERROR",
-	"UNKNOWN ERROR",
-	"TPER MALFUNCTION",
-	"TRANSACTION FAILURE",
-	"RESPONSE OVERFLOW",
-	"AUTHORITY LOCKED OUT",
-};
-
-struct spdk_opal_info {
-	uint8_t tper : 1;
-	uint8_t locking : 1;
-	uint8_t geometry : 1;
-	uint8_t single_user_mode : 1;
-	uint8_t datastore : 1;
-	uint8_t opal_v200 : 1;
-	uint8_t opal_v100 : 1;
-	uint8_t vendor_specific : 1;
-	uint8_t opal_ssc_dev : 1;
-	uint8_t tper_acknack : 1;
-	uint8_t tper_async : 1;
-	uint8_t tper_buffer_mgt : 1;
-	uint8_t tper_comid_mgt : 1;
-	uint8_t tper_streaming : 1;
-	uint8_t tper_sync : 1;
-	uint8_t locking_locked : 1;
-	uint8_t locking_locking_enabled : 1;
-	uint8_t locking_locking_supported : 1;
-	uint8_t locking_mbr_done : 1;
-	uint8_t locking_mbr_enabled : 1;
-	uint8_t locking_media_encrypt : 1;
-	uint8_t geometry_align : 1;
-	uint64_t geometry_alignment_granularity;
-	uint32_t geometry_logical_block_size;
-	uint64_t geometry_lowest_aligned_lba;
-	uint8_t single_user_any : 1;
-	uint8_t single_user_all : 1;
-	uint8_t single_user_policy : 1;
-	uint32_t single_user_locking_objects;
-	uint16_t datastore_max_tables;
-	uint32_t datastore_max_table_size;
-	uint32_t datastore_alignment;
-	uint16_t opal_v100_base_comid;
-	uint16_t opal_v100_num_comid;
-	uint8_t opal_v100_range_crossing : 1;
-	uint16_t opal_v200_base_comid;
-	uint16_t opal_v200_num_comid;
-	uint8_t opal_v200_initial_pin;
-	uint8_t opal_v200_reverted_pin;
-	uint16_t opal_v200_num_admin;
-	uint16_t opal_v200_num_user;
-	uint8_t opal_v200_range_crossing : 1;
-	uint16_t vu_feature_code; /* vendor specific feature */
+struct spdk_opal_d0_features_info {
+	struct spdk_opal_d0_tper_feat tper;
+	struct spdk_opal_d0_locking_feat locking;
+	struct spdk_opal_d0_single_user_mode_feat single_user;
+	struct spdk_opal_d0_geo_feat geo;
+	struct spdk_opal_d0_datastore_feat datastore;
+	struct spdk_opal_d0_v100_feat v100;
+	struct spdk_opal_d0_v200_feat v200;
 };
 
 enum spdk_opal_lock_state {
@@ -164,35 +97,14 @@ struct spdk_opal_locking_range_info {
 
 struct spdk_opal_dev;
 
-typedef void (*spdk_opal_revert_cb)(struct spdk_opal_dev *dev, void *ctx, int rc);
+struct spdk_opal_dev *spdk_opal_dev_construct(struct spdk_nvme_ctrlr *ctrlr);
+void spdk_opal_dev_destruct(struct spdk_opal_dev *dev);
 
-struct spdk_opal_dev *spdk_opal_init_dev(void *dev_handler);
+struct spdk_opal_d0_features_info *spdk_opal_get_d0_features_info(struct spdk_opal_dev *dev);
 
-void spdk_opal_close(struct spdk_opal_dev *dev);
-struct spdk_opal_info *spdk_opal_get_info(struct spdk_opal_dev *dev);
+__attribute__((__deprecated__)) bool spdk_opal_supported(struct spdk_opal_dev *dev);
 
-bool spdk_opal_supported(struct spdk_opal_dev *dev);
-
-int spdk_opal_cmd_scan(struct spdk_opal_dev *dev);
 int spdk_opal_cmd_take_ownership(struct spdk_opal_dev *dev, char *new_passwd);
-
-/**
- * Users should periodically call spdk_opal_revert_poll to check if the response is received.
- * Once a final result is received, no matter success or failure, dev->revert_cb_fn will be called.
- * Error code is put to dev->revert_cb_fn.
- *
- * Return: -EAGAIN for no result yet. 0 for final result received.
- */
-int spdk_opal_revert_poll(struct spdk_opal_dev *dev);
-
-/**
- * asynchronous function: Just send cmd and return.
- *
- * Users should periodically call spdk_opal_revert_poll to check if the response is received.
- * Because usually revert TPer operation will take a while.
- */
-int spdk_opal_cmd_revert_tper_async(struct spdk_opal_dev *dev, const char *passwd,
-				    spdk_opal_revert_cb cb_fn, void *cb_ctx);
 
 /**
  * synchronous function: send and then receive.
@@ -220,13 +132,14 @@ int spdk_opal_cmd_add_user_to_locking_range(struct spdk_opal_dev *dev, enum spdk
 		enum spdk_opal_lock_state lock_flag, const char *passwd);
 int spdk_opal_cmd_set_new_passwd(struct spdk_opal_dev *dev, enum spdk_opal_user user_id,
 				 const char *new_passwd, const char *old_passwd, bool new_user);
+
 int spdk_opal_cmd_erase_locking_range(struct spdk_opal_dev *dev, enum spdk_opal_user user_id,
 				      enum spdk_opal_locking_range locking_range_id, const char *password);
+
+int spdk_opal_cmd_secure_erase_locking_range(struct spdk_opal_dev *dev, enum spdk_opal_user user_id,
+		enum spdk_opal_locking_range locking_range_id, const char *password);
 
 struct spdk_opal_locking_range_info *spdk_opal_get_locking_range_info(struct spdk_opal_dev *dev,
 		enum spdk_opal_locking_range id);
 void spdk_opal_free_locking_range_info(struct spdk_opal_dev *dev, enum spdk_opal_locking_range id);
-
-uint8_t spdk_opal_get_max_locking_ranges(struct spdk_opal_dev *dev);
-
 #endif

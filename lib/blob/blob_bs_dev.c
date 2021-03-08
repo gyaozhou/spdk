@@ -124,7 +124,7 @@ blob_bs_dev_destroy(struct spdk_bs_dev *bs_dev)
 
 // zhou: README, looks like virtual layer, comparing to spdk_bdev_create_bs_dev().
 struct spdk_bs_dev *
-spdk_bs_create_blob_bs_dev(struct spdk_blob *blob)
+bs_create_blob_bs_dev(struct spdk_blob *blob)
 {
 	struct spdk_blob_bs_dev  *b;
 
@@ -134,7 +134,7 @@ spdk_bs_create_blob_bs_dev(struct spdk_blob *blob)
 	}
 	/* snapshot blob */
 	b->bs_dev.blockcnt = blob->active.num_clusters *
-			     blob->bs->pages_per_cluster * _spdk_bs_io_unit_per_page(blob->bs);
+			     blob->bs->pages_per_cluster * bs_io_unit_per_page(blob->bs);
 	b->bs_dev.blocklen = spdk_bs_get_io_unit_size(blob->bs);
 	b->bs_dev.create_channel = NULL;
 	b->bs_dev.destroy_channel = NULL;

@@ -35,7 +35,7 @@
 #include "spdk/rpc.h"
 #include "spdk/util.h"
 #include "spdk/string.h"
-#include "spdk_internal/log.h"
+#include "spdk/log.h"
 
 /* Structure to hold the parameters for this RPC method. */
 struct rpc_bdev_passthru_create {
@@ -61,8 +61,8 @@ static const struct spdk_json_object_decoder rpc_bdev_passthru_create_decoders[]
  * device. Error status returned in the failed cases.
  */
 static void
-spdk_rpc_bdev_passthru_create(struct spdk_jsonrpc_request *request,
-			      const struct spdk_json_val *params)
+rpc_bdev_passthru_create(struct spdk_jsonrpc_request *request,
+			 const struct spdk_json_val *params)
 {
 	struct rpc_bdev_passthru_create req = {NULL};
 	struct spdk_json_write_ctx *w;
@@ -71,7 +71,7 @@ spdk_rpc_bdev_passthru_create(struct spdk_jsonrpc_request *request,
 	if (spdk_json_decode_object(params, rpc_bdev_passthru_create_decoders,
 				    SPDK_COUNTOF(rpc_bdev_passthru_create_decoders),
 				    &req)) {
-		SPDK_DEBUGLOG(SPDK_LOG_VBDEV_PASSTHRU, "spdk_json_decode_object failed\n");
+		SPDK_DEBUGLOG(vbdev_passthru, "spdk_json_decode_object failed\n");
 		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
 						 "spdk_json_decode_object failed");
 		goto cleanup;
@@ -90,7 +90,7 @@ spdk_rpc_bdev_passthru_create(struct spdk_jsonrpc_request *request,
 cleanup:
 	free_rpc_bdev_passthru_create(&req);
 }
-SPDK_RPC_REGISTER("bdev_passthru_create", spdk_rpc_bdev_passthru_create, SPDK_RPC_RUNTIME)
+SPDK_RPC_REGISTER("bdev_passthru_create", rpc_bdev_passthru_create, SPDK_RPC_RUNTIME)
 SPDK_RPC_REGISTER_ALIAS_DEPRECATED(bdev_passthru_create, construct_passthru_bdev)
 
 struct rpc_bdev_passthru_delete {
@@ -108,19 +108,16 @@ static const struct spdk_json_object_decoder rpc_bdev_passthru_delete_decoders[]
 };
 
 static void
-_spdk_rpc_bdev_passthru_delete_cb(void *cb_arg, int bdeverrno)
+rpc_bdev_passthru_delete_cb(void *cb_arg, int bdeverrno)
 {
 	struct spdk_jsonrpc_request *request = cb_arg;
-	struct spdk_json_write_ctx *w;
 
-	w = spdk_jsonrpc_begin_result(request);
-	spdk_json_write_bool(w, bdeverrno == 0);
-	spdk_jsonrpc_end_result(request, w);
+	spdk_jsonrpc_send_bool_response(request, bdeverrno == 0);
 }
 
 static void
-spdk_rpc_bdev_passthru_delete(struct spdk_jsonrpc_request *request,
-			      const struct spdk_json_val *params)
+rpc_bdev_passthru_delete(struct spdk_jsonrpc_request *request,
+			 const struct spdk_json_val *params)
 {
 	struct rpc_bdev_passthru_delete req = {NULL};
 	struct spdk_bdev *bdev;
@@ -139,10 +136,10 @@ spdk_rpc_bdev_passthru_delete(struct spdk_jsonrpc_request *request,
 		goto cleanup;
 	}
 
-	bdev_passthru_delete_disk(bdev, _spdk_rpc_bdev_passthru_delete_cb, request);
+	bdev_passthru_delete_disk(bdev, rpc_bdev_passthru_delete_cb, request);
 
 cleanup:
 	free_rpc_bdev_passthru_delete(&req);
 }
-SPDK_RPC_REGISTER("bdev_passthru_delete", spdk_rpc_bdev_passthru_delete, SPDK_RPC_RUNTIME)
+SPDK_RPC_REGISTER("bdev_passthru_delete", rpc_bdev_passthru_delete, SPDK_RPC_RUNTIME)
 SPDK_RPC_REGISTER_ALIAS_DEPRECATED(bdev_passthru_delete, delete_passthru_bdev)

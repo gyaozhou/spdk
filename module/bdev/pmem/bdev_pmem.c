@@ -31,13 +31,12 @@
  *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include "spdk/conf.h"
 #include "spdk/string.h"
 #include "spdk/likely.h"
 #include "spdk/util.h"
 #include "spdk/rpc.h"
 #include "spdk/bdev_module.h"
-#include "spdk_internal/log.h"
+#include "spdk/log.h"
 #include "spdk/config.h"
 
 #include "bdev_pmem.h"
@@ -134,7 +133,7 @@ bdev_pmem_submit_io(struct spdk_bdev_io *bdev_io, struct pmem_disk *pdisk,
 		goto end;
 	}
 
-	SPDK_DEBUGLOG(SPDK_LOG_BDEV_PMEM, "io %lu bytes from offset %#lx\n",
+	SPDK_DEBUGLOG(bdev_pmem, "io %lu bytes from offset %#lx\n",
 		      num_blocks, offset_blocks);
 
 	for (nbytes = num_blocks * block_size; nbytes > 0; iov++) {
@@ -310,7 +309,7 @@ static const struct spdk_bdev_fn_table pmem_fn_table = {
 };
 
 int
-spdk_create_pmem_disk(const char *pmem_file, const char *name, struct spdk_bdev **bdev)
+create_pmem_disk(const char *pmem_file, const char *name, struct spdk_bdev **bdev)
 {
 	uint64_t num_blocks;
 	uint32_t block_size;
@@ -320,7 +319,7 @@ spdk_create_pmem_disk(const char *pmem_file, const char *name, struct spdk_bdev 
 	*bdev = NULL;
 
 	if (name == NULL) {
-		SPDK_ERRLOG("Missing name parameter for spdk_create_pmem_disk()\n");
+		SPDK_ERRLOG("Missing name parameter for create_pmem_disk()\n");
 		return -EINVAL;
 	}
 
@@ -391,7 +390,7 @@ spdk_create_pmem_disk(const char *pmem_file, const char *name, struct spdk_bdev 
 }
 
 void
-spdk_delete_pmem_disk(struct spdk_bdev *bdev, spdk_delete_pmem_complete cb_fn, void *cb_arg)
+delete_pmem_disk(struct spdk_bdev *bdev, spdk_delete_pmem_complete cb_fn, void *cb_arg)
 {
 	if (!bdev || bdev->module != &pmem_if) {
 		cb_fn(cb_arg, -ENODEV);
@@ -399,41 +398,6 @@ spdk_delete_pmem_disk(struct spdk_bdev *bdev, spdk_delete_pmem_complete cb_fn, v
 	}
 
 	spdk_bdev_unregister(bdev, cb_fn, cb_arg);
-}
-
-static void
-bdev_pmem_read_conf(void)
-{
-	struct spdk_conf_section *sp;
-	struct spdk_bdev *bdev;
-	const char *pmem_file;
-	const char *bdev_name;
-	int i;
-
-	sp = spdk_conf_find_section(NULL, "Pmem");
-	if (sp == NULL) {
-		return;
-	}
-
-	for (i = 0; ; i++) {
-		if (!spdk_conf_section_get_nval(sp, "Blk", i)) {
-			break;
-		}
-
-		pmem_file = spdk_conf_section_get_nmval(sp, "Blk", i, 0);
-		if (pmem_file == NULL) {
-			SPDK_ERRLOG("Pmem: missing filename\n");
-			continue;
-		}
-
-		bdev_name = spdk_conf_section_get_nmval(sp, "Blk", i, 1);
-		if (bdev_name == NULL) {
-			SPDK_ERRLOG("Pmem: missing bdev name\n");
-			continue;
-		}
-
-		spdk_create_pmem_disk(pmem_file, bdev_name, &bdev);
-	}
 }
 
 static int
@@ -452,8 +416,6 @@ bdev_pmem_initialize(void)
 #endif
 	spdk_io_device_register(&g_pmem_disks, bdev_pmem_create_cb, bdev_pmem_destroy_cb, 0, "pmem_bdev");
 
-	bdev_pmem_read_conf();
-
 	return 0;
 
 }
@@ -470,4 +432,4 @@ bdev_pmem_finish(void)
 	spdk_io_device_unregister(&g_pmem_disks, bdev_pmem_finish_done);
 }
 
-SPDK_LOG_REGISTER_COMPONENT("bdev_pmem", SPDK_LOG_BDEV_PMEM)
+SPDK_LOG_REGISTER_COMPONENT(bdev_pmem)

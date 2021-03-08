@@ -37,7 +37,7 @@
 #include "spdk/endian.h"
 #include "spdk/event.h"
 
-#include "spdk_internal/log.h"
+#include "spdk/log.h"
 
 #define GPT_PRIMARY_PARTITION_TABLE_LBA 0x1
 #define PRIMARY_PARTITION_NUMBER 4
@@ -45,7 +45,7 @@
 #define SPDK_MAX_NUM_PARTITION_ENTRIES 128
 
 static uint64_t
-spdk_gpt_get_expected_head_lba(struct spdk_gpt *gpt)
+gpt_get_expected_head_lba(struct spdk_gpt *gpt)
 {
 	switch (gpt->parse_phase) {
 	case SPDK_GPT_PARSE_PHASE_PRIMARY:
@@ -59,7 +59,7 @@ spdk_gpt_get_expected_head_lba(struct spdk_gpt *gpt)
 }
 
 static struct spdk_gpt_header *
-spdk_gpt_get_header_buf(struct spdk_gpt *gpt)
+gpt_get_header_buf(struct spdk_gpt *gpt)
 {
 	switch (gpt->parse_phase) {
 	case SPDK_GPT_PARSE_PHASE_PRIMARY:
@@ -75,8 +75,8 @@ spdk_gpt_get_header_buf(struct spdk_gpt *gpt)
 }
 
 static struct spdk_gpt_partition_entry *
-spdk_gpt_get_partitions_buf(struct spdk_gpt *gpt, uint64_t total_partition_size,
-			    uint64_t partition_start_lba)
+gpt_get_partitions_buf(struct spdk_gpt *gpt, uint64_t total_partition_size,
+		       uint64_t partition_start_lba)
 {
 	uint64_t secondary_total_size;
 
@@ -104,7 +104,7 @@ spdk_gpt_get_partitions_buf(struct spdk_gpt *gpt, uint64_t total_partition_size,
 }
 
 static int
-spdk_gpt_read_partitions(struct spdk_gpt *gpt)
+gpt_read_partitions(struct spdk_gpt *gpt)
 {
 	uint32_t total_partition_size, num_partition_entries, partition_entry_size;
 	uint64_t partition_start_lba;
@@ -120,14 +120,14 @@ spdk_gpt_read_partitions(struct spdk_gpt *gpt)
 
 	partition_entry_size = from_le32(&head->size_of_partition_entry);
 	if (partition_entry_size != sizeof(struct spdk_gpt_partition_entry)) {
-		SPDK_ERRLOG("Partition_entry_size(%x) != expected(%lx)\n",
+		SPDK_ERRLOG("Partition_entry_size(%x) != expected(%zx)\n",
 			    partition_entry_size, sizeof(struct spdk_gpt_partition_entry));
 		return -1;
 	}
 
 	total_partition_size = num_partition_entries * partition_entry_size;
 	partition_start_lba = from_le64(&head->partition_entry_lba);
-	gpt->partitions = spdk_gpt_get_partitions_buf(gpt, total_partition_size,
+	gpt->partitions = gpt_get_partitions_buf(gpt, total_partition_size,
 			  partition_start_lba);
 	if (!gpt->partitions) {
 		SPDK_ERRLOG("Failed to get gpt partitions buf\n");
@@ -146,7 +146,7 @@ spdk_gpt_read_partitions(struct spdk_gpt *gpt)
 }
 
 static int
-spdk_gpt_lba_range_check(struct spdk_gpt_header *head, uint64_t lba_end)
+gpt_lba_range_check(struct spdk_gpt_header *head, uint64_t lba_end)
 {
 	uint64_t usable_lba_start, usable_lba_end;
 
@@ -175,14 +175,14 @@ spdk_gpt_lba_range_check(struct spdk_gpt_header *head, uint64_t lba_end)
 }
 
 static int
-spdk_gpt_read_header(struct spdk_gpt *gpt)
+gpt_read_header(struct spdk_gpt *gpt)
 {
 	uint32_t head_size;
 	uint32_t new_crc, original_crc;
 	uint64_t my_lba, head_lba;
 	struct spdk_gpt_header *head;
 
-	head = spdk_gpt_get_header_buf(gpt);
+	head = gpt_get_header_buf(gpt);
 	if (!head) {
 		SPDK_ERRLOG("Failed to get gpt header buf\n");
 		return -1;
@@ -213,7 +213,7 @@ spdk_gpt_read_header(struct spdk_gpt *gpt)
 		return -1;
 	}
 
-	head_lba = spdk_gpt_get_expected_head_lba(gpt);
+	head_lba = gpt_get_expected_head_lba(gpt);
 	my_lba = from_le64(&head->my_lba);
 	if (my_lba != head_lba) {
 		SPDK_ERRLOG("head my_lba(%" PRIu64 ") != expected(%" PRIu64 ")\n",
@@ -221,7 +221,7 @@ spdk_gpt_read_header(struct spdk_gpt *gpt)
 		return -1;
 	}
 
-	if (spdk_gpt_lba_range_check(head, gpt->lba_end)) {
+	if (gpt_lba_range_check(head, gpt->lba_end)) {
 		SPDK_ERRLOG("lba range check error\n");
 		return -1;
 	}
@@ -231,7 +231,7 @@ spdk_gpt_read_header(struct spdk_gpt *gpt)
 }
 
 static int
-spdk_gpt_check_mbr(struct spdk_gpt *gpt)
+gpt_check_mbr(struct spdk_gpt *gpt)
 {
 	int i, primary_partition = 0;
 	uint32_t total_lba_size = 0, ret = 0, expected_start_lba;
@@ -239,7 +239,7 @@ spdk_gpt_check_mbr(struct spdk_gpt *gpt)
 
 	mbr = (struct spdk_mbr *)gpt->buf;
 	if (from_le16(&mbr->mbr_signature) != SPDK_MBR_SIGNATURE) {
-		SPDK_DEBUGLOG(SPDK_LOG_GPT_PARSE, "Signature mismatch, provided=%x,"
+		SPDK_DEBUGLOG(gpt_parse, "Signature mismatch, provided=%x,"
 			      "expected=%x\n", from_le16(&mbr->disk_signature),
 			      SPDK_MBR_SIGNATURE);
 		return -1;
@@ -256,7 +256,7 @@ spdk_gpt_check_mbr(struct spdk_gpt *gpt)
 	if (ret == GPT_PROTECTIVE_MBR) {
 		expected_start_lba = GPT_PRIMARY_PARTITION_TABLE_LBA;
 		if (from_le32(&mbr->partitions[primary_partition].start_lba) != expected_start_lba) {
-			SPDK_DEBUGLOG(SPDK_LOG_GPT_PARSE, "start lba mismatch, provided=%u, expected=%u\n",
+			SPDK_DEBUGLOG(gpt_parse, "start lba mismatch, provided=%u, expected=%u\n",
 				      from_le32(&mbr->partitions[primary_partition].start_lba),
 				      expected_start_lba);
 			return -1;
@@ -265,13 +265,13 @@ spdk_gpt_check_mbr(struct spdk_gpt *gpt)
 		total_lba_size = from_le32(&mbr->partitions[primary_partition].size_lba);
 		if ((total_lba_size != ((uint32_t) gpt->total_sectors - 1)) &&
 		    (total_lba_size != 0xFFFFFFFF)) {
-			SPDK_DEBUGLOG(SPDK_LOG_GPT_PARSE,
+			SPDK_DEBUGLOG(gpt_parse,
 				      "GPT Primary MBR size does not equal: (record_size %u != actual_size %u)!\n",
 				      total_lba_size, (uint32_t) gpt->total_sectors - 1);
 			return -1;
 		}
 	} else {
-		SPDK_DEBUGLOG(SPDK_LOG_GPT_PARSE, "Currently only support GPT Protective MBR format\n");
+		SPDK_DEBUGLOG(gpt_parse, "Currently only support GPT Protective MBR format\n");
 		return -1;
 	}
 
@@ -279,7 +279,7 @@ spdk_gpt_check_mbr(struct spdk_gpt *gpt)
 }
 
 int
-spdk_gpt_parse_mbr(struct spdk_gpt *gpt)
+gpt_parse_mbr(struct spdk_gpt *gpt)
 {
 	int rc;
 
@@ -288,9 +288,9 @@ spdk_gpt_parse_mbr(struct spdk_gpt *gpt)
 		return -1;
 	}
 
-	rc = spdk_gpt_check_mbr(gpt);
+	rc = gpt_check_mbr(gpt);
 	if (rc) {
-		SPDK_DEBUGLOG(SPDK_LOG_GPT_PARSE, "Failed to detect gpt in MBR\n");
+		SPDK_DEBUGLOG(gpt_parse, "Failed to detect gpt in MBR\n");
 		return rc;
 	}
 
@@ -298,17 +298,17 @@ spdk_gpt_parse_mbr(struct spdk_gpt *gpt)
 }
 
 int
-spdk_gpt_parse_partition_table(struct spdk_gpt *gpt)
+gpt_parse_partition_table(struct spdk_gpt *gpt)
 {
 	int rc;
 
-	rc = spdk_gpt_read_header(gpt);
+	rc = gpt_read_header(gpt);
 	if (rc) {
 		SPDK_ERRLOG("Failed to read gpt header\n");
 		return rc;
 	}
 
-	rc = spdk_gpt_read_partitions(gpt);
+	rc = gpt_read_partitions(gpt);
 	if (rc) {
 		SPDK_ERRLOG("Failed to read gpt partitions\n");
 		return rc;
@@ -317,4 +317,4 @@ spdk_gpt_parse_partition_table(struct spdk_gpt *gpt)
 	return 0;
 }
 
-SPDK_LOG_REGISTER_COMPONENT("gpt_parse", SPDK_LOG_GPT_PARSE)
+SPDK_LOG_REGISTER_COMPONENT(gpt_parse)

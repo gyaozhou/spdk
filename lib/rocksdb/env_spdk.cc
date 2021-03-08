@@ -45,8 +45,6 @@ extern "C" {
 #include "spdk/log.h"
 #include "spdk/thread.h"
 #include "spdk/bdev.h"
-
-#include "spdk_internal/thread.h"
 }
 
 namespace rocksdb
@@ -416,7 +414,7 @@ public:
 	virtual ~SpdkEnv();
 
 	virtual Status NewSequentialFile(const std::string &fname,
-					 unique_ptr<SequentialFile> *result,
+					 std::unique_ptr<SequentialFile> *result,
 					 const EnvOptions &options) override
 	{
 		if (fname.compare(0, mDirectory.length(), mDirectory) == 0) {
@@ -444,7 +442,7 @@ public:
 	}
 
 	virtual Status NewRandomAccessFile(const std::string &fname,
-					   unique_ptr<RandomAccessFile> *result,
+					   std::unique_ptr<RandomAccessFile> *result,
 					   const EnvOptions &options) override
 	{
 		if (fname.compare(0, mDirectory.length(), mDirectory) == 0) {
@@ -468,7 +466,7 @@ public:
 	}
 
 	virtual Status NewWritableFile(const std::string &fname,
-				       unique_ptr<WritableFile> *result,
+				       std::unique_ptr<WritableFile> *result,
 				       const EnvOptions &options) override
 	{
 		if (fname.compare(0, mDirectory.length(), mDirectory) == 0) {
@@ -493,14 +491,14 @@ public:
 
 	virtual Status ReuseWritableFile(const std::string &fname,
 					 const std::string &old_fname,
-					 unique_ptr<WritableFile> *result,
+					 std::unique_ptr<WritableFile> *result,
 					 const EnvOptions &options) override
 	{
 		return EnvWrapper::ReuseWritableFile(fname, old_fname, result, options);
 	}
 
 	virtual Status NewDirectory(__attribute__((unused)) const std::string &name,
-				    unique_ptr<Directory> *result) override
+				    std::unique_ptr<Directory> *result) override
 	{
 		result->reset(new SpdkDirectory());
 		return Status::OK();
@@ -643,6 +641,9 @@ void SpdkInitializeThread(void)
 	struct spdk_thread *thread;
 
 	if (g_fs != NULL) {
+		if (g_sync_args.channel) {
+			spdk_fs_free_thread_ctx(g_sync_args.channel);
+		}
 		thread = spdk_thread_create("spdk_rocksdb", NULL);
 		spdk_set_thread(thread);
 		g_sync_args.channel = spdk_fs_alloc_thread_ctx(g_fs);
@@ -660,20 +661,27 @@ fs_load_cb(__attribute__((unused)) void *ctx,
 }
 
 static void
-spdk_rocksdb_run(__attribute__((unused)) void *arg1)
+base_bdev_event_cb(enum spdk_bdev_event_type type, __attribute__((unused)) struct spdk_bdev *bdev,
+		   __attribute__((unused)) void *event_ctx)
 {
-	struct spdk_bdev *bdev;
+	printf("Unsupported bdev event: type %d\n", type);
+}
 
-	bdev = spdk_bdev_get_by_name(g_bdev_name.c_str());
+static void
+rocksdb_run(__attribute__((unused)) void *arg1)
+{
+	int rc;
 
-	if (bdev == NULL) {
-		SPDK_ERRLOG("bdev %s not found\n", g_bdev_name.c_str());
+	rc = spdk_bdev_create_bs_dev_ext(g_bdev_name.c_str(), base_bdev_event_cb, NULL,
+					 &g_bs_dev);
+	if (rc != 0) {
+		printf("Could not create blob bdev\n");
+		spdk_app_stop(0);
 		exit(1);
 	}
 
 	g_lcore = spdk_env_get_first_core();
 
-	g_bs_dev = spdk_bdev_create_bs_dev(bdev, NULL, NULL);
 	printf("using bdev %s\n", g_bdev_name.c_str());
 	spdk_fs_load(g_bs_dev, __send_request, fs_load_cb, NULL);
 }
@@ -688,7 +696,7 @@ fs_unload_cb(__attribute__((unused)) void *ctx,
 }
 
 static void
-spdk_rocksdb_shutdown(void)
+rocksdb_shutdown(void)
 {
 	if (g_fs != NULL) {
 		spdk_fs_unload(g_fs, fs_unload_cb, NULL);
@@ -703,7 +711,7 @@ initialize_spdk(void *arg)
 	struct spdk_app_opts *opts = (struct spdk_app_opts *)arg;
 	int rc;
 
-	rc = spdk_app_start(opts, spdk_rocksdb_run, NULL);
+	rc = spdk_app_start(opts, rocksdb_run, NULL);
 	/*
 	 * TODO:  Revisit for case of internal failure of
 	 * spdk_app_start(), itself.  At this time, it's known
@@ -728,10 +736,11 @@ SpdkEnv::SpdkEnv(Env *base_env, const std::string &dir, const std::string &conf,
 {
 	struct spdk_app_opts *opts = new struct spdk_app_opts;
 
-	spdk_app_opts_init(opts);
+	spdk_app_opts_init(opts, sizeof(*opts));
 	opts->name = "rocksdb";
-	opts->config_file = mConfig.c_str();
-	opts->shutdown_cb = spdk_rocksdb_shutdown;
+	opts->json_config_file = mConfig.c_str();
+	opts->shutdown_cb = rocksdb_shutdown;
+	opts->tpoint_group_mask = "0x80";
 
 	spdk_fs_set_cache_size(cache_size_in_mb);
 	g_bdev_name = mBdev;
@@ -741,7 +750,7 @@ SpdkEnv::SpdkEnv(Env *base_env, const std::string &dir, const std::string &conf,
 		;
 	if (g_spdk_start_failure) {
 		delete opts;
-		throw SpdkAppStartException("spdk_app_start() unable to start spdk_rocksdb_run()");
+		throw SpdkAppStartException("spdk_app_start() unable to start rocksdb_run()");
 	}
 
 	SpdkInitializeThread();

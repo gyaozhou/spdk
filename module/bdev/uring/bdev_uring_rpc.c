@@ -35,7 +35,7 @@
 #include "spdk/rpc.h"
 #include "spdk/util.h"
 #include "spdk/string.h"
-#include "spdk_internal/log.h"
+#include "spdk/log.h"
 
 /* Structure to hold the parameters for this RPC method. */
 struct rpc_create_uring {
@@ -63,8 +63,8 @@ static const struct spdk_json_object_decoder rpc_create_uring_decoders[] = {
  * device. Error status returned in the failed cases.
  */
 static void
-spdk_rpc_bdev_uring_create(struct spdk_jsonrpc_request *request,
-			   const struct spdk_json_val *params)
+rpc_bdev_uring_create(struct spdk_jsonrpc_request *request,
+		      const struct spdk_json_val *params)
 {
 	struct rpc_create_uring req = {};
 	struct spdk_json_write_ctx *w;
@@ -94,7 +94,7 @@ spdk_rpc_bdev_uring_create(struct spdk_jsonrpc_request *request,
 cleanup:
 	free_rpc_create_uring(&req);
 }
-SPDK_RPC_REGISTER("bdev_uring_create", spdk_rpc_bdev_uring_create, SPDK_RPC_RUNTIME)
+SPDK_RPC_REGISTER("bdev_uring_create", rpc_bdev_uring_create, SPDK_RPC_RUNTIME)
 
 struct rpc_delete_uring {
 	char *name;
@@ -111,19 +111,17 @@ static const struct spdk_json_object_decoder rpc_delete_uring_decoders[] = {
 };
 
 static void
-_spdk_rpc_bdev_uring_delete_cb(void *cb_arg, int bdeverrno)
+_rpc_bdev_uring_delete_cb(void *cb_arg, int bdeverrno)
 {
 	struct spdk_jsonrpc_request *request = cb_arg;
-	struct spdk_json_write_ctx *w = spdk_jsonrpc_begin_result(request);
 
-	spdk_json_write_bool(w, bdeverrno == 0);
-	spdk_jsonrpc_end_result(request, w);
+	spdk_jsonrpc_send_bool_response(request, bdeverrno == 0);
 
 }
 
 static void
-spdk_rpc_bdev_uring_delete(struct spdk_jsonrpc_request *request,
-			   const struct spdk_json_val *params)
+rpc_bdev_uring_delete(struct spdk_jsonrpc_request *request,
+		      const struct spdk_json_val *params)
 {
 	struct rpc_delete_uring req = {NULL};
 	struct spdk_bdev *bdev;
@@ -142,9 +140,9 @@ spdk_rpc_bdev_uring_delete(struct spdk_jsonrpc_request *request,
 		goto cleanup;
 	}
 
-	delete_uring_bdev(bdev, _spdk_rpc_bdev_uring_delete_cb, request);
+	delete_uring_bdev(bdev, _rpc_bdev_uring_delete_cb, request);
 
 cleanup:
 	free_rpc_delete_uring(&req);
 }
-SPDK_RPC_REGISTER("bdev_uring_delete", spdk_rpc_bdev_uring_delete, SPDK_RPC_RUNTIME)
+SPDK_RPC_REGISTER("bdev_uring_delete", rpc_bdev_uring_delete, SPDK_RPC_RUNTIME)

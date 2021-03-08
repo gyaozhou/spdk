@@ -32,7 +32,6 @@
  */
 
 #include "spdk/stdinc.h"
-#include "spdk/conf.h"
 #include "spdk/thread.h"
 #include "spdk/likely.h"
 
@@ -68,7 +67,7 @@ vmd_subsystem_init(void)
 
 	assert(g_hotplug_poller == NULL);
 
-	g_hotplug_poller = spdk_poller_register(vmd_hotplug_monitor, NULL, 1000000ULL);
+	g_hotplug_poller = SPDK_POLLER_REGISTER(vmd_hotplug_monitor, NULL, 1000000ULL);
 	if (g_hotplug_poller == NULL) {
 		SPDK_ERRLOG("Failed to register hotplug monitor poller\n");
 		return -ENOMEM;
@@ -80,31 +79,17 @@ vmd_subsystem_init(void)
 }
 
 static void
-spdk_vmd_subsystem_init(void)
-{
-	struct spdk_conf_section *sp;
-	int rc = 0;
-
-	sp = spdk_conf_find_section(NULL, "Vmd");
-	if (sp != NULL) {
-		if (spdk_conf_section_get_boolval(sp, "Enable", false)) {
-			rc = vmd_subsystem_init();
-		}
-	}
-
-	spdk_subsystem_init_next(rc);
-}
-
-static void
-spdk_vmd_subsystem_fini(void)
+vmd_subsystem_fini(void)
 {
 	spdk_poller_unregister(&g_hotplug_poller);
+
+	spdk_vmd_fini();
 
 	spdk_subsystem_fini_next();
 }
 
 static void
-spdk_vmd_write_config_json(struct spdk_json_write_ctx *w)
+vmd_write_config_json(struct spdk_json_write_ctx *w)
 {
 	spdk_json_write_array_begin(w);
 
@@ -121,10 +106,8 @@ spdk_vmd_write_config_json(struct spdk_json_write_ctx *w)
 
 static struct spdk_subsystem g_spdk_subsystem_vmd = {
 	.name = "vmd",
-	.init = spdk_vmd_subsystem_init,
-	.fini = spdk_vmd_subsystem_fini,
-	.config = NULL,
-	.write_config_json = spdk_vmd_write_config_json,
+	.fini = vmd_subsystem_fini,
+	.write_config_json = vmd_write_config_json,
 };
 
 SPDK_SUBSYSTEM_REGISTER(g_spdk_subsystem_vmd);

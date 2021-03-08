@@ -45,7 +45,7 @@ struct vbdev_ocf;
 
 /* Context for OCF queue poller
  * Used for mapping SPDK threads to OCF queues */
-struct vbdev_ocf_qcxt {
+struct vbdev_ocf_qctx {
 	/* OCF queue. Contains OCF requests */
 	struct ocf_queue            *queue;
 	/* Poller for OCF queue. Runs OCF requests */
@@ -58,7 +58,7 @@ struct vbdev_ocf_qcxt {
 	/* If true, we have to free this context on queue stop */
 	bool allocated;
 	/* Link to per-bdev list of queue contexts */
-	TAILQ_ENTRY(vbdev_ocf_qcxt)  tailq;
+	TAILQ_ENTRY(vbdev_ocf_qctx)  tailq;
 };
 
 /* Important states */
@@ -122,9 +122,6 @@ struct vbdev_ocf_mngt_ctx {
 
 /* Base device info */
 struct vbdev_ocf_base {
-	/* OCF unique internal id */
-	int                          id;
-
 	/* OCF internal name */
 	char                        *name;
 
@@ -145,6 +142,9 @@ struct vbdev_ocf_base {
 
 	/* Reference to main vbdev */
 	struct vbdev_ocf            *parent;
+
+	/* thread where base device is opened */
+	struct spdk_thread	    *thread;
 };
 
 /*
@@ -185,6 +185,7 @@ struct vbdev_ocf {
 void vbdev_ocf_construct(
 	const char *vbdev_name,
 	const char *cache_mode_name,
+	const uint64_t cache_line_size,
 	const char *cache_name,
 	const char *core_name,
 	bool loadq,

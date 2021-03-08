@@ -38,6 +38,8 @@
 
 #include "spdk/likely.h"
 #include "spdk/nvmf.h"
+#include "spdk/nvmf_cmd.h"
+#include "spdk/nvmf_transport.h"
 #include "spdk/nvmf_spec.h"
 #include "spdk/assert.h"
 #include "spdk/bdev.h"
@@ -45,17 +47,7 @@
 #include "spdk/util.h"
 #include "spdk/thread.h"
 
-#define SPDK_NVMF_MAX_SGL_ENTRIES	16
-
-/* The maximum number of buffers per request */
-#define NVMF_REQ_MAX_BUFFERS	(SPDK_NVMF_MAX_SGL_ENTRIES * 2)
-
-/* AIO backend requires block size aligned data buffers,
- * extra 4KiB aligned data buffer should work for most devices.
- */
-#define SHIFT_4KB			12u
-#define NVMF_DATA_BUFFER_ALIGNMENT	(1u << SHIFT_4KB)
-#define NVMF_DATA_BUFFER_MASK		(NVMF_DATA_BUFFER_ALIGNMENT - 1LL)
+#define NVMF_MAX_ASYNC_EVENTS	(4)
 
 enum spdk_nvmf_subsystem_state {
 	SPDK_NVMF_SUBSYSTEM_INACTIVE = 0,
@@ -65,21 +57,17 @@ enum spdk_nvmf_subsystem_state {
 	SPDK_NVMF_SUBSYSTEM_PAUSED,
 	SPDK_NVMF_SUBSYSTEM_RESUMING,
 	SPDK_NVMF_SUBSYSTEM_DEACTIVATING,
+	SPDK_NVMF_SUBSYSTEM_NUM_STATES,
 };
-
-enum spdk_nvmf_qpair_state {
-	SPDK_NVMF_QPAIR_UNINITIALIZED = 0,
-	SPDK_NVMF_QPAIR_ACTIVE,
-	SPDK_NVMF_QPAIR_DEACTIVATING,
-	SPDK_NVMF_QPAIR_ERROR,
-};
-
-typedef void (*spdk_nvmf_state_change_done)(void *cb_arg, int status);
 
 struct spdk_nvmf_tgt {
 	char					name[NVMF_TGT_NAME_MAX_LENGTH];
 
+	pthread_mutex_t				mutex;
+
 	uint64_t				discovery_genctr;
+
+	struct spdk_poller			*accept_poller;
 
 	uint32_t				max_subsystems;
 
@@ -87,6 +75,10 @@ struct spdk_nvmf_tgt {
 	struct spdk_nvmf_subsystem		**subsystems;
 
 	TAILQ_HEAD(, spdk_nvmf_transport)	transports;
+	TAILQ_HEAD(, spdk_nvmf_poll_group)	poll_groups;
+
+	/* Used for round-robin assignment of connections to poll groups */
+	struct spdk_nvmf_poll_group		*next_poll_group;
 
 	spdk_nvmf_tgt_destroy_done_fn		*destroy_cb_fn;
 	void					*destroy_cb_arg;
@@ -99,25 +91,15 @@ struct spdk_nvmf_host {
 	TAILQ_ENTRY(spdk_nvmf_host)	link;
 };
 
-struct spdk_nvmf_listener {
-	struct spdk_nvme_transport_id	trid;
-	struct spdk_nvmf_transport	*transport;
-	TAILQ_ENTRY(spdk_nvmf_listener)	link;
-};
-
-struct spdk_nvmf_transport_pg_cache_buf {
-	STAILQ_ENTRY(spdk_nvmf_transport_pg_cache_buf) link;
-};
-
-struct spdk_nvmf_transport_poll_group {
-	struct spdk_nvmf_transport					*transport;
-	/* Requests that are waiting to obtain a data buffer */
-	STAILQ_HEAD(, spdk_nvmf_request)				pending_buf_queue;
-	STAILQ_HEAD(, spdk_nvmf_transport_pg_cache_buf)			buf_cache;
-	uint32_t							buf_cache_count;
-	uint32_t							buf_cache_size;
-	struct spdk_nvmf_poll_group					*group;
-	TAILQ_ENTRY(spdk_nvmf_transport_poll_group)			link;
+struct spdk_nvmf_subsystem_listener {
+	struct spdk_nvmf_subsystem			*subsystem;
+	spdk_nvmf_tgt_subsystem_listen_done_fn		cb_fn;
+	void						*cb_arg;
+	struct spdk_nvme_transport_id			*trid;
+	struct spdk_nvmf_transport			*transport;
+	enum spdk_nvme_ana_state			ana_state;
+	uint64_t					ana_state_change_count;
+	TAILQ_ENTRY(spdk_nvmf_subsystem_listener)	link;
 };
 
 /* Maximum number of registrants supported per namespace */
@@ -150,6 +132,10 @@ struct spdk_nvmf_subsystem_pg_ns_info {
 	/* Host ID for the registrants with the namespace */
 	struct spdk_uuid		reg_hostid[SPDK_NVMF_MAX_NUM_REGISTRANTS];
 	uint64_t			num_blocks;
+
+	/* I/O outstanding to this namespace */
+	uint64_t			io_outstanding;
+	enum spdk_nvmf_subsystem_state	state;
 };
 
 typedef void(*spdk_nvmf_poll_group_mod_done)(void *cb_arg, int status);
@@ -159,76 +145,14 @@ struct spdk_nvmf_subsystem_poll_group {
 	struct spdk_nvmf_subsystem_pg_ns_info	*ns_info;
 	uint32_t				num_ns;
 
-	uint64_t				io_outstanding;
+	/* Number of ADMIN and FABRICS requests outstanding */
+	uint64_t				mgmt_io_outstanding;
 	spdk_nvmf_poll_group_mod_done		cb_fn;
 	void					*cb_arg;
 
 	enum spdk_nvmf_subsystem_state		state;
 
 	TAILQ_HEAD(, spdk_nvmf_request)		queued;
-};
-
-struct spdk_nvmf_poll_group {
-	struct spdk_thread				*thread;
-	struct spdk_poller				*poller;
-
-	TAILQ_HEAD(, spdk_nvmf_transport_poll_group)	tgroups;
-
-	/* Array of poll groups indexed by subsystem id (sid) */
-	struct spdk_nvmf_subsystem_poll_group		*sgroups;
-	uint32_t					num_sgroups;
-
-	/* All of the queue pairs that belong to this poll group */
-	TAILQ_HEAD(, spdk_nvmf_qpair)			qpairs;
-
-	/* Statistics */
-	struct spdk_nvmf_poll_group_stat		stat;
-};
-
-typedef enum _spdk_nvmf_request_exec_status {
-	SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE,
-	SPDK_NVMF_REQUEST_EXEC_STATUS_ASYNCHRONOUS,
-} spdk_nvmf_request_exec_status;
-
-union nvmf_h2c_msg {
-	struct spdk_nvmf_capsule_cmd			nvmf_cmd;
-	struct spdk_nvme_cmd				nvme_cmd;
-	struct spdk_nvmf_fabric_prop_set_cmd		prop_set_cmd;
-	struct spdk_nvmf_fabric_prop_get_cmd		prop_get_cmd;
-	struct spdk_nvmf_fabric_connect_cmd		connect_cmd;
-};
-SPDK_STATIC_ASSERT(sizeof(union nvmf_h2c_msg) == 64, "Incorrect size");
-
-union nvmf_c2h_msg {
-	struct spdk_nvme_cpl				nvme_cpl;
-	struct spdk_nvmf_fabric_prop_get_rsp		prop_get_rsp;
-	struct spdk_nvmf_fabric_connect_rsp		connect_rsp;
-};
-SPDK_STATIC_ASSERT(sizeof(union nvmf_c2h_msg) == 16, "Incorrect size");
-
-struct spdk_nvmf_dif_info {
-	struct spdk_dif_ctx			dif_ctx;
-	bool					dif_insert_or_strip;
-	uint32_t				elba_length;
-	uint32_t				orig_length;
-};
-
-struct spdk_nvmf_request {
-	struct spdk_nvmf_qpair		*qpair;
-	uint32_t			length;
-	enum spdk_nvme_data_transfer	xfer;
-	void				*data;
-	union nvmf_h2c_msg		*cmd;
-	union nvmf_c2h_msg		*rsp;
-	void				*buffers[NVMF_REQ_MAX_BUFFERS];
-	struct iovec			iov[NVMF_REQ_MAX_BUFFERS];
-	uint32_t			iovcnt;
-	bool				data_from_pool;
-	struct spdk_bdev_io_wait_entry	bdev_io_wait;
-	struct spdk_nvmf_dif_info	dif;
-
-	STAILQ_ENTRY(spdk_nvmf_request)	buf_link;
-	TAILQ_ENTRY(spdk_nvmf_request)	link;
 };
 
 struct spdk_nvmf_registrant {
@@ -262,23 +186,6 @@ struct spdk_nvmf_ns {
 	bool ptpl_activated;
 };
 
-struct spdk_nvmf_qpair {
-	enum spdk_nvmf_qpair_state		state;
-	spdk_nvmf_state_change_done		state_cb;
-	void					*state_cb_arg;
-
-	struct spdk_nvmf_transport		*transport;
-	struct spdk_nvmf_ctrlr			*ctrlr;
-	struct spdk_nvmf_poll_group		*group;
-
-	uint16_t				qid;
-	uint16_t				sq_head;
-	uint16_t				sq_head_max;
-
-	TAILQ_HEAD(, spdk_nvmf_request)		outstanding;
-	TAILQ_ENTRY(spdk_nvmf_qpair)		link;
-};
-
 struct spdk_nvmf_ctrlr_feat {
 	union spdk_nvme_feat_arbitration arbitration;
 	union spdk_nvme_feat_power_management power_management;
@@ -300,6 +207,14 @@ struct spdk_nvmf_reservation_log {
 };
 
 /*
+ * NVMf async event completion.
+ */
+struct spdk_nvmf_async_event_completion {
+	union spdk_nvme_async_event_completion		event;
+	STAILQ_ENTRY(spdk_nvmf_async_event_completion)	link;
+};
+
+/*
  * This structure represents an NVMe-oF controller,
  * which is like a "session" in networking terms.
  */
@@ -308,12 +223,9 @@ struct spdk_nvmf_ctrlr {
 	char				hostnqn[SPDK_NVMF_NQN_MAX_LEN + 1];
 	struct spdk_nvmf_subsystem	*subsys;
 
-	struct {
-		union spdk_nvme_cap_register	cap;
-		union spdk_nvme_vs_register	vs;
-		union spdk_nvme_cc_register	cc;
-		union spdk_nvme_csts_register	csts;
-	} vcprop; /* virtual controller properties */
+	struct spdk_nvmf_ctrlr_data	cdata;
+
+	struct spdk_nvmf_registers	vcprop;
 
 	struct spdk_nvmf_ctrlr_feat feat;
 
@@ -321,11 +233,15 @@ struct spdk_nvmf_ctrlr {
 	struct spdk_thread	*thread;
 	struct spdk_bit_array	*qpair_mask;
 
-	struct spdk_nvmf_request *aer_req;
-	union spdk_nvme_async_event_completion notice_event;
-	union spdk_nvme_async_event_completion reservation_event;
+	const struct spdk_nvmf_subsystem_listener	*listener;
+
+	struct spdk_nvmf_request *aer_req[NVMF_MAX_ASYNC_EVENTS];
+	STAILQ_HEAD(, spdk_nvmf_async_event_completion) async_events;
+	uint64_t notice_aen_mask;
+	uint8_t nr_aer_reqs;
 	struct spdk_uuid  hostid;
 
+	uint32_t association_timeout; /* in milliseconds */
 	uint16_t changed_ns_list_count;
 	struct spdk_nvme_ns_list changed_ns_list;
 	uint64_t log_page_count;
@@ -336,169 +252,141 @@ struct spdk_nvmf_ctrlr {
 	uint64_t			last_keep_alive_tick;
 	struct spdk_poller		*keep_alive_poller;
 
+	struct spdk_poller		*association_timer;
+
 	bool				dif_insert_or_strip;
+	bool				in_destruct;
+	bool				disconnect_in_progress;
 
 	TAILQ_ENTRY(spdk_nvmf_ctrlr)	link;
 };
 
 struct spdk_nvmf_subsystem {
-	struct spdk_thread		*thread;
-	uint32_t			id;
-	enum spdk_nvmf_subsystem_state	state;
+	struct spdk_thread				*thread;
 
-	char subnqn[SPDK_NVMF_NQN_MAX_LEN + 1];
-	enum spdk_nvmf_subtype subtype;
-	uint16_t next_cntlid;
-	bool allow_any_host;
-	bool allow_any_listener ;
+	uint32_t					id;
 
-	struct spdk_nvmf_tgt			*tgt;
+	enum spdk_nvmf_subsystem_state			state;
+	enum spdk_nvmf_subtype				subtype;
 
-	char sn[SPDK_NVME_CTRLR_SN_LEN + 1];
-	char mn[SPDK_NVME_CTRLR_MN_LEN + 1];
+	uint16_t					next_cntlid;
+	struct {
+		uint8_t					allow_any_host : 1;
+		uint8_t					allow_any_listener : 1;
+		uint8_t					ana_reporting : 1;
+		uint8_t					reserved : 5;
+	} flags;
+
+	/* boolean for state change synchronization */
+	bool						changing_state;
+
+	struct spdk_nvmf_tgt				*tgt;
 
 	/* Array of pointers to namespaces of size max_nsid indexed by nsid - 1 */
-	struct spdk_nvmf_ns			**ns;
-	uint32_t				max_nsid;
-	/* This is the maximum allowed nsid to a subsystem */
-	uint32_t				max_allowed_nsid;
+	struct spdk_nvmf_ns				**ns;
+	uint32_t					max_nsid;
 
-	TAILQ_HEAD(, spdk_nvmf_ctrlr)		ctrlrs;
+	TAILQ_HEAD(, spdk_nvmf_ctrlr)			ctrlrs;
 
-	TAILQ_HEAD(, spdk_nvmf_host)		hosts;
+	/* A mutex used to protect the hosts list and allow_any_host flag. Unlike the namespace
+	 * array, this list is not used on the I/O path (it's needed for handling things like
+	 * the CONNECT command), so use a mutex to protect it instead of requiring the subsystem
+	 * state to be paused. This removes the requirement to pause the subsystem when hosts
+	 * are added or removed dynamically. */
+	pthread_mutex_t					mutex;
+	TAILQ_HEAD(, spdk_nvmf_host)			hosts;
+	TAILQ_HEAD(, spdk_nvmf_subsystem_listener)	listeners;
 
-	TAILQ_HEAD(, spdk_nvmf_listener)	listeners;
+	TAILQ_ENTRY(spdk_nvmf_subsystem)		entries;
 
-	TAILQ_ENTRY(spdk_nvmf_subsystem)	entries;
+	char						sn[SPDK_NVME_CTRLR_SN_LEN + 1];
+	char						mn[SPDK_NVME_CTRLR_MN_LEN + 1];
+	char						subnqn[SPDK_NVMF_NQN_MAX_LEN + 1];
 };
 
+int nvmf_poll_group_add_transport(struct spdk_nvmf_poll_group *group,
+				  struct spdk_nvmf_transport *transport);
+int nvmf_poll_group_update_subsystem(struct spdk_nvmf_poll_group *group,
+				     struct spdk_nvmf_subsystem *subsystem);
+int nvmf_poll_group_add_subsystem(struct spdk_nvmf_poll_group *group,
+				  struct spdk_nvmf_subsystem *subsystem,
+				  spdk_nvmf_poll_group_mod_done cb_fn, void *cb_arg);
+void nvmf_poll_group_remove_subsystem(struct spdk_nvmf_poll_group *group,
+				      struct spdk_nvmf_subsystem *subsystem, spdk_nvmf_poll_group_mod_done cb_fn, void *cb_arg);
+void nvmf_poll_group_pause_subsystem(struct spdk_nvmf_poll_group *group,
+				     struct spdk_nvmf_subsystem *subsystem,
+				     uint32_t nsid,
+				     spdk_nvmf_poll_group_mod_done cb_fn, void *cb_arg);
+void nvmf_poll_group_resume_subsystem(struct spdk_nvmf_poll_group *group,
+				      struct spdk_nvmf_subsystem *subsystem, spdk_nvmf_poll_group_mod_done cb_fn, void *cb_arg);
 
-struct spdk_nvmf_transport *spdk_nvmf_tgt_get_transport(struct spdk_nvmf_tgt *tgt,
-		enum spdk_nvme_transport_type);
+void nvmf_update_discovery_log(struct spdk_nvmf_tgt *tgt, const char *hostnqn);
+void nvmf_get_discovery_log_page(struct spdk_nvmf_tgt *tgt, const char *hostnqn,
+				 struct iovec *iov,
+				 uint32_t iovcnt, uint64_t offset, uint32_t length);
 
-int spdk_nvmf_poll_group_add_transport(struct spdk_nvmf_poll_group *group,
-				       struct spdk_nvmf_transport *transport);
-int spdk_nvmf_poll_group_update_subsystem(struct spdk_nvmf_poll_group *group,
-		struct spdk_nvmf_subsystem *subsystem);
-int spdk_nvmf_poll_group_add_subsystem(struct spdk_nvmf_poll_group *group,
-				       struct spdk_nvmf_subsystem *subsystem,
-				       spdk_nvmf_poll_group_mod_done cb_fn, void *cb_arg);
-void spdk_nvmf_poll_group_remove_subsystem(struct spdk_nvmf_poll_group *group,
-		struct spdk_nvmf_subsystem *subsystem, spdk_nvmf_poll_group_mod_done cb_fn, void *cb_arg);
-void spdk_nvmf_poll_group_pause_subsystem(struct spdk_nvmf_poll_group *group,
-		struct spdk_nvmf_subsystem *subsystem, spdk_nvmf_poll_group_mod_done cb_fn, void *cb_arg);
-void spdk_nvmf_poll_group_resume_subsystem(struct spdk_nvmf_poll_group *group,
-		struct spdk_nvmf_subsystem *subsystem, spdk_nvmf_poll_group_mod_done cb_fn, void *cb_arg);
-void spdk_nvmf_request_exec(struct spdk_nvmf_request *req);
-int spdk_nvmf_request_free(struct spdk_nvmf_request *req);
-int spdk_nvmf_request_complete(struct spdk_nvmf_request *req);
+void nvmf_ctrlr_destruct(struct spdk_nvmf_ctrlr *ctrlr);
+int nvmf_ctrlr_process_admin_cmd(struct spdk_nvmf_request *req);
+int nvmf_ctrlr_process_io_cmd(struct spdk_nvmf_request *req);
+bool nvmf_ctrlr_dsm_supported(struct spdk_nvmf_ctrlr *ctrlr);
+bool nvmf_ctrlr_write_zeroes_supported(struct spdk_nvmf_ctrlr *ctrlr);
+void nvmf_ctrlr_ns_changed(struct spdk_nvmf_ctrlr *ctrlr, uint32_t nsid);
 
-void spdk_nvmf_request_free_buffers(struct spdk_nvmf_request *req,
-				    struct spdk_nvmf_transport_poll_group *group,
-				    struct spdk_nvmf_transport *transport);
-int spdk_nvmf_request_get_buffers(struct spdk_nvmf_request *req,
-				  struct spdk_nvmf_transport_poll_group *group,
-				  struct spdk_nvmf_transport *transport,
-				  uint32_t length);
-int spdk_nvmf_request_get_buffers_multi(struct spdk_nvmf_request *req,
-					struct spdk_nvmf_transport_poll_group *group,
-					struct spdk_nvmf_transport *transport,
-					uint32_t *lengths, uint32_t num_lengths);
+void nvmf_bdev_ctrlr_identify_ns(struct spdk_nvmf_ns *ns, struct spdk_nvme_ns_data *nsdata,
+				 bool dif_insert_or_strip);
+int nvmf_bdev_ctrlr_read_cmd(struct spdk_bdev *bdev, struct spdk_bdev_desc *desc,
+			     struct spdk_io_channel *ch, struct spdk_nvmf_request *req);
+int nvmf_bdev_ctrlr_write_cmd(struct spdk_bdev *bdev, struct spdk_bdev_desc *desc,
+			      struct spdk_io_channel *ch, struct spdk_nvmf_request *req);
+int nvmf_bdev_ctrlr_compare_cmd(struct spdk_bdev *bdev, struct spdk_bdev_desc *desc,
+				struct spdk_io_channel *ch, struct spdk_nvmf_request *req);
+int nvmf_bdev_ctrlr_compare_and_write_cmd(struct spdk_bdev *bdev, struct spdk_bdev_desc *desc,
+		struct spdk_io_channel *ch, struct spdk_nvmf_request *cmp_req, struct spdk_nvmf_request *write_req);
+int nvmf_bdev_ctrlr_write_zeroes_cmd(struct spdk_bdev *bdev, struct spdk_bdev_desc *desc,
+				     struct spdk_io_channel *ch, struct spdk_nvmf_request *req);
+int nvmf_bdev_ctrlr_flush_cmd(struct spdk_bdev *bdev, struct spdk_bdev_desc *desc,
+			      struct spdk_io_channel *ch, struct spdk_nvmf_request *req);
+int nvmf_bdev_ctrlr_dsm_cmd(struct spdk_bdev *bdev, struct spdk_bdev_desc *desc,
+			    struct spdk_io_channel *ch, struct spdk_nvmf_request *req);
+int nvmf_bdev_ctrlr_nvme_passthru_io(struct spdk_bdev *bdev, struct spdk_bdev_desc *desc,
+				     struct spdk_io_channel *ch, struct spdk_nvmf_request *req);
+bool nvmf_bdev_ctrlr_get_dif_ctx(struct spdk_bdev *bdev, struct spdk_nvme_cmd *cmd,
+				 struct spdk_dif_ctx *dif_ctx);
 
-bool spdk_nvmf_request_get_dif_ctx(struct spdk_nvmf_request *req, struct spdk_dif_ctx *dif_ctx);
-
-void spdk_nvmf_get_discovery_log_page(struct spdk_nvmf_tgt *tgt, const char *hostnqn,
-				      struct iovec *iov,
-				      uint32_t iovcnt, uint64_t offset, uint32_t length);
-
-void spdk_nvmf_ctrlr_destruct(struct spdk_nvmf_ctrlr *ctrlr);
-int spdk_nvmf_ctrlr_process_fabrics_cmd(struct spdk_nvmf_request *req);
-int spdk_nvmf_ctrlr_process_admin_cmd(struct spdk_nvmf_request *req);
-int spdk_nvmf_ctrlr_process_io_cmd(struct spdk_nvmf_request *req);
-bool spdk_nvmf_ctrlr_dsm_supported(struct spdk_nvmf_ctrlr *ctrlr);
-bool spdk_nvmf_ctrlr_write_zeroes_supported(struct spdk_nvmf_ctrlr *ctrlr);
-void spdk_nvmf_ctrlr_ns_changed(struct spdk_nvmf_ctrlr *ctrlr, uint32_t nsid);
-
-void spdk_nvmf_bdev_ctrlr_identify_ns(struct spdk_nvmf_ns *ns, struct spdk_nvme_ns_data *nsdata,
-				      bool dif_insert_or_strip);
-int spdk_nvmf_bdev_ctrlr_read_cmd(struct spdk_bdev *bdev, struct spdk_bdev_desc *desc,
-				  struct spdk_io_channel *ch, struct spdk_nvmf_request *req);
-int spdk_nvmf_bdev_ctrlr_write_cmd(struct spdk_bdev *bdev, struct spdk_bdev_desc *desc,
-				   struct spdk_io_channel *ch, struct spdk_nvmf_request *req);
-int spdk_nvmf_bdev_ctrlr_write_zeroes_cmd(struct spdk_bdev *bdev, struct spdk_bdev_desc *desc,
-		struct spdk_io_channel *ch, struct spdk_nvmf_request *req);
-int spdk_nvmf_bdev_ctrlr_flush_cmd(struct spdk_bdev *bdev, struct spdk_bdev_desc *desc,
-				   struct spdk_io_channel *ch, struct spdk_nvmf_request *req);
-int spdk_nvmf_bdev_ctrlr_dsm_cmd(struct spdk_bdev *bdev, struct spdk_bdev_desc *desc,
-				 struct spdk_io_channel *ch, struct spdk_nvmf_request *req);
-int spdk_nvmf_bdev_ctrlr_nvme_passthru_io(struct spdk_bdev *bdev, struct spdk_bdev_desc *desc,
-		struct spdk_io_channel *ch, struct spdk_nvmf_request *req);
-bool spdk_nvmf_bdev_ctrlr_get_dif_ctx(struct spdk_bdev *bdev, struct spdk_nvme_cmd *cmd,
-				      struct spdk_dif_ctx *dif_ctx);
-
-int spdk_nvmf_subsystem_add_ctrlr(struct spdk_nvmf_subsystem *subsystem,
-				  struct spdk_nvmf_ctrlr *ctrlr);
-void spdk_nvmf_subsystem_remove_ctrlr(struct spdk_nvmf_subsystem *subsystem,
-				      struct spdk_nvmf_ctrlr *ctrlr);
-struct spdk_nvmf_ctrlr *spdk_nvmf_subsystem_get_ctrlr(struct spdk_nvmf_subsystem *subsystem,
+int nvmf_subsystem_add_ctrlr(struct spdk_nvmf_subsystem *subsystem,
+			     struct spdk_nvmf_ctrlr *ctrlr);
+void nvmf_subsystem_remove_ctrlr(struct spdk_nvmf_subsystem *subsystem,
+				 struct spdk_nvmf_ctrlr *ctrlr);
+void nvmf_subsystem_remove_all_listeners(struct spdk_nvmf_subsystem *subsystem,
+		bool stop);
+struct spdk_nvmf_ctrlr *nvmf_subsystem_get_ctrlr(struct spdk_nvmf_subsystem *subsystem,
 		uint16_t cntlid);
-int spdk_nvmf_ctrlr_async_event_ns_notice(struct spdk_nvmf_ctrlr *ctrlr);
-void spdk_nvmf_ctrlr_async_event_reservation_notification(struct spdk_nvmf_ctrlr *ctrlr);
-void spdk_nvmf_ns_reservation_request(void *ctx);
-void spdk_nvmf_ctrlr_reservation_notice_log(struct spdk_nvmf_ctrlr *ctrlr,
-		struct spdk_nvmf_ns *ns,
-		enum spdk_nvme_reservation_notification_log_page_type type);
+struct spdk_nvmf_subsystem_listener *nvmf_subsystem_find_listener(
+	struct spdk_nvmf_subsystem *subsystem,
+	const struct spdk_nvme_transport_id *trid);
+struct spdk_nvmf_listener *nvmf_transport_find_listener(
+	struct spdk_nvmf_transport *transport,
+	const struct spdk_nvme_transport_id *trid);
+void nvmf_subsystem_set_ana_state(struct spdk_nvmf_subsystem *subsystem,
+				  const struct spdk_nvme_transport_id *trid,
+				  enum spdk_nvme_ana_state ana_state,
+				  spdk_nvmf_tgt_subsystem_listen_done_fn cb_fn, void *cb_arg);
 
-static inline enum spdk_nvme_data_transfer
-spdk_nvmf_req_get_xfer(struct spdk_nvmf_request *req) {
-	enum spdk_nvme_data_transfer xfer;
-	struct spdk_nvme_cmd *cmd = &req->cmd->nvme_cmd;
-	struct spdk_nvme_sgl_descriptor *sgl = &cmd->dptr.sgl1;
-
-	/* Figure out data transfer direction */
-	if (cmd->opc == SPDK_NVME_OPC_FABRIC)
-	{
-		xfer = spdk_nvme_opc_get_data_transfer(req->cmd->nvmf_cmd.fctype);
-	} else
-	{
-		xfer = spdk_nvme_opc_get_data_transfer(cmd->opc);
-	}
-
-	if (xfer == SPDK_NVME_DATA_NONE)
-	{
-		return xfer;
-	}
-
-	/* Even for commands that may transfer data, they could have specified 0 length.
-	 * We want those to show up with xfer SPDK_NVME_DATA_NONE.
-	 */
-	switch (sgl->generic.type)
-	{
-	case SPDK_NVME_SGL_TYPE_DATA_BLOCK:
-	case SPDK_NVME_SGL_TYPE_BIT_BUCKET:
-	case SPDK_NVME_SGL_TYPE_SEGMENT:
-	case SPDK_NVME_SGL_TYPE_LAST_SEGMENT:
-	case SPDK_NVME_SGL_TYPE_TRANSPORT_DATA_BLOCK:
-		if (sgl->unkeyed.length == 0) {
-			xfer = SPDK_NVME_DATA_NONE;
-		}
-		break;
-	case SPDK_NVME_SGL_TYPE_KEYED_DATA_BLOCK:
-		if (sgl->keyed.length == 0) {
-			xfer = SPDK_NVME_DATA_NONE;
-		}
-		break;
-	}
-
-	return xfer;
-}
+int nvmf_ctrlr_async_event_ns_notice(struct spdk_nvmf_ctrlr *ctrlr);
+int nvmf_ctrlr_async_event_ana_change_notice(struct spdk_nvmf_ctrlr *ctrlr);
+int nvmf_ctrlr_async_event_discovery_log_change_notice(struct spdk_nvmf_ctrlr *ctrlr);
+void nvmf_ctrlr_async_event_reservation_notification(struct spdk_nvmf_ctrlr *ctrlr);
+void nvmf_ns_reservation_request(void *ctx);
+void nvmf_ctrlr_reservation_notice_log(struct spdk_nvmf_ctrlr *ctrlr,
+				       struct spdk_nvmf_ns *ns,
+				       enum spdk_nvme_reservation_notification_log_page_type type);
 
 /*
  * Abort aer is sent on a per controller basis and sends a completion for the aer to the host.
  * This function should be called when attempting to recover in error paths when it is OK for
  * the host to send a subsequent AER.
  */
-void spdk_nvmf_ctrlr_abort_aer(struct spdk_nvmf_ctrlr *ctrlr);
+void nvmf_ctrlr_abort_aer(struct spdk_nvmf_ctrlr *ctrlr);
 
 /*
  * Free aer simply frees the rdma resources for the aer without informing the host.
@@ -506,10 +394,12 @@ void spdk_nvmf_ctrlr_abort_aer(struct spdk_nvmf_ctrlr *ctrlr);
  * the qpair is completely empty before freeing the request. The reason we free the
  * AER without sending a completion is to prevent the host from sending another AER.
  */
-void spdk_nvmf_qpair_free_aer(struct spdk_nvmf_qpair *qpair);
+void nvmf_qpair_free_aer(struct spdk_nvmf_qpair *qpair);
+
+int nvmf_ctrlr_abort_request(struct spdk_nvmf_request *req);
 
 static inline struct spdk_nvmf_ns *
-_spdk_nvmf_subsystem_get_ns(struct spdk_nvmf_subsystem *subsystem, uint32_t nsid)
+_nvmf_subsystem_get_ns(struct spdk_nvmf_subsystem *subsystem, uint32_t nsid)
 {
 	/* NOTE: This implicitly also checks for 0, since 0 - 1 wraps around to UINT32_MAX. */
 	if (spdk_unlikely(nsid - 1 >= subsystem->max_nsid)) {
@@ -520,7 +410,7 @@ _spdk_nvmf_subsystem_get_ns(struct spdk_nvmf_subsystem *subsystem, uint32_t nsid
 }
 
 static inline bool
-spdk_nvmf_qpair_is_admin_queue(struct spdk_nvmf_qpair *qpair)
+nvmf_qpair_is_admin_queue(struct spdk_nvmf_qpair *qpair)
 {
 	return qpair->qid == 0;
 }

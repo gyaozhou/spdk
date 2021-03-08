@@ -34,11 +34,11 @@
 #include "bdev_raid.h"
 
 #include "spdk/env.h"
-#include "spdk/io_channel.h"
+#include "spdk/thread.h"
 #include "spdk/string.h"
 #include "spdk/util.h"
 
-#include "spdk_internal/log.h"
+#include "spdk/log.h"
 
 /*
  * brief:
@@ -243,8 +243,9 @@ _raid0_split_io_range(struct raid_bdev_io_range *io_range, uint8_t disk_idx,
 	nblocks_in_disk = (n_strips_in_disk - 1) * io_range->strip_size
 			  + end_offset_in_disk - start_offset_in_disk + 1;
 
-	SPDK_DEBUGLOG(SPDK_LOG_BDEV_RAID0,
-		      "raid_bdev (strip_size 0x%lx) splits IO to base_bdev (%u) at (0x%lx, 0x%lx).\n",
+	SPDK_DEBUGLOG(bdev_raid0,
+		      "raid_bdev (strip_size 0x%" PRIx64 ") splits IO to base_bdev (%u) at (0x%" PRIx64 ", 0x%" PRIx64
+		      ").\n",
 		      io_range->strip_size, disk_idx, offset_in_disk, nblocks_in_disk);
 
 	*_offset_in_disk = offset_in_disk;
@@ -260,6 +261,18 @@ _raid0_submit_null_payload_request(void *_raid_io)
 	struct raid_bdev_io *raid_io = _raid_io;
 
 	raid0_submit_null_payload_request(raid_io);
+}
+
+static void
+raid0_base_io_complete(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
+{
+	struct raid_bdev_io *raid_io = cb_arg;
+
+	raid_bdev_io_complete_part(raid_io, 1, success ?
+				   SPDK_BDEV_IO_STATUS_SUCCESS :
+				   SPDK_BDEV_IO_STATUS_FAILED);
+
+	spdk_bdev_free_io(bdev_io);
 }
 
 /*
@@ -290,9 +303,11 @@ raid0_submit_null_payload_request(struct raid_bdev_io *raid_io)
 			    raid_bdev->strip_size, raid_bdev->strip_size_shift,
 			    bdev_io->u.bdev.offset_blocks, bdev_io->u.bdev.num_blocks);
 
-	raid_io->base_bdev_io_expected = io_range.n_disks_involved;
+	if (raid_io->base_bdev_io_remaining == 0) {
+		raid_io->base_bdev_io_remaining = io_range.n_disks_involved;
+	}
 
-	while (raid_io->base_bdev_io_submitted < raid_io->base_bdev_io_expected) {
+	while (raid_io->base_bdev_io_submitted < io_range.n_disks_involved) {
 		uint8_t disk_idx;
 		uint64_t offset_in_disk;
 		uint64_t nblocks_in_disk;
@@ -310,13 +325,13 @@ raid0_submit_null_payload_request(struct raid_bdev_io *raid_io)
 		case SPDK_BDEV_IO_TYPE_UNMAP:
 			ret = spdk_bdev_unmap_blocks(base_info->desc, base_ch,
 						     offset_in_disk, nblocks_in_disk,
-						     raid_bdev_base_io_completion, raid_io);
+						     raid0_base_io_complete, raid_io);
 			break;
 
 		case SPDK_BDEV_IO_TYPE_FLUSH:
 			ret = spdk_bdev_flush_blocks(base_info->desc, base_ch,
 						     offset_in_disk, nblocks_in_disk,
-						     raid_bdev_base_io_completion, raid_io);
+						     raid0_base_io_complete, raid_io);
 			break;
 
 		default:
@@ -342,15 +357,12 @@ raid0_submit_null_payload_request(struct raid_bdev_io *raid_io)
 
 static int raid0_start(struct raid_bdev *raid_bdev)
 {
-	uint64_t min_blockcnt;
-	uint8_t i;
+	uint64_t min_blockcnt = UINT64_MAX;
+	struct raid_base_bdev_info *base_info;
 
-	min_blockcnt = raid_bdev->base_bdev_info[0].bdev->blockcnt;
-	for (i = 1; i < raid_bdev->num_base_bdevs; i++) {
+	RAID_FOR_EACH_BASE_BDEV(raid_bdev, base_info) {
 		/* Calculate minimum block count from all base bdevs */
-		if (raid_bdev->base_bdev_info[i].bdev->blockcnt < min_blockcnt) {
-			min_blockcnt = raid_bdev->base_bdev_info[i].bdev->blockcnt;
-		}
+		min_blockcnt = spdk_min(min_blockcnt, base_info->bdev->blockcnt);
 	}
 
 	/*
@@ -358,7 +370,7 @@ static int raid0_start(struct raid_bdev *raid_bdev)
 	 * of raid bdev is the number of base bdev times the minimum block count
 	 * of any base bdev.
 	 */
-	SPDK_DEBUGLOG(SPDK_LOG_BDEV_RAID0, "min blockcount %lu,  numbasedev %u, strip size shift %u\n",
+	SPDK_DEBUGLOG(bdev_raid0, "min blockcount %" PRIu64 ",  numbasedev %u, strip size shift %u\n",
 		      min_blockcnt, raid_bdev->num_base_bdevs, raid_bdev->strip_size_shift);
 	raid_bdev->bdev.blockcnt = ((min_blockcnt >> raid_bdev->strip_size_shift) <<
 				    raid_bdev->strip_size_shift)  * raid_bdev->num_base_bdevs;
@@ -377,10 +389,11 @@ static int raid0_start(struct raid_bdev *raid_bdev)
 
 static struct raid_bdev_module g_raid0_module = {
 	.level = RAID0,
+	.base_bdevs_min = 1,
 	.start = raid0_start,
 	.submit_rw_request = raid0_submit_rw_request,
 	.submit_null_payload_request = raid0_submit_null_payload_request,
 };
 RAID_MODULE_REGISTER(&g_raid0_module)
 
-SPDK_LOG_REGISTER_COMPONENT("bdev_raid0", SPDK_LOG_BDEV_RAID0)
+SPDK_LOG_REGISTER_COMPONENT(bdev_raid0)

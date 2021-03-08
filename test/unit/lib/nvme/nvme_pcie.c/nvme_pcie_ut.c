@@ -36,14 +36,47 @@
 #include "spdk_cunit.h"
 
 #define UNIT_TEST_NO_VTOPHYS
-#include "common/lib/test_env.c"
 
 #include "nvme/nvme_pcie.c"
+#include "nvme/nvme_pcie_common.c"
+#include "common/lib/nvme/common_stubs.h"
 
-struct spdk_log_flag SPDK_LOG_NVME = {
-	.name = "nvme",
-	.enabled = false,
-};
+pid_t g_spdk_nvme_pid;
+DEFINE_STUB(spdk_mem_register, int, (void *vaddr, size_t len), 0);
+DEFINE_STUB(spdk_mem_unregister, int, (void *vaddr, size_t len), 0);
+
+DEFINE_STUB(nvme_get_quirks, uint64_t, (const struct spdk_pci_id *id), 0);
+
+DEFINE_STUB(nvme_wait_for_completion, int,
+	    (struct spdk_nvme_qpair *qpair,
+	     struct nvme_completion_poll_status *status), 0);
+DEFINE_STUB_V(nvme_completion_poll_cb, (void *arg, const struct spdk_nvme_cpl *cpl));
+
+DEFINE_STUB(nvme_ctrlr_submit_admin_request, int, (struct spdk_nvme_ctrlr *ctrlr,
+		struct nvme_request *req), 0);
+DEFINE_STUB_V(nvme_ctrlr_free_processes, (struct spdk_nvme_ctrlr *ctrlr));
+DEFINE_STUB(nvme_ctrlr_proc_get_devhandle, struct spdk_pci_device *,
+	    (struct spdk_nvme_ctrlr *ctrlr), NULL);
+
+DEFINE_STUB(spdk_pci_device_map_bar, int, (struct spdk_pci_device *dev, uint32_t bar,
+		void **mapped_addr, uint64_t *phys_addr, uint64_t *size), 0);
+DEFINE_STUB(spdk_pci_device_unmap_bar, int, (struct spdk_pci_device *dev, uint32_t bar, void *addr),
+	    0);
+DEFINE_STUB(spdk_pci_device_attach, int, (struct spdk_pci_driver *driver, spdk_pci_enum_cb enum_cb,
+		void *enum_ctx, struct spdk_pci_addr *pci_address), 0);
+DEFINE_STUB(spdk_pci_device_claim, int, (struct spdk_pci_device *dev), 0);
+DEFINE_STUB_V(spdk_pci_device_unclaim, (struct spdk_pci_device *dev));
+DEFINE_STUB_V(spdk_pci_device_detach, (struct spdk_pci_device *device));
+DEFINE_STUB(spdk_pci_device_allow, int, (struct spdk_pci_addr *pci_addr), 0);
+DEFINE_STUB(spdk_pci_device_cfg_write16, int, (struct spdk_pci_device *dev, uint16_t value,
+		uint32_t offset), 0);
+DEFINE_STUB(spdk_pci_device_cfg_read16, int, (struct spdk_pci_device *dev, uint16_t *value,
+		uint32_t offset), 0);
+DEFINE_STUB(spdk_pci_device_get_id, struct spdk_pci_id, (struct spdk_pci_device *dev), {0})
+
+DEFINE_STUB(nvme_uevent_connect, int, (void), 0);
+
+SPDK_LOG_REGISTER_COMPONENT(nvme)
 
 struct nvme_driver *g_spdk_nvme_driver = NULL;
 
@@ -68,7 +101,7 @@ struct spdk_uevent_entry {
 static STAILQ_HEAD(, spdk_uevent_entry) g_uevents = STAILQ_HEAD_INITIALIZER(g_uevents);
 
 int
-spdk_get_uevent(int fd, struct spdk_uevent *uevent)
+nvme_get_uevent(int fd, struct spdk_uevent *uevent)
 {
 	struct spdk_uevent_entry *entry;
 
@@ -96,7 +129,7 @@ static uint64_t g_vtophys_size = 0;
 
 DEFINE_RETURN_MOCK(spdk_vtophys, uint64_t);
 uint64_t
-spdk_vtophys(void *buf, uint64_t *size)
+spdk_vtophys(const void *buf, uint64_t *size)
 {
 	if (size) {
 		*size = g_vtophys_size;
@@ -108,17 +141,14 @@ spdk_vtophys(void *buf, uint64_t *size)
 }
 
 DEFINE_STUB(spdk_pci_device_get_addr, struct spdk_pci_addr, (struct spdk_pci_device *dev), {});
-DEFINE_STUB(nvme_ctrlr_add_process, int, (struct spdk_nvme_ctrlr *ctrlr, void *devhandle), 0);
 DEFINE_STUB(nvme_ctrlr_probe, int, (const struct spdk_nvme_transport_id *trid,
 				    struct spdk_nvme_probe_ctx *probe_ctx, void *devhandle), 0);
-DEFINE_STUB(spdk_nvme_ctrlr_get_current_process, struct spdk_nvme_ctrlr_process *,
-	    (struct spdk_nvme_ctrlr *ctrlr), NULL);
 DEFINE_STUB(spdk_pci_device_is_removed, bool, (struct spdk_pci_device *dev), false);
-DEFINE_STUB(spdk_nvme_get_ctrlr_by_trid_unsafe, struct spdk_nvme_ctrlr *,
+DEFINE_STUB(nvme_get_ctrlr_by_trid_unsafe, struct spdk_nvme_ctrlr *,
 	    (const struct spdk_nvme_transport_id *trid), NULL);
 DEFINE_STUB(spdk_nvme_ctrlr_get_regs_csts, union spdk_nvme_csts_register,
 	    (struct spdk_nvme_ctrlr *ctrlr), {});
-DEFINE_STUB(spdk_nvme_ctrlr_get_process, struct spdk_nvme_ctrlr_process *,
+DEFINE_STUB(nvme_ctrlr_get_process, struct spdk_nvme_ctrlr_process *,
 	    (struct spdk_nvme_ctrlr *ctrlr, pid_t pid), NULL);
 DEFINE_STUB(nvme_completion_is_retry, bool, (const struct spdk_nvme_cpl *cpl), false);
 DEFINE_STUB_V(spdk_nvme_qpair_print_command, (struct spdk_nvme_qpair *qpair,
@@ -274,7 +304,9 @@ test_nvme_pcie_hotplug_monitor(void)
 
 	/* Initiate variables and ctrlr */
 	driver.initialized = true;
+	driver.hotplug_fd = 123;
 	CU_ASSERT(pthread_mutexattr_init(&attr) == 0);
+	CU_ASSERT(pthread_mutex_init(&pctrlr.ctrlr.ctrlr_lock, &attr) == 0);
 	CU_ASSERT(pthread_mutex_init(&driver.lock, &attr) == 0);
 	TAILQ_INIT(&driver.shared_attached_ctrlrs);
 	g_spdk_nvme_driver = &driver;
@@ -312,14 +344,14 @@ test_nvme_pcie_hotplug_monitor(void)
 	CU_ASSERT(STAILQ_EMPTY(&g_uevents));
 	STAILQ_INSERT_TAIL(&g_uevents, &entry, link);
 
-	MOCK_SET(spdk_nvme_get_ctrlr_by_trid_unsafe, &pctrlr.ctrlr);
+	MOCK_SET(nvme_get_ctrlr_by_trid_unsafe, &pctrlr.ctrlr);
 
 	_nvme_pcie_hotplug_monitor(&test_nvme_probe_ctx);
 
 	CU_ASSERT(STAILQ_EMPTY(&g_uevents));
 	CU_ASSERT(pctrlr.ctrlr.is_failed == true);
 	pctrlr.ctrlr.is_failed = false;
-	MOCK_CLEAR(spdk_nvme_get_ctrlr_by_trid_unsafe);
+	MOCK_CLEAR(nvme_get_ctrlr_by_trid_unsafe);
 
 	/* Case 4: SPDK_NVME_UEVENT_REMOVE/ NVME_VFIO */
 	entry.uevent.subsystem = SPDK_NVME_UEVENT_SUBSYSTEM_VFIO;
@@ -327,14 +359,14 @@ test_nvme_pcie_hotplug_monitor(void)
 	snprintf(entry.uevent.traddr, sizeof(entry.uevent.traddr), "0000:05:00.0");
 	CU_ASSERT(STAILQ_EMPTY(&g_uevents));
 	STAILQ_INSERT_TAIL(&g_uevents, &entry, link);
-	MOCK_SET(spdk_nvme_get_ctrlr_by_trid_unsafe, &pctrlr.ctrlr);
+	MOCK_SET(nvme_get_ctrlr_by_trid_unsafe, &pctrlr.ctrlr);
 
 	_nvme_pcie_hotplug_monitor(&test_nvme_probe_ctx);
 
 	CU_ASSERT(STAILQ_EMPTY(&g_uevents));
 	CU_ASSERT(pctrlr.ctrlr.is_failed == true);
 	pctrlr.ctrlr.is_failed = false;
-	MOCK_CLEAR(spdk_nvme_get_ctrlr_by_trid_unsafe);
+	MOCK_CLEAR(nvme_get_ctrlr_by_trid_unsafe);
 
 	/* Case 5:  Removed device detected in another process  */
 	pctrlr.ctrlr.trid.trtype = SPDK_NVME_TRANSPORT_PCIE;
@@ -357,6 +389,7 @@ test_nvme_pcie_hotplug_monitor(void)
 	CU_ASSERT(pctrlr.ctrlr.is_failed == true);
 
 	pthread_mutex_destroy(&driver.lock);
+	pthread_mutex_destroy(&pctrlr.ctrlr.ctrlr_lock);
 	pthread_mutexattr_destroy(&attr);
 	g_spdk_nvme_driver = NULL;
 }
@@ -387,7 +420,7 @@ test_build_contig_hw_sgl_request(void)
 	g_vtophys_size = 100;
 	MOCK_SET(spdk_vtophys, 0xDEADBEEF);
 
-	rc = nvme_pcie_qpair_build_contig_hw_sgl_request(&qpair, &req, &tr);
+	rc = nvme_pcie_qpair_build_contig_hw_sgl_request(&qpair, &req, &tr, 0);
 	CU_ASSERT(rc == 0);
 	CU_ASSERT(req.cmd.dptr.sgl1.unkeyed.type == SPDK_NVME_SGL_TYPE_DATA_BLOCK);
 	CU_ASSERT(req.cmd.dptr.sgl1.address == 0xDEADBEEF);
@@ -406,7 +439,7 @@ test_build_contig_hw_sgl_request(void)
 	g_vtophys_size = 1000;
 	MOCK_SET(spdk_vtophys, 0xDEADBEEF);
 
-	rc = nvme_pcie_qpair_build_contig_hw_sgl_request(&qpair, &req, &tr);
+	rc = nvme_pcie_qpair_build_contig_hw_sgl_request(&qpair, &req, &tr, 0);
 	CU_ASSERT(rc == 0);
 	CU_ASSERT(req.cmd.dptr.sgl1.unkeyed.type == SPDK_NVME_SGL_TYPE_DATA_BLOCK);
 	CU_ASSERT(req.cmd.dptr.sgl1.address == 0xDEADBEEF);
@@ -425,17 +458,17 @@ test_build_contig_hw_sgl_request(void)
 	tr.prp_sgl_bus_addr = 0xFF0FF;
 	MOCK_SET(spdk_vtophys, 0xDEADBEEF);
 
-	rc = nvme_pcie_qpair_build_contig_hw_sgl_request(&qpair, &req, &tr);
+	rc = nvme_pcie_qpair_build_contig_hw_sgl_request(&qpair, &req, &tr, 0);
 	CU_ASSERT(rc == 0);
 	CU_ASSERT(req.cmd.dptr.sgl1.unkeyed.type == SPDK_NVME_SGL_TYPE_LAST_SEGMENT);
 	CU_ASSERT(req.cmd.dptr.sgl1.address == tr.prp_sgl_bus_addr);
 	CU_ASSERT(req.cmd.dptr.sgl1.unkeyed.length == 2 * sizeof(struct spdk_nvme_sgl_descriptor));
 	CU_ASSERT(tr.u.sgl[0].unkeyed.type == SPDK_NVME_SGL_TYPE_DATA_BLOCK);
-	CU_ASSERT(tr.u.sgl[0].unkeyed.length = 60);
-	CU_ASSERT(tr.u.sgl[0].address = 0xDEADBEEF);
+	CU_ASSERT(tr.u.sgl[0].unkeyed.length == 60);
+	CU_ASSERT(tr.u.sgl[0].address == 0xDEADBEEF);
 	CU_ASSERT(tr.u.sgl[1].unkeyed.type == SPDK_NVME_SGL_TYPE_DATA_BLOCK);
-	CU_ASSERT(tr.u.sgl[1].unkeyed.length = 40);
-	CU_ASSERT(tr.u.sgl[1].address = 0xDEADBEEF);
+	CU_ASSERT(tr.u.sgl[1].unkeyed.length == 40);
+	CU_ASSERT(tr.u.sgl[1].address == 0xDEADBEEF);
 
 	MOCK_CLEAR(spdk_vtophys);
 	g_vtophys_size = 0;
@@ -449,23 +482,14 @@ int main(int argc, char **argv)
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	if (CU_initialize_registry() != CUE_SUCCESS) {
-		return CU_get_error();
-	}
+	CU_set_error_action(CUEA_ABORT);
+	CU_initialize_registry();
 
 	suite = CU_add_suite("nvme_pcie", NULL, NULL);
-	if (suite == NULL) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
-
-	if (CU_add_test(suite, "prp_list_append", test_prp_list_append) == NULL ||
-	    CU_add_test(suite, "nvme_pcie_hotplug_monitor", test_nvme_pcie_hotplug_monitor) == NULL ||
-	    CU_add_test(suite, "shadow_doorbell_update", test_shadow_doorbell_update) == NULL ||
-	    CU_add_test(suite, "build_contig_hw_sgl_request", test_build_contig_hw_sgl_request) == NULL) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
+	CU_ADD_TEST(suite, test_prp_list_append);
+	CU_ADD_TEST(suite, test_nvme_pcie_hotplug_monitor);
+	CU_ADD_TEST(suite, test_shadow_doorbell_update);
+	CU_ADD_TEST(suite, test_build_contig_hw_sgl_request);
 
 	CU_basic_set_mode(CU_BRM_VERBOSE);
 	CU_basic_run_tests();

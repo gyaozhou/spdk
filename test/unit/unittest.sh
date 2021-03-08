@@ -12,10 +12,11 @@ source "$rootdir/test/common/autotest_common.sh"
 
 cd "$rootdir"
 
-function unittest_bdev {
+function unittest_bdev() {
 	$valgrind $testdir/lib/bdev/bdev.c/bdev_ut
-	$valgrind $testdir/lib/bdev/bdev_ocssd.c/bdev_ocssd_ut
-	$valgrind $testdir/lib/bdev/bdev_raid.c/bdev_raid_ut
+	$valgrind $testdir/lib/bdev/nvme/bdev_ocssd.c/bdev_ocssd_ut
+	$valgrind $testdir/lib/bdev/nvme/bdev_nvme.c/bdev_nvme_ut
+	$valgrind $testdir/lib/bdev/raid/bdev_raid.c/bdev_raid_ut
 	$valgrind $testdir/lib/bdev/bdev_zone.c/bdev_zone_ut
 	$valgrind $testdir/lib/bdev/gpt/gpt.c/gpt_ut
 	$valgrind $testdir/lib/bdev/part.c/part_ut
@@ -25,8 +26,12 @@ function unittest_bdev {
 	$valgrind $testdir/lib/bdev/mt/bdev.c/bdev_ut
 }
 
-function unittest_blob {
-	$valgrind $testdir/lib/blob/blob.c/blob_ut
+function unittest_blob() {
+	# We do not compile blob_ut on systems with too old Cunit, so do
+	# not try to execute it if it doesn't exist
+	if [[ -e $testdir/lib/blob/blob.c/blob_ut ]]; then
+		$valgrind $testdir/lib/blob/blob.c/blob_ut
+	fi
 	$valgrind $testdir/lib/blobfs/tree.c/tree_ut
 	$valgrind $testdir/lib/blobfs/blobfs_async_ut/blobfs_async_ut
 	# blobfs_sync_ut hangs when run under valgrind, so don't use $valgrind
@@ -34,14 +39,13 @@ function unittest_blob {
 	$valgrind $testdir/lib/blobfs/blobfs_bdev.c/blobfs_bdev_ut
 }
 
-function unittest_event {
+function unittest_event() {
 	$valgrind $testdir/lib/event/subsystem.c/subsystem_ut
 	$valgrind $testdir/lib/event/app.c/app_ut
 	$valgrind $testdir/lib/event/reactor.c/reactor_ut
 }
 
-function unittest_ftl {
-	$valgrind $testdir/lib/ftl/ftl_rwb.c/ftl_rwb_ut
+function unittest_ftl() {
 	$valgrind $testdir/lib/ftl/ftl_ppa/ftl_ppa_ut
 	$valgrind $testdir/lib/ftl/ftl_band.c/ftl_band_ut
 	$valgrind $testdir/lib/ftl/ftl_reloc.c/ftl_reloc_ut
@@ -50,23 +54,23 @@ function unittest_ftl {
 	$valgrind $testdir/lib/ftl/ftl_io.c/ftl_io_ut
 }
 
-function unittest_iscsi {
+function unittest_iscsi() {
 	$valgrind $testdir/lib/iscsi/conn.c/conn_ut
 	$valgrind $testdir/lib/iscsi/param.c/param_ut
-	$valgrind $testdir/lib/iscsi/tgt_node.c/tgt_node_ut $testdir/lib/iscsi/tgt_node.c/tgt_node.conf
+	$valgrind $testdir/lib/iscsi/tgt_node.c/tgt_node_ut
 	$valgrind $testdir/lib/iscsi/iscsi.c/iscsi_ut
-	$valgrind $testdir/lib/iscsi/init_grp.c/init_grp_ut $testdir/lib/iscsi/init_grp.c/init_grp.conf
-	$valgrind $testdir/lib/iscsi/portal_grp.c/portal_grp_ut $testdir/lib/iscsi/portal_grp.c/portal_grp.conf
+	$valgrind $testdir/lib/iscsi/init_grp.c/init_grp_ut
+	$valgrind $testdir/lib/iscsi/portal_grp.c/portal_grp_ut
 }
 
-function unittest_json {
+function unittest_json() {
 	$valgrind $testdir/lib/json/json_parse.c/json_parse_ut
 	$valgrind $testdir/lib/json/json_util.c/json_util_ut
 	$valgrind $testdir/lib/json/json_write.c/json_write_ut
 	$valgrind $testdir/lib/jsonrpc/jsonrpc_server.c/jsonrpc_server_ut
 }
 
-function unittest_nvme {
+function unittest_nvme() {
 	$valgrind $testdir/lib/nvme/nvme.c/nvme_ut
 	$valgrind $testdir/lib/nvme/nvme_ctrlr.c/nvme_ctrlr_ut
 	$valgrind $testdir/lib/nvme/nvme_ctrlr_cmd.c/nvme_ctrlr_cmd_ut
@@ -76,12 +80,14 @@ function unittest_nvme {
 	$valgrind $testdir/lib/nvme/nvme_ns_ocssd_cmd.c/nvme_ns_ocssd_cmd_ut
 	$valgrind $testdir/lib/nvme/nvme_qpair.c/nvme_qpair_ut
 	$valgrind $testdir/lib/nvme/nvme_pcie.c/nvme_pcie_ut
+	$valgrind $testdir/lib/nvme/nvme_poll_group.c/nvme_poll_group_ut
 	$valgrind $testdir/lib/nvme/nvme_quirks.c/nvme_quirks_ut
 	$valgrind $testdir/lib/nvme/nvme_tcp.c/nvme_tcp_ut
 	$valgrind $testdir/lib/nvme/nvme_uevent.c/nvme_uevent_ut
+	$valgrind $testdir/lib/nvme/nvme_transport.c/nvme_transport_ut
 }
 
-function unittest_nvmf {
+function unittest_nvmf() {
 	$valgrind $testdir/lib/nvmf/ctrlr.c/ctrlr_ut
 	$valgrind $testdir/lib/nvmf/ctrlr_bdev.c/ctrlr_bdev_ut
 	$valgrind $testdir/lib/nvmf/ctrlr_discovery.c/ctrlr_discovery_ut
@@ -89,7 +95,7 @@ function unittest_nvmf {
 	$valgrind $testdir/lib/nvmf/tcp.c/tcp_ut
 }
 
-function unittest_scsi {
+function unittest_scsi() {
 	$valgrind $testdir/lib/scsi/dev.c/dev_ut
 	$valgrind $testdir/lib/scsi/lun.c/lun_ut
 	$valgrind $testdir/lib/scsi/scsi.c/scsi_ut
@@ -97,7 +103,16 @@ function unittest_scsi {
 	$valgrind $testdir/lib/scsi/scsi_pr.c/scsi_pr_ut
 }
 
-function unittest_util {
+function unittest_sock() {
+	$valgrind $testdir/lib/sock/sock.c/sock_ut
+	$valgrind $testdir/lib/sock/posix.c/posix_ut
+	# Check whether uring is configured
+	if grep -q '#define SPDK_CONFIG_URING 1' $rootdir/include/spdk/config.h; then
+		$valgrind $testdir/lib/sock/uring.c/uring_ut
+	fi
+}
+
+function unittest_util() {
 	$valgrind $testdir/lib/util/base64.c/base64_ut
 	$valgrind $testdir/lib/util/bit_array.c/bit_array_ut
 	$valgrind $testdir/lib/util/cpuset.c/cpuset_ut
@@ -107,6 +122,7 @@ function unittest_util {
 	$valgrind $testdir/lib/util/string.c/string_ut
 	$valgrind $testdir/lib/util/dif.c/dif_ut
 	$valgrind $testdir/lib/util/iov.c/iov_ut
+	$valgrind $testdir/lib/util/math.c/math_ut
 	$valgrind $testdir/lib/util/pipe.c/pipe_ut
 }
 
@@ -121,7 +137,11 @@ if [ -z ${valgrind+x} ]; then
 fi
 
 # setup local unit test coverage if cov is available
-if hash lcov && grep -q '#define SPDK_CONFIG_COVERAGE 1' $rootdir/include/spdk/config.h; then
+# lcov takes considerable time to process clang coverage.
+# Disabling lcov allow us to do this.
+# More information: https://github.com/spdk/spdk/issues/1693
+CC_TYPE=$(grep CC_TYPE $rootdir/mk/cc.mk)
+if hash lcov && grep -q '#define SPDK_CONFIG_COVERAGE 1' $rootdir/include/spdk/config.h && ! [[ "$CC_TYPE" == *"clang"* ]]; then
 	cov_avail="yes"
 else
 	cov_avail="no"
@@ -164,13 +184,21 @@ if grep -q '#define SPDK_CONFIG_PMDK 1' $rootdir/include/spdk/config.h; then
 	run_test "unittest_bdev_pmem" $valgrind $testdir/lib/bdev/pmem/bdev_pmem_ut
 fi
 
+if grep -q '#define SPDK_CONFIG_RAID5 1' $rootdir/include/spdk/config.h; then
+	run_test "unittest_bdev_raid5" $valgrind $testdir/lib/bdev/raid/raid5.c/raid5_ut
+fi
+
 run_test "unittest_blob_blobfs" unittest_blob
 run_test "unittest_event" unittest_event
 if [ $(uname -s) = Linux ]; then
 	run_test "unittest_ftl" unittest_ftl
 fi
 
+run_test "unittest_accel" $valgrind $testdir/lib/accel/accel.c/accel_engine_ut
 run_test "unittest_ioat" $valgrind $testdir/lib/ioat/ioat.c/ioat_ut
+if grep -q '#define SPDK_CONFIG_IDXD 1' $rootdir/include/spdk/config.h; then
+	run_test "unittest_idxd" $valgrind $testdir/lib/idxd/idxd.c/idxd_ut
+fi
 run_test "unittest_iscsi" unittest_iscsi
 run_test "unittest_json" unittest_json
 run_test "unittest_notify" $valgrind $testdir/lib/notify/notify.c/notify_ut
@@ -182,11 +210,8 @@ if grep -q '#define SPDK_CONFIG_RDMA 1' $rootdir/include/spdk/config.h; then
 fi
 
 run_test "unittest_nvmf" unittest_nvmf
-if [ -e $testdir/lib/nvmf/fc.c/fc_ut ]; then
+if grep -q '#define SPDK_CONFIG_FC 1' $rootdir/include/spdk/config.h; then
 	run_test "unittest_nvmf_fc" $valgrind $testdir/lib/nvmf/fc.c/fc_ut
-fi
-
-if [ -e $testdir/lib/nvmf/fc_ls.c/fc_ls_ut ]; then
 	run_test "unittest_nvmf_fc_ls" $valgrind $testdir/lib/nvmf/fc_ls.c/fc_ls_ut
 fi
 
@@ -194,20 +219,15 @@ if grep -q '#define SPDK_CONFIG_RDMA 1' $rootdir/include/spdk/config.h; then
 	run_test "unittest_nvmf_rdma" $valgrind $testdir/lib/nvmf/rdma.c/rdma_ut
 fi
 
-if grep -q '#define SPDK_CONFIG_REDUCE 1' $rootdir/config.h; then
-	run_test "unittest_bdev_reduce" $valgrind $testdir/lib/reduce/reduce.c/reduce_ut
-fi
-
 run_test "unittest_scsi" unittest_scsi
-run_test "unittest_sock" $valgrind $testdir/lib/sock/sock.c/sock_ut
+run_test "unittest_sock" unittest_sock
 run_test "unittest_thread" $valgrind $testdir/lib/thread/thread.c/thread_ut
 run_test "unittest_util" unittest_util
-if [ $(uname -s) = Linux ]; then
+if grep -q '#define SPDK_CONFIG_VHOST 1' $rootdir/include/spdk/config.h; then
 	run_test "unittest_vhost" $valgrind $testdir/lib/vhost/vhost.c/vhost_ut
 fi
 
-# local unit test coverage
-if [ "$cov_avail" = "yes" ]; then
+if [ "$cov_avail" = "yes" ] && ! [[ "$CC_TYPE" == *"clang"* ]]; then
 	$LCOV -q -d . -c -t "$(hostname)" -o $UT_COVERAGE/ut_cov_test.info
 	$LCOV -q -a $UT_COVERAGE/ut_cov_base.info -a $UT_COVERAGE/ut_cov_test.info -o $UT_COVERAGE/ut_cov_total.info
 	$LCOV -q -a $UT_COVERAGE/ut_cov_total.info -o $UT_COVERAGE/ut_cov_unit.info

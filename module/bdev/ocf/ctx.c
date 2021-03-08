@@ -34,7 +34,7 @@
 #include <execinfo.h>
 
 #include "spdk/env.h"
-#include "spdk_internal/log.h"
+#include "spdk/log.h"
 
 #include "ctx.h"
 #include "ocf_env.h"
@@ -342,13 +342,13 @@ cleaner_poll(void *arg)
 
 	if (spdk_get_ticks() >= priv->next_run) {
 		ocf_cleaner_run(cleaner, priv->queue);
-		return 1;
+		return SPDK_POLLER_BUSY;
 	}
 
 	if (iono > 0) {
-		return 1;
+		return SPDK_POLLER_BUSY;
 	} else {
-		return 0;
+		return SPDK_POLLER_IDLE;
 	}
 }
 
@@ -429,7 +429,7 @@ vbdev_ocf_ctx_cleaner_kick(ocf_cleaner_t cleaner)
 
 	/* We start cleaner poller at the same thread where cache was created
 	 * TODO: allow user to specify core at which cleaner should run */
-	priv->poller = spdk_poller_register(cleaner_poll, cleaner, 0);
+	priv->poller = SPDK_POLLER_REGISTER(cleaner_poll, cleaner, 0);
 }
 
 static void
@@ -438,9 +438,10 @@ vbdev_ocf_md_kick(void *ctx)
 	ocf_metadata_updater_t mu = ctx;
 	ocf_cache_t cache = ocf_metadata_updater_get_cache(mu);
 
-	if (ocf_cache_is_running(cache)) {
-		ocf_metadata_updater_run(mu);
-	}
+	ocf_metadata_updater_run(mu);
+
+	/* Decrease cache ref count after metadata has been updated */
+	ocf_mngt_cache_put(cache);
 }
 
 static int
@@ -463,6 +464,11 @@ static void
 vbdev_ocf_volume_updater_kick(ocf_metadata_updater_t mu)
 {
 	struct spdk_thread *md_thread = ocf_metadata_updater_get_priv(mu);
+	ocf_cache_t cache = ocf_metadata_updater_get_cache(mu);
+
+	/* Increase cache ref count prior sending a message to a thread
+	 * for metadata update */
+	ocf_mngt_cache_get(cache);
 
 	/* We need to send message to updater thread because
 	 * kick can happen from any thread */
@@ -477,17 +483,32 @@ static int
 vbdev_ocf_ctx_log_printf(ocf_logger_t logger, ocf_logger_lvl_t lvl,
 			 const char *fmt, va_list args)
 {
-	FILE *lfile = stdout;
+	int spdk_lvl;
 
-	if (lvl > log_info) {
-		return 0;
+	switch (lvl) {
+	case log_emerg:
+	case log_alert:
+	case log_crit:
+	case log_err:
+		spdk_lvl = SPDK_LOG_ERROR;
+		break;
+
+	case log_warn:
+		spdk_lvl = SPDK_LOG_WARN;
+		break;
+
+	case log_notice:
+		spdk_lvl = SPDK_LOG_NOTICE;
+		break;
+
+	case log_info:
+	case log_debug:
+	default:
+		spdk_lvl = SPDK_LOG_INFO;
 	}
 
-	if (lvl <= log_warn) {
-		lfile = stderr;
-	}
-
-	return vfprintf(lfile, fmt, args);
+	spdk_vlog(spdk_lvl, NULL, -1, NULL, fmt, args);
+	return 0;
 }
 
 static const struct ocf_ctx_config vbdev_ocf_ctx_cfg = {
@@ -546,5 +567,3 @@ vbdev_ocf_ctx_cleanup(void)
 	ocf_ctx_put(vbdev_ocf_ctx);
 	vbdev_ocf_ctx = NULL;
 }
-
-SPDK_LOG_REGISTER_COMPONENT("ocf_ocfctx", SPDK_LOG_OCFCTX)

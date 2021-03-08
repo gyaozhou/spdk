@@ -3,7 +3,7 @@
 #
 #  Copyright (c) Intel Corporation.
 #  Copyright (c) 2017, IBM Corporation.
-#  Copyright (c) 2019, Mellanox Corporation.
+#  Copyright (c) 2019, 2021 Mellanox Corporation.
 #  All rights reserved.
 #
 #  Redistribution and use in source and binary forms, with or without
@@ -69,13 +69,20 @@ endif
 ifneq ($(filter freebsd%,$(TARGET_TRIPLET_WORDS)),)
 OS = FreeBSD
 endif
+ifneq ($(filter mingw% windows%,$(TARGET_TRIPLET_WORDS)),)
+OS = Windows
+endif
 
 TARGET_ARCHITECTURE ?= $(CONFIG_ARCH)
 TARGET_MACHINE := $(firstword $(TARGET_TRIPLET_WORDS))
 
+ifeq ($(OS),Windows)
+EXEEXT = .exe
+endif
+
 COMMON_CFLAGS = -g $(C_OPT) -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -Wmissing-declarations -fno-strict-aliasing -I$(SPDK_ROOT_DIR)/include
 
-ifneq ($(filter powerpc%,$(TARGET_MACHINE)),)
+ifneq ($(filter powerpc% ppc%,$(TARGET_MACHINE)),)
 COMMON_CFLAGS += -mcpu=$(TARGET_ARCHITECTURE)
 else ifeq ($(TARGET_MACHINE),aarch64)
 ifeq ($(TARGET_ARCHITECTURE),native)
@@ -107,6 +114,11 @@ COMMON_CFLAGS += -fprofile-use=$(SPDK_ROOT_DIR)/build/pgo
 LDFLAGS += -fprofile-use=$(SPDK_ROOT_DIR)/build/pgo
 endif
 
+ifeq ($(CONFIG_CET),y)
+COMMON_CFLAGS += -fcf-protection
+LDFLAGS += -fcf-protection
+endif
+
 COMMON_CFLAGS += -Wformat -Wformat-security
 
 COMMON_CFLAGS += -D_GNU_SOURCE
@@ -117,21 +129,32 @@ COMMON_CFLAGS += -fPIC
 # Enable stack buffer overflow checking
 COMMON_CFLAGS += -fstack-protector
 
+ifeq ($(OS).$(CC_TYPE),Windows.gcc)
+# Workaround for gcc bug 86832 - invalid TLS usage
+COMMON_CFLAGS += -mstack-protector-guard=global
+endif
+
 # Prevent accidental multiple definitions of global variables
 COMMON_CFLAGS += -fno-common
 
 # Enable full RELRO - no lazy relocation (resolve everything at load time).
 # This allows the GOT to be made read-only early in the loading process.
+ifneq ($(OS),Windows)
 LDFLAGS += -Wl,-z,relro,-z,now
+endif
 
 # Make the stack non-executable.
 # This is the default in most environments, but it doesn't hurt to set it explicitly.
+ifneq ($(OS),Windows)
 LDFLAGS += -Wl,-z,noexecstack
+endif
 
 # Specify the linker to use
 ifneq ($(LD_TYPE),)
 LDFLAGS += -fuse-ld=$(LD_TYPE)
 endif
+
+SYS_LIBS =
 
 ifeq ($(OS),FreeBSD)
 SYS_LIBS += -L/usr/local/lib
@@ -144,13 +167,16 @@ LIBS += -L$(CONFIG_PMDK_DIR)/src/nondebug
 COMMON_CFLAGS += -I$(CONFIG_PMDK_DIR)/src/include
 endif
 
-ifneq ($(CONFIG_VPP_DIR),)
-LIBS += -L$(CONFIG_VPP_DIR)/lib64
-COMMON_CFLAGS += -I$(CONFIG_VPP_DIR)/include
-endif
-
 ifeq ($(CONFIG_RDMA),y)
 SYS_LIBS += -libverbs -lrdmacm
+endif
+
+ifeq ($(CONFIG_URING),y)
+SYS_LIBS += -luring
+ifneq ($(strip $(CONFIG_URING_PATH)),)
+CFLAGS += -I$(CONFIG_URING_PATH)
+LDFLAGS += -L$(CONFIG_URING_PATH)
+endif
 endif
 
 IPSEC_MB_DIR=$(SPDK_ROOT_DIR)/intel-ipsec-mb
@@ -159,6 +185,25 @@ ISAL_DIR=$(SPDK_ROOT_DIR)/isa-l
 ifeq ($(CONFIG_ISAL), y)
 SYS_LIBS += -L$(ISAL_DIR)/.libs -lisal
 COMMON_CFLAGS += -I$(ISAL_DIR)/..
+endif
+
+ifeq ($(CONFIG_VFIO_USER), y)
+ifneq ($(CONFIG_VFIO_USER_DIR),)
+VFIO_USER_DIR=$(CONFIG_VFIO_USER_DIR)
+else
+VFIO_USER_DIR=$(SPDK_ROOT_DIR)/libvfio-user
+endif
+ifeq ($(CONFIG_DEBUG), y)
+VFIO_USER_BUILD_TYPE=dbg
+else
+VFIO_USER_BUILD_TYPE=release
+endif
+VFIO_USER_INSTALL_DIR=$(VFIO_USER_DIR)/build
+VFIO_USER_INCLUDE_DIR=$(VFIO_USER_INSTALL_DIR)/usr/local/include
+VFIO_USER_LIBRARY_DIR=$(VFIO_USER_INSTALL_DIR)/usr/local/lib64
+CFLAGS += -I$(VFIO_USER_INCLUDE_DIR)
+LDFLAGS += -L$(VFIO_USER_LIBRARY_DIR)
+SYS_LIBS += -Wl,-Bstatic -lvfio-user -Wl,-Bdynamic -ljson-c
 endif
 
 #Attach only if FreeBSD and RDMA is specified with configure
@@ -177,6 +222,13 @@ ifneq ("$(wildcard /usr/lib/libcxgb4.*)","")
 SYS_LIBS += -lcxgb4
 endif
 endif
+endif
+
+ifeq ($(CONFIG_FC),y)
+ifneq ($(strip $(CONFIG_FC_PATH)),)
+SYS_LIBS += -L$(CONFIG_FC_PATH)
+endif
+SYS_LIBS += -lufc
 endif
 
 ifeq ($(CONFIG_DEBUG), y)
@@ -217,8 +269,10 @@ ifneq (, $(SPDK_GIT_COMMIT))
 COMMON_CFLAGS += -DSPDK_GIT_COMMIT=$(SPDK_GIT_COMMIT)
 endif
 
+ifneq ($(OS),Windows)
 COMMON_CFLAGS += -pthread
 LDFLAGS += -pthread
+endif
 
 CFLAGS   += $(COMMON_CFLAGS) -Wno-pointer-sign -Wstrict-prototypes -Wold-style-definition -std=gnu99
 CXXFLAGS += $(COMMON_CFLAGS)
@@ -226,12 +280,14 @@ CXXFLAGS += $(COMMON_CFLAGS)
 SYS_LIBS += -lrt
 SYS_LIBS += -luuid
 SYS_LIBS += -lcrypto
-ifeq ($(CONFIG_LOG_BACKTRACE),y)
-SYS_LIBS += -lunwind
+
+ifneq ($(CONFIG_NVME_CUSE)$(CONFIG_FUSE),nn)
+SYS_LIBS += -lfuse3
 endif
 
-ifeq ($(CONFIG_NVME_CUSE),y)
-SYS_LIBS += -lfuse3
+ifeq ($(OS).$(CC_TYPE),Windows.gcc)
+# Include libssp.a for stack-protector and _FORTIFY_SOURCE
+SYS_LIBS += -l:libssp.a
 endif
 
 MAKEFLAGS += --no-print-directory
@@ -254,29 +310,25 @@ COMPILE_CXX=\
 	$(CXX) -o $@ $(DEPFLAGS) $(CXXFLAGS) -c $< && \
 	mv -f $*.d.tmp $*.d && touch -c $@
 
+ENV_LDFLAGS = $(if $(SPDK_NO_LINK_ENV),,$(ENV_LINKER_ARGS))
+
 # Link $(OBJS) and $(LIBS) into $@ (app)
 LINK_C=\
-	$(Q)echo "  LINK $S/$@"; \
-	$(CC) -o $@ $(CPPFLAGS) $(LDFLAGS) $(OBJS) $(LIBS) $(ENV_LINKER_ARGS) $(SYS_LIBS)
+	$(Q)echo "  LINK $(notdir $@)"; \
+	$(CC) -o $@ $(CPPFLAGS) $(LDFLAGS) $(OBJS) $(LIBS) $(ENV_LDFLAGS) $(SYS_LIBS)
 
 LINK_CXX=\
-	$(Q)echo "  LINK $S/$@"; \
-	$(CXX) -o $@ $(CPPFLAGS) $(LDFLAGS) $(OBJS) $(LIBS) $(ENV_LINKER_ARGS) $(SYS_LIBS)
-
-#
-# Variables to use for versioning shared libs
-#
-SO_VER := 1
-SO_MINOR := 0
-SO_SUFFIX_ALL := $(SO_VER).$(SO_MINOR)
+	$(Q)echo "  LINK $(notdir $@)"; \
+	$(CXX) -o $@ $(CPPFLAGS) $(LDFLAGS) $(OBJS) $(LIBS) $(ENV_LDFLAGS) $(SYS_LIBS)
 
 # Provide function to ease build of a shared lib
 define spdk_build_realname_shared_lib
 	$(CC) -o $@ -shared $(CPPFLAGS) $(LDFLAGS) \
-	    -Wl,--soname,$(patsubst %.so.$(SO_SUFFIX_ALL),%.so.$(SO_SUFFIX_ALL),$(notdir $@)) \
+	    -Wl,-rpath=$(DESTDIR)/$(libdir) \
+	    -Wl,--soname,$(notdir $@) \
 	    -Wl,--whole-archive $(1) -Wl,--no-whole-archive \
 	    -Wl,--version-script=$(2) \
-	    $(3)
+	    $(3) -Wl,--no-as-needed $(4) -Wl,--as-needed
 endef
 
 BUILD_LINKERNAME_LIB=\
@@ -335,9 +387,9 @@ UNINSTALL_SHARED_LIB=\
 
 # Install an app binary
 INSTALL_APP=\
-	$(Q)echo "  INSTALL $(DESTDIR)$(bindir)/$(APP)"; \
+	$(Q)echo "  INSTALL $(DESTDIR)$(bindir)/$(notdir $<)"; \
 	install -d -m 755 "$(DESTDIR)$(bindir)"; \
-	install -m 755 "$(APP)" "$(DESTDIR)$(bindir)/"
+	install -m 755 "$<" "$(DESTDIR)$(bindir)/"
 
 # Uninstall an app binary
 UNINSTALL_APP=\
@@ -348,7 +400,7 @@ UNINSTALL_APP=\
 INSTALL_EXAMPLE=\
 	$(Q)echo "  INSTALL $(DESTDIR)$(bindir)/spdk_$(strip $(subst /,_,$(subst $(SPDK_ROOT_DIR)/examples/, ,$(CURDIR))))"; \
 	install -d -m 755 "$(DESTDIR)$(bindir)"; \
-	install -m 755 "$(APP)" "$(DESTDIR)$(bindir)/spdk_$(strip $(subst /,_,$(subst $(SPDK_ROOT_DIR)/examples/, ,$(CURDIR))))"
+	install -m 755 "$<" "$(DESTDIR)$(bindir)/spdk_$(strip $(subst /,_,$(subst $(SPDK_ROOT_DIR)/examples/, ,$(CURDIR))))"
 
 # Uninstall an example binary
 UNINSTALL_EXAMPLE=\
@@ -384,4 +436,16 @@ endef
 
 define spdk_lib_list_to_shared_libs
 $(1:%=$(SPDK_ROOT_DIR)/build/lib/libspdk_%.so)
+endef
+
+define add_no_as_needed
+-Wl,--no-as-needed $(1) -Wl,-as-needed
+endef
+
+define add_whole_archive
+-Wl,--whole-archive $(1) -Wl,--no-whole-archive
+endef
+
+define pkgconfig_filename
+$(SPDK_ROOT_DIR)/build/lib/pkgconfig/$(1).pc
 endef

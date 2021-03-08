@@ -41,8 +41,13 @@ DIRS-y += iscsi_top
 DIRS-y += iscsi_tgt
 DIRS-y += spdk_tgt
 DIRS-y += spdk_lspci
+ifneq ($(OS),Windows)
+# TODO - currently disabled on Windows due to lack of support for curses
+DIRS-y += spdk_top
+endif
 ifeq ($(OS),Linux)
 DIRS-$(CONFIG_VHOST) += vhost
+DIRS-y += spdk_dd
 endif
 
 .PHONY: all clean $(DIRS-y)

@@ -34,6 +34,9 @@
 SPDK_ROOT_DIR := $(abspath $(CURDIR)/../../..)
 include $(SPDK_ROOT_DIR)/mk/spdk.common.mk
 
+SO_VER := 3
+SO_MINOR := 0
+
 CFLAGS += -I$(SPDK_ROOT_DIR)/lib/bdev/
 # CentOS 7 libiscsi package has functions declared inline but not
 # defined in the header file.  Not aware of any way to disable
@@ -42,5 +45,7 @@ CFLAGS += -I$(SPDK_ROOT_DIR)/lib/bdev/
 CFLAGS += -Wno-error
 C_SRCS = bdev_iscsi.c bdev_iscsi_rpc.c
 LIBNAME = bdev_iscsi
+
+SPDK_MAP_FILE = $(SPDK_ROOT_DIR)/mk/spdk_blank.map
 
 include $(SPDK_ROOT_DIR)/mk/spdk.lib.mk

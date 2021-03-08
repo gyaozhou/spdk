@@ -1,8 +1,8 @@
 /*-
  *   BSD LICENSE
  *
- *   Copyright (c) Intel Corporation.
- *   All rights reserved.
+ *   Copyright (c) Intel Corporation. All rights reserved.
+ *   Copyright (c) 2020, 2021 Mellanox Technologies LTD. All rights reserved.
  *
  *   Redistribution and use in source and binary forms, with or without
  *   modification, are permitted provided that the following conditions
@@ -36,7 +36,7 @@
 static inline struct spdk_nvme_ns_data *
 _nvme_ns_get_data(struct spdk_nvme_ns *ns)
 {
-	return &ns->ctrlr->nsdata[ns->id - 1];
+	return &ns->nsdata;
 }
 
 /**
@@ -64,16 +64,17 @@ nvme_ns_set_identify_data(struct spdk_nvme_ns *ns)
 	}
 
 	ns->sectors_per_max_io = spdk_nvme_ns_get_max_io_xfer_size(ns) / ns->extended_lba_size;
+	ns->sectors_per_max_io_no_md = spdk_nvme_ns_get_max_io_xfer_size(ns) / ns->sector_size;
 
 	if (nsdata->noiob) {
 		ns->sectors_per_stripe = nsdata->noiob;
-		SPDK_DEBUGLOG(SPDK_LOG_NVME, "ns %u optimal IO boundary %" PRIu32 " blocks\n",
+		SPDK_DEBUGLOG(nvme, "ns %u optimal IO boundary %" PRIu32 " blocks\n",
 			      ns->id, ns->sectors_per_stripe);
 	} else if (ns->ctrlr->quirks & NVME_INTEL_QUIRK_STRIPING &&
 		   ns->ctrlr->cdata.vs[3] != 0) {
 		ns->sectors_per_stripe = (1ULL << ns->ctrlr->cdata.vs[3]) * ns->ctrlr->min_page_size /
 					 ns->sector_size;
-		SPDK_DEBUGLOG(SPDK_LOG_NVME, "ns %u stripe size quirk %" PRIu32 " blocks\n",
+		SPDK_DEBUGLOG(nvme, "ns %u stripe size quirk %" PRIu32 " blocks\n",
 			      ns->id, ns->sectors_per_stripe);
 	} else {
 		ns->sectors_per_stripe = 0;
@@ -113,25 +114,36 @@ nvme_ns_set_identify_data(struct spdk_nvme_ns *ns)
 static int
 nvme_ctrlr_identify_ns(struct spdk_nvme_ns *ns)
 {
-	struct nvme_completion_poll_status	status;
+	struct nvme_completion_poll_status	*status;
 	struct spdk_nvme_ns_data		*nsdata;
 	int					rc;
 
+	status = calloc(1, sizeof(*status));
+	if (!status) {
+		SPDK_ERRLOG("Failed to allocate status tracker\n");
+		return -ENOMEM;
+	}
+
 	nsdata = _nvme_ns_get_data(ns);
-	rc = nvme_ctrlr_cmd_identify(ns->ctrlr, SPDK_NVME_IDENTIFY_NS, 0, ns->id,
+	rc = nvme_ctrlr_cmd_identify(ns->ctrlr, SPDK_NVME_IDENTIFY_NS, 0, ns->id, 0,
 				     nsdata, sizeof(*nsdata),
-				     nvme_completion_poll_cb, &status);
+				     nvme_completion_poll_cb, status);
 	if (rc != 0) {
+		free(status);
 		return rc;
 	}
 
-	if (spdk_nvme_wait_for_completion_robust_lock(ns->ctrlr->adminq, &status,
+	if (nvme_wait_for_completion_robust_lock(ns->ctrlr->adminq, status,
 			&ns->ctrlr->ctrlr_lock)) {
+		if (!status->timed_out) {
+			free(status);
+		}
 		/* This can occur if the namespace is not active. Simply zero the
 		 * namespace data and continue. */
 		nvme_ns_destruct(ns);
 		return 0;
 	}
+	free(status);
 
 	nvme_ns_set_identify_data(ns);
 
@@ -139,32 +151,101 @@ nvme_ctrlr_identify_ns(struct spdk_nvme_ns *ns)
 }
 
 static int
+nvme_ctrlr_identify_ns_iocs_specific(struct spdk_nvme_ns *ns)
+{
+	struct nvme_completion_poll_status *status;
+	struct spdk_nvme_ctrlr *ctrlr = ns->ctrlr;
+	int rc;
+
+	switch (ns->csi) {
+	case SPDK_NVME_CSI_ZNS:
+		break;
+	default:
+		/*
+		 * This switch must handle all cases for which
+		 * nvme_ns_has_supported_iocs_specific_data() returns true,
+		 * other cases should never happen.
+		 */
+		assert(0);
+	}
+
+	assert(!ns->nsdata_zns);
+	ns->nsdata_zns = spdk_zmalloc(sizeof(*ns->nsdata_zns), 64, NULL, SPDK_ENV_SOCKET_ID_ANY,
+				      SPDK_MALLOC_SHARE);
+	if (!ns->nsdata_zns) {
+		return -ENOMEM;
+	}
+
+	status = calloc(1, sizeof(*status));
+	if (!status) {
+		SPDK_ERRLOG("Failed to allocate status tracker\n");
+		nvme_ns_free_zns_specific_data(ns);
+		return -ENOMEM;
+	}
+
+	rc = nvme_ctrlr_cmd_identify(ctrlr, SPDK_NVME_IDENTIFY_NS_IOCS, 0, ns->id, ns->csi,
+				     ns->nsdata_zns, sizeof(*ns->nsdata_zns),
+				     nvme_completion_poll_cb, status);
+	if (rc != 0) {
+		nvme_ns_free_zns_specific_data(ns);
+		free(status);
+		return rc;
+	}
+
+	if (nvme_wait_for_completion_robust_lock(ctrlr->adminq, status, &ctrlr->ctrlr_lock)) {
+		SPDK_ERRLOG("Failed to retrieve Identify IOCS Specific Namespace Data Structure\n");
+		nvme_ns_free_zns_specific_data(ns);
+		if (!status->timed_out) {
+			free(status);
+		}
+		return -ENXIO;
+	}
+	free(status);
+
+	return 0;
+}
+
+static int
 nvme_ctrlr_identify_id_desc(struct spdk_nvme_ns *ns)
 {
-	struct nvme_completion_poll_status      status;
+	struct nvme_completion_poll_status      *status;
 	int                                     rc;
 
 	memset(ns->id_desc_list, 0, sizeof(ns->id_desc_list));
 
-	if (ns->ctrlr->vs.raw < SPDK_NVME_VERSION(1, 3, 0) ||
+	if ((ns->ctrlr->vs.raw < SPDK_NVME_VERSION(1, 3, 0) &&
+	     !(ns->ctrlr->cap.bits.css & SPDK_NVME_CAP_CSS_IOCS)) ||
 	    (ns->ctrlr->quirks & NVME_QUIRK_IDENTIFY_CNS)) {
-		SPDK_DEBUGLOG(SPDK_LOG_NVME, "Version < 1.3; not attempting to retrieve NS ID Descriptor List\n");
+		SPDK_DEBUGLOG(nvme, "Version < 1.3; not attempting to retrieve NS ID Descriptor List\n");
 		return 0;
 	}
 
-	SPDK_DEBUGLOG(SPDK_LOG_NVME, "Attempting to retrieve NS ID Descriptor List\n");
+	status = calloc(1, sizeof(*status));
+	if (!status) {
+		SPDK_ERRLOG("Failed to allocate status tracker\n");
+		return -ENOMEM;
+	}
+
+	SPDK_DEBUGLOG(nvme, "Attempting to retrieve NS ID Descriptor List\n");
 	rc = nvme_ctrlr_cmd_identify(ns->ctrlr, SPDK_NVME_IDENTIFY_NS_ID_DESCRIPTOR_LIST, 0, ns->id,
-				     ns->id_desc_list, sizeof(ns->id_desc_list),
-				     nvme_completion_poll_cb, &status);
+				     0, ns->id_desc_list, sizeof(ns->id_desc_list),
+				     nvme_completion_poll_cb, status);
 	if (rc < 0) {
+		free(status);
 		return rc;
 	}
 
-	rc = spdk_nvme_wait_for_completion_robust_lock(ns->ctrlr->adminq, &status, &ns->ctrlr->ctrlr_lock);
+	rc = nvme_wait_for_completion_robust_lock(ns->ctrlr->adminq, status, &ns->ctrlr->ctrlr_lock);
 	if (rc != 0) {
 		SPDK_WARNLOG("Failed to retrieve NS ID Descriptor List\n");
 		memset(ns->id_desc_list, 0, sizeof(ns->id_desc_list));
 	}
+
+	if (!status->timed_out) {
+		free(status);
+	}
+
+	nvme_ns_set_id_desc_list_data(ns);
 
 	return rc;
 }
@@ -288,7 +369,7 @@ spdk_nvme_ns_get_optimal_io_boundary(struct spdk_nvme_ns *ns)
 }
 
 static const void *
-_spdk_nvme_ns_find_id_desc(const struct spdk_nvme_ns *ns, enum spdk_nvme_nidt type, size_t *length)
+nvme_ns_find_id_desc(const struct spdk_nvme_ns *ns, enum spdk_nvme_nidt type, size_t *length)
 {
 	const struct spdk_nvme_ns_id_desc *desc;
 	size_t offset;
@@ -328,12 +409,96 @@ spdk_nvme_ns_get_uuid(const struct spdk_nvme_ns *ns)
 	const struct spdk_uuid *uuid;
 	size_t uuid_size;
 
-	uuid = _spdk_nvme_ns_find_id_desc(ns, SPDK_NVME_NIDT_UUID, &uuid_size);
-	if (uuid == NULL || uuid_size != sizeof(*uuid)) {
+	uuid = nvme_ns_find_id_desc(ns, SPDK_NVME_NIDT_UUID, &uuid_size);
+	if (uuid && uuid_size != sizeof(*uuid)) {
+		SPDK_WARNLOG("Invalid NIDT_UUID descriptor length reported: %zu (expected: %zu)\n",
+			     uuid_size, sizeof(*uuid));
 		return NULL;
 	}
 
 	return uuid;
+}
+
+static enum spdk_nvme_csi
+nvme_ns_get_csi(const struct spdk_nvme_ns *ns) {
+	const uint8_t *csi;
+	size_t csi_size;
+
+	csi = nvme_ns_find_id_desc(ns, SPDK_NVME_NIDT_CSI, &csi_size);
+	if (csi && csi_size != sizeof(*csi))
+	{
+		SPDK_WARNLOG("Invalid NIDT_CSI descriptor length reported: %zu (expected: %zu)\n",
+			     csi_size, sizeof(*csi));
+		return SPDK_NVME_CSI_NVM;
+	}
+	if (!csi)
+	{
+		if (ns->ctrlr->cap.bits.css & SPDK_NVME_CAP_CSS_IOCS) {
+			SPDK_WARNLOG("CSI not reported for NSID: %" PRIu32 "\n", ns->id);
+		}
+		return SPDK_NVME_CSI_NVM;
+	}
+
+	return *csi;
+}
+
+void
+nvme_ns_set_id_desc_list_data(struct spdk_nvme_ns *ns)
+{
+	ns->csi = nvme_ns_get_csi(ns);
+}
+
+enum spdk_nvme_csi
+spdk_nvme_ns_get_csi(const struct spdk_nvme_ns *ns) {
+	return ns->csi;
+}
+
+void
+nvme_ns_free_zns_specific_data(struct spdk_nvme_ns *ns)
+{
+	if (!ns->id) {
+		return;
+	}
+
+	if (ns->nsdata_zns) {
+		spdk_free(ns->nsdata_zns);
+		ns->nsdata_zns = NULL;
+	}
+}
+
+void
+nvme_ns_free_iocs_specific_data(struct spdk_nvme_ns *ns)
+{
+	nvme_ns_free_zns_specific_data(ns);
+}
+
+bool
+nvme_ns_has_supported_iocs_specific_data(struct spdk_nvme_ns *ns)
+{
+	switch (ns->csi) {
+	case SPDK_NVME_CSI_NVM:
+		/*
+		 * NVM Command Set Specific Identify Namespace data structure
+		 * is currently all-zeroes, reserved for future use.
+		 */
+		return false;
+	case SPDK_NVME_CSI_ZNS:
+		return true;
+	default:
+		SPDK_WARNLOG("Unsupported CSI: %u for NSID: %u\n", ns->csi, ns->id);
+		return false;
+	}
+}
+
+uint32_t
+spdk_nvme_ns_get_ana_group_id(const struct spdk_nvme_ns *ns)
+{
+	return ns->ana_group_id;
+}
+
+enum spdk_nvme_ana_state
+spdk_nvme_ns_get_ana_state(const struct spdk_nvme_ns *ns) {
+	return ns->ana_state;
 }
 
 int nvme_ns_construct(struct spdk_nvme_ns *ns, uint32_t id,
@@ -351,7 +516,25 @@ int nvme_ns_construct(struct spdk_nvme_ns *ns, uint32_t id,
 		return rc;
 	}
 
-	return nvme_ctrlr_identify_id_desc(ns);
+	/* skip Identify NS ID Descriptor List for inactive NS */
+	if (!spdk_nvme_ns_is_active(ns)) {
+		return 0;
+	}
+
+	rc = nvme_ctrlr_identify_id_desc(ns);
+	if (rc != 0) {
+		return rc;
+	}
+
+	if (nvme_ctrlr_multi_iocs_enabled(ctrlr) &&
+	    nvme_ns_has_supported_iocs_specific_data(ns)) {
+		rc = nvme_ctrlr_identify_ns_iocs_specific(ns);
+		if (rc != 0) {
+			return rc;
+		}
+	}
+
+	return 0;
 }
 
 void nvme_ns_destruct(struct spdk_nvme_ns *ns)
@@ -364,11 +547,20 @@ void nvme_ns_destruct(struct spdk_nvme_ns *ns)
 
 	nsdata = _nvme_ns_get_data(ns);
 	memset(nsdata, 0, sizeof(*nsdata));
+	memset(ns->id_desc_list, 0, sizeof(ns->id_desc_list));
+	nvme_ns_free_iocs_specific_data(ns);
 	ns->sector_size = 0;
 	ns->extended_lba_size = 0;
 	ns->md_size = 0;
 	ns->pi_type = 0;
 	ns->sectors_per_max_io = 0;
+	ns->sectors_per_max_io_no_md = 0;
 	ns->sectors_per_stripe = 0;
 	ns->flags = 0;
+	ns->csi = SPDK_NVME_CSI_NVM;
+}
+
+int nvme_ns_update(struct spdk_nvme_ns *ns)
+{
+	return nvme_ctrlr_identify_ns(ns);
 }

@@ -4,11 +4,7 @@ First, clone the fio source repository from https://github.com/axboe/fio
 
     git clone https://github.com/axboe/fio
 
-Then check out the fio 3.15:
-
-    cd fio && git checkout fio-3.15
-
-Finally, compile the code:
+Then check out the latest fio version and compile the code:
 
     make
 
@@ -40,7 +36,7 @@ To use the SPDK fio plugin with fio, specify the plugin binary using LD_PRELOAD 
 fio and set ioengine=spdk in the fio configuration file (see example_config.fio in the same
 directory as this README).
 
-    LD_PRELOAD=<path to spdk repo>/examples/nvme/fio_plugin/fio_plugin fio
+    LD_PRELOAD=<path to spdk repo>/build/fio/spdk_nvme fio
 
 To select NVMe devices, you pass an SPDK Transport Identifier string as the filename. These are in the
 form:
@@ -55,14 +51,15 @@ And remote devices accessed via NVMe over Fabrics will look like this:
 
     filename=trtype=RDMA adrfam=IPv4 traddr=192.168.100.8 trsvcid=4420 ns=1
 
-
 **Note**: The specification of the PCIe address should not use the normal ':'
 and instead only use '.'. This is a limitation in fio - it splits filenames on
 ':'. Also, the NVMe namespaces start at 1, not 0, and the namespace must be
 specified at the end of the string.
 
-Currently the SPDK fio plugin is limited to the thread usage model, so fio jobs must also specify thread=1
-when using the SPDK fio plugin.
+fio by default forks a separate process for every job. It also supports just spawning a separate
+thread in the same process for every job. The SPDK fio plugin is limited to this latter thread
+usage model, so fio jobs must also specify thread=1 when using the SPDK fio plugin. The SPDK fio
+plugin supports multiple threads - in this case, the "1" just means "use thread mode".
 
 fio also currently has a race condition on shutdown if dynamically loading the ioengine by specifying the
 engine's full path via the ioengine parameter - LD_PRELOAD is recommended to avoid this race condition.
@@ -110,3 +107,55 @@ tag mask are set to 0x1234 and 0xFFFF by default.
 To enable VMD enumeration add enable_vmd flag in fio configuration file:
 
     enable_vmd=1
+
+# ZNS
+
+To use Zoned Namespaces then build the io-engine against, and run using, a fio version >= 3.23 and add:
+
+    zonemode=zbd
+
+To your fio-script, also have a look at script-examples provided with fio:
+
+    fio/examples/zbd-seq-read.fio
+    fio/examples/zbd-rand-write.fio
+
+## Maximum Open Zones
+
+Zoned Namespaces has a resource constraint on the amount of zones which can be in an opened state at
+any point in time. You can control how many zones fio will keep in an open state by using the
+``--max_open_zones`` option.
+
+The SPDK/NVMe fio io-engine will set a default value if you do not provide one.
+
+## Maximum Active Zones
+
+Zoned Namespaces has a resource constraint on the number of zones that can be active at any point in
+time. Unlike ``max_open_zones``, then fio currently do not manage this constraint, and there is thus
+no option to limit it either.
+
+When running with the SPDK/NVMe fio io-engine you can be exposed to error messages, in the form of
+completion errors, with the NVMe status code of 0xbd ("Too Many Active Zones"). To work around this,
+then you can reset all zones before fio start running its jobs by using the engine option:
+
+    --initial_zone_reset=1
+
+## Zone Append
+
+When running FIO against a Zoned Namespace you need to specify --iodepth=1 to avoid
+"Zone Invalid Write: The write to a zone was not at the write pointer." I/O errors.
+However, if your controller supports Zone Append, you can use the engine option:
+
+    --zone_append=1
+
+To send zone append commands instead of write commands to the controller.
+When using zone append, you will be able to specify a --iodepth greater than 1.
+
+## Shared Memory Increase
+
+If your device has a lot of zones, fio can give you errors such as:
+
+    smalloc: OOM. Consider using --alloc-size to increase the shared memory available.
+
+This is because fio needs to allocate memory for the zone-report, that is, retrieve the state of
+zones on the device including auxiliary accounting information. To solve this, then you can follow
+fio's advice and increase ``--alloc-size``.

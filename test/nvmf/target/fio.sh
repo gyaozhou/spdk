@@ -11,7 +11,7 @@ MALLOC_BLOCK_SIZE=512
 rpc_py="$rootdir/scripts/rpc.py"
 
 nvmftestinit
-nvmfappstart "-m 0xF"
+nvmfappstart -m 0xF
 
 $rpc_py nvmf_create_transport $NVMF_TRANSPORT_OPTS -u 8192
 
@@ -22,7 +22,7 @@ raid_malloc_bdevs="$($rpc_py bdev_malloc_create $MALLOC_BDEV_SIZE $MALLOC_BLOCK_
 raid_malloc_bdevs+="$($rpc_py bdev_malloc_create $MALLOC_BDEV_SIZE $MALLOC_BLOCK_SIZE)"
 $rpc_py bdev_raid_create -n raid0 -z 64 -r 0 -b "$raid_malloc_bdevs"
 
-$rpc_py nvmf_create_subsystem nqn.2016-06.io.spdk:cnode1 -a -s SPDK00000000000001
+$rpc_py nvmf_create_subsystem nqn.2016-06.io.spdk:cnode1 -a -s $NVMF_SERIAL
 for malloc_bdev in $malloc_bdevs; do
 	$rpc_py nvmf_subsystem_add_ns nqn.2016-06.io.spdk:cnode1 "$malloc_bdev"
 done
@@ -33,9 +33,7 @@ $rpc_py nvmf_subsystem_add_ns nqn.2016-06.io.spdk:cnode1 raid0
 
 nvme connect -t $TEST_TRANSPORT -n "nqn.2016-06.io.spdk:cnode1" -a "$NVMF_FIRST_TARGET_IP" -s "$NVMF_PORT"
 
-waitforblk "nvme0n1"
-waitforblk "nvme0n2"
-waitforblk "nvme0n3"
+waitforserial $NVMF_SERIAL 3
 
 $rootdir/scripts/fio.py -p nvmf -i 4096 -d 1 -t write -r 1 -v
 $rootdir/scripts/fio.py -p nvmf -i 4096 -d 1 -t randwrite -r 1 -v
@@ -61,11 +59,11 @@ wait $fio_pid || fio_status=$?
 nvme disconnect -n "nqn.2016-06.io.spdk:cnode1" || true
 
 if [ $fio_status -eq 0 ]; then
-        echo "nvmf hotplug test: fio successful - expected failure"
+	echo "nvmf hotplug test: fio successful - expected failure"
 	nvmftestfini
-        exit 1
+	exit 1
 else
-        echo "nvmf hotplug test: fio failed as expected"
+	echo "nvmf hotplug test: fio failed as expected"
 fi
 
 $rpc_py nvmf_delete_subsystem nqn.2016-06.io.spdk:cnode1

@@ -40,7 +40,7 @@
 #include "iscsi/conn.h"
 #include "spdk/string.h"
 
-#include "spdk_internal/log.h"
+#include "spdk/log.h"
 
 #define MAX_TMPBUF 1024
 
@@ -52,7 +52,7 @@ static const char *non_simple_value_params[] = {
 };
 
 void
-spdk_iscsi_param_free(struct iscsi_param *params)
+iscsi_param_free(struct iscsi_param *params)
 {
 	struct iscsi_param *param, *next_param;
 
@@ -84,7 +84,7 @@ iscsi_find_key_in_array(const char *key, const char *array[])
 }
 
 struct iscsi_param *
-spdk_iscsi_param_find(struct iscsi_param *params, const char *key)
+iscsi_param_find(struct iscsi_param *params, const char *key)
 {
 	struct iscsi_param *param;
 
@@ -101,11 +101,11 @@ spdk_iscsi_param_find(struct iscsi_param *params, const char *key)
 }
 
 int
-spdk_iscsi_param_del(struct iscsi_param **params, const char *key)
+iscsi_param_del(struct iscsi_param **params, const char *key)
 {
 	struct iscsi_param *param, *prev_param = NULL;
 
-	SPDK_DEBUGLOG(SPDK_LOG_ISCSI, "del %s\n", key);
+	SPDK_DEBUGLOG(iscsi, "del %s\n", key);
 	if (params == NULL || key == NULL) {
 		return 0;
 	}
@@ -118,7 +118,7 @@ spdk_iscsi_param_del(struct iscsi_param **params, const char *key)
 				*params = param->next;
 			}
 			param->next = NULL;
-			spdk_iscsi_param_free(param);
+			iscsi_param_free(param);
 			return 0;
 		}
 		prev_param = param;
@@ -127,20 +127,20 @@ spdk_iscsi_param_del(struct iscsi_param **params, const char *key)
 }
 
 int
-spdk_iscsi_param_add(struct iscsi_param **params, const char *key,
-		     const char *val, const char *list, int type)
+iscsi_param_add(struct iscsi_param **params, const char *key,
+		const char *val, const char *list, int type)
 {
 	struct iscsi_param *param, *last_param;
 
-	SPDK_DEBUGLOG(SPDK_LOG_ISCSI, "add %s=%s, list=[%s], type=%d\n",
+	SPDK_DEBUGLOG(iscsi, "add %s=%s, list=[%s], type=%d\n",
 		      key, val, list, type);
 	if (key == NULL) {
 		return -1;
 	}
 
-	param = spdk_iscsi_param_find(*params, key);
+	param = iscsi_param_find(*params, key);
 	if (param != NULL) {
-		spdk_iscsi_param_del(params, key);
+		iscsi_param_del(params, key);
 	}
 
 	param = calloc(1, sizeof(*param));
@@ -169,13 +169,13 @@ spdk_iscsi_param_add(struct iscsi_param **params, const char *key,
 }
 
 int
-spdk_iscsi_param_set(struct iscsi_param *params, const char *key,
-		     const char *val)
+iscsi_param_set(struct iscsi_param *params, const char *key,
+		const char *val)
 {
 	struct iscsi_param *param;
 
-	SPDK_DEBUGLOG(SPDK_LOG_ISCSI, "set %s=%s\n", key, val);
-	param = spdk_iscsi_param_find(params, key);
+	SPDK_DEBUGLOG(iscsi, "set %s=%s\n", key, val);
+	param = iscsi_param_find(params, key);
 	if (param == NULL) {
 		SPDK_ERRLOG("no key %s\n", key);
 		return -1;
@@ -189,13 +189,13 @@ spdk_iscsi_param_set(struct iscsi_param *params, const char *key,
 }
 
 int
-spdk_iscsi_param_set_int(struct iscsi_param *params, const char *key, uint32_t val)
+iscsi_param_set_int(struct iscsi_param *params, const char *key, uint32_t val)
 {
 	char buf[MAX_TMPBUF];
 	struct iscsi_param *param;
 
-	SPDK_DEBUGLOG(SPDK_LOG_ISCSI, "set %s=%d\n", key, val);
-	param = spdk_iscsi_param_find(params, key);
+	SPDK_DEBUGLOG(iscsi, "set %s=%d\n", key, val);
+	param = iscsi_param_find(params, key);
 	if (param == NULL) {
 		SPDK_ERRLOG("no key %s\n", key);
 		return -1;
@@ -253,7 +253,7 @@ iscsi_parse_param(struct iscsi_param **params, const uint8_t *data, uint32_t dat
 	memcpy(key_copy, data, key_len);
 	key_copy[key_len] = '\0';
 	/* check whether this key is duplicated */
-	if (NULL != spdk_iscsi_param_find(*params, key_copy)) {
+	if (NULL != iscsi_param_find(*params, key_copy)) {
 		SPDK_ERRLOG("Duplicated Key %s\n", key_copy);
 		free(key_copy);
 		return -1;
@@ -287,7 +287,7 @@ iscsi_parse_param(struct iscsi_param **params, const uint8_t *data, uint32_t dat
 
 	memcpy(val_copy, key_end + 1, val_len);
 
-	rc = spdk_iscsi_param_add(params, key_copy, val_copy, NULL, 0);
+	rc = iscsi_param_add(params, key_copy, val_copy, NULL, 0);
 	free(val_copy);
 	free(key_copy);
 	if (rc < 0) {
@@ -308,12 +308,22 @@ iscsi_parse_param(struct iscsi_param **params, const uint8_t *data, uint32_t dat
  * \param len length of data in bytes
  */
 int
-spdk_iscsi_parse_params(struct iscsi_param **params, const uint8_t *data,
-			int len, bool cbit_enabled, char **partial_parameter)
+iscsi_parse_params(struct iscsi_param **params, const uint8_t *data,
+		   int len, bool cbit_enabled, char **partial_parameter)
 {
 	int rc, offset = 0;
 	char *p;
 	int i;
+
+	/* Spec does not disallow TEXT PDUs with zero length, just return
+	 * immediately in that case, since there is no param data to parse
+	 * and any existing partial parameter would remain as-is.
+	 */
+	if (len == 0) {
+		return 0;
+	}
+
+	assert(data != NULL);
 
 	/* strip the partial text parameters if previous PDU have C enabled */
 	if (partial_parameter && *partial_parameter) {
@@ -381,11 +391,11 @@ spdk_iscsi_parse_params(struct iscsi_param **params, const uint8_t *data,
 }
 
 char *
-spdk_iscsi_param_get_val(struct iscsi_param *params, const char *key)
+iscsi_param_get_val(struct iscsi_param *params, const char *key)
 {
 	struct iscsi_param *param;
 
-	param = spdk_iscsi_param_find(params, key);
+	param = iscsi_param_find(params, key);
 	if (param == NULL) {
 		return NULL;
 	}
@@ -393,12 +403,12 @@ spdk_iscsi_param_get_val(struct iscsi_param *params, const char *key)
 }
 
 int
-spdk_iscsi_param_eq_val(struct iscsi_param *params, const char *key,
-			const char *val)
+iscsi_param_eq_val(struct iscsi_param *params, const char *key,
+		   const char *val)
 {
 	struct iscsi_param *param;
 
-	param = spdk_iscsi_param_find(params, key);
+	param = iscsi_param_find(params, key);
 	if (param == NULL) {
 		return 0;
 	}
@@ -467,17 +477,17 @@ iscsi_params_init_internal(struct iscsi_param **params,
 	struct iscsi_param *param;
 
 	for (i = 0; table[i].key != NULL; i++) {
-		rc = spdk_iscsi_param_add(params, table[i].key, table[i].val,
-					  table[i].list, table[i].type);
+		rc = iscsi_param_add(params, table[i].key, table[i].val,
+				     table[i].list, table[i].type);
 		if (rc < 0) {
 			SPDK_ERRLOG("iscsi_param_add() failed\n");
 			return -1;
 		}
-		param = spdk_iscsi_param_find(*params, table[i].key);
+		param = iscsi_param_find(*params, table[i].key);
 		if (param != NULL) {
 			param->state_index = i;
 		} else {
-			SPDK_ERRLOG("spdk_iscsi_param_find() failed\n");
+			SPDK_ERRLOG("iscsi_param_find() failed\n");
 			return -1;
 		}
 	}
@@ -486,13 +496,13 @@ iscsi_params_init_internal(struct iscsi_param **params,
 }
 
 int
-spdk_iscsi_conn_params_init(struct iscsi_param **params)
+iscsi_conn_params_init(struct iscsi_param **params)
 {
 	return iscsi_params_init_internal(params, &conn_param_table[0]);
 }
 
 int
-spdk_iscsi_sess_params_init(struct iscsi_param **params)
+iscsi_sess_params_init(struct iscsi_param **params)
 {
 	return iscsi_params_init_internal(params, &sess_param_table[0]);
 }
@@ -514,6 +524,7 @@ static const char *discovery_ignored_param[] = {
 	"FirstBurstLength"
 	"MaxOutstandingR2T",
 	"DataPDUInOrder",
+	"DataSequenceInOrder",
 	NULL,
 };
 
@@ -571,7 +582,7 @@ iscsi_special_param_construction(struct spdk_iscsi_conn *conn,
 			return -1;
 		}
 
-		SPDK_DEBUGLOG(SPDK_LOG_ISCSI,
+		SPDK_DEBUGLOG(iscsi,
 			      "returning MaxRecvDataSegmentLength=%d\n",
 			      SPDK_ISCSI_MAX_RECV_DATA_SEGMENT_LENGTH);
 		len = snprintf((char *)data + total, alloc_len - total,
@@ -588,15 +599,15 @@ iscsi_special_param_construction(struct spdk_iscsi_conn *conn,
 			return -1;
 		}
 
-		param_first = spdk_iscsi_param_find(conn->sess->params,
-						    "FirstBurstLength");
+		param_first = iscsi_param_find(conn->sess->params,
+					       "FirstBurstLength");
 		if (param_first != NULL) {
 			FirstBurstLength = (uint32_t)strtol(param_first->val, NULL, 10);
 		} else {
 			FirstBurstLength = SPDK_ISCSI_FIRST_BURST_LENGTH;
 		}
-		param_max = spdk_iscsi_param_find(conn->sess->params,
-						  "MaxBurstLength");
+		param_max = iscsi_param_find(conn->sess->params,
+					     "MaxBurstLength");
 		if (param_max != NULL) {
 			MaxBurstLength = (uint32_t)strtol(param_max->val, NULL, 10);
 		} else {
@@ -640,7 +651,7 @@ iscsi_construct_data_from_param(struct iscsi_param *param, char *new_val,
 			return -1;
 		}
 
-		SPDK_DEBUGLOG(SPDK_LOG_ISCSI, "negotiated %s=%s\n",
+		SPDK_DEBUGLOG(iscsi, "negotiated %s=%s\n",
 			      param->key, new_val);
 		len = snprintf((char *)data + total, alloc_len - total, "%s=%s",
 			       param->key, new_val);
@@ -679,7 +690,7 @@ iscsi_negotiate_param_list(int *add_param_value,
 				*val_end = '\0';
 			}
 			if (strcasecmp(in_start, val_start) == 0) {
-				SPDK_DEBUGLOG(SPDK_LOG_ISCSI, "match %s\n",
+				SPDK_DEBUGLOG(iscsi, "match %s\n",
 					      val_start);
 				flag = 1;
 				break;
@@ -735,7 +746,7 @@ iscsi_negotiate_param_numerical(int *add_param_value,
 	min_i = (min_val != NULL) ? (int)strtol(min_val, NULL, 10) : 0;
 	max_i = (max_val != NULL) ? (int)strtol(max_val, NULL, 10) : 0;
 	if (val_i < min_i || val_i > max_i) {
-		SPDK_DEBUGLOG(SPDK_LOG_ISCSI, "key %.64s reject\n", param->key);
+		SPDK_DEBUGLOG(iscsi, "key %.64s reject\n", param->key);
 		new_val = NULL;
 	} else {
 		switch (param->type) {
@@ -860,15 +871,15 @@ iscsi_negotiate_param_init(struct spdk_iscsi_conn *conn,
 {
 	int index;
 
-	*cur_param_p = spdk_iscsi_param_find(*params_dst_p, param->key);
+	*cur_param_p = iscsi_param_find(*params_dst_p, param->key);
 	if (*cur_param_p == NULL) {
 		*params_dst_p = conn->sess->params;
-		*cur_param_p = spdk_iscsi_param_find(*params_dst_p, param->key);
+		*cur_param_p = iscsi_param_find(*params_dst_p, param->key);
 		if (*cur_param_p == NULL) {
 			if ((strncasecmp(param->key, "X-", 2) == 0) ||
 			    (strncasecmp(param->key, "X#", 2) == 0)) {
 				/* Extension Key */
-				SPDK_DEBUGLOG(SPDK_LOG_ISCSI,
+				SPDK_DEBUGLOG(iscsi,
 					      "extension key %.64s\n",
 					      param->key);
 			} else {
@@ -898,9 +909,9 @@ iscsi_negotiate_param_init(struct spdk_iscsi_conn *conn,
 }
 
 int
-spdk_iscsi_negotiate_params(struct spdk_iscsi_conn *conn,
-			    struct iscsi_param **params, uint8_t *data, int alloc_len,
-			    int data_len)
+iscsi_negotiate_params(struct spdk_iscsi_conn *conn,
+		       struct iscsi_param **params, uint8_t *data, int alloc_len,
+		       int data_len)
 {
 	struct iscsi_param *param;
 	struct iscsi_param *cur_param;
@@ -936,9 +947,9 @@ spdk_iscsi_negotiate_params(struct spdk_iscsi_conn *conn,
 
 	/* discovery? */
 	discovery = 0;
-	cur_param = spdk_iscsi_param_find(*params, "SessionType");
+	cur_param = iscsi_param_find(*params, "SessionType");
 	if (cur_param == NULL) {
-		cur_param = spdk_iscsi_param_find(conn->sess->params, "SessionType");
+		cur_param = iscsi_param_find(conn->sess->params, "SessionType");
 		if (cur_param == NULL) {
 			/* no session type */
 		} else {
@@ -977,9 +988,9 @@ spdk_iscsi_negotiate_params(struct spdk_iscsi_conn *conn,
 	/* To adjust the location of FirstBurstLength location and put it to
 	 *  the end, then we can always firstly determine the MaxBurstLength
 	 */
-	param = spdk_iscsi_param_find(*params, "MaxBurstLength");
+	param = iscsi_param_find(*params, "MaxBurstLength");
 	if (param != NULL) {
-		param = spdk_iscsi_param_find(*params, "FirstBurstLength");
+		param = iscsi_param_find(*params, "FirstBurstLength");
 
 		/* check the existence of FirstBurstLength */
 		if (param != NULL) {
@@ -987,8 +998,8 @@ spdk_iscsi_negotiate_params(struct spdk_iscsi_conn *conn,
 			if (param->next != NULL) {
 				snprintf(in_val, ISCSI_TEXT_MAX_VAL_LEN + 1, "%s", param->val);
 				type = param->type;
-				spdk_iscsi_param_add(params, "FirstBurstLength",
-						     in_val, NULL, type);
+				iscsi_param_add(params, "FirstBurstLength",
+						in_val, NULL, type);
 			}
 		}
 	}
@@ -1049,8 +1060,8 @@ spdk_iscsi_negotiate_params(struct spdk_iscsi_conn *conn,
 			if (strcasecmp(param->key, "FirstBurstLength") == 0) {
 				FirstBurstLength = (uint32_t)strtol(param->val, NULL,
 								    10);
-				new_val = spdk_iscsi_param_get_val(conn->sess->params,
-								   "MaxBurstLength");
+				new_val = iscsi_param_get_val(conn->sess->params,
+							      "MaxBurstLength");
 				if (new_val != NULL) {
 					MaxBurstLength = (uint32_t) strtol(new_val, NULL,
 									   10);
@@ -1083,7 +1094,7 @@ spdk_iscsi_negotiate_params(struct spdk_iscsi_conn *conn,
 			 *      existed key in the connection's parameters
 			 */
 			if (add_param_value == 0) {
-				spdk_iscsi_param_set(params_dst, param->key, new_val);
+				iscsi_param_set(params_dst, param->key, new_val);
 			}
 			total = iscsi_construct_data_from_param(param,
 								new_val,
@@ -1118,97 +1129,97 @@ final_return:
 }
 
 int
-spdk_iscsi_copy_param2var(struct spdk_iscsi_conn *conn)
+iscsi_copy_param2var(struct spdk_iscsi_conn *conn)
 {
 	const char *val;
 
-	val = spdk_iscsi_param_get_val(conn->params, "MaxRecvDataSegmentLength");
+	val = iscsi_param_get_val(conn->params, "MaxRecvDataSegmentLength");
 	if (val == NULL) {
 		SPDK_ERRLOG("Getval MaxRecvDataSegmentLength failed\n");
 		return -1;
 	}
-	SPDK_DEBUGLOG(SPDK_LOG_ISCSI,
+	SPDK_DEBUGLOG(iscsi,
 		      "copy MaxRecvDataSegmentLength=%s\n", val);
 	conn->MaxRecvDataSegmentLength = (int)strtol(val, NULL, 10);
 	if (conn->MaxRecvDataSegmentLength > SPDK_BDEV_LARGE_BUF_MAX_SIZE) {
 		conn->MaxRecvDataSegmentLength = SPDK_BDEV_LARGE_BUF_MAX_SIZE;
 	}
 
-	val = spdk_iscsi_param_get_val(conn->params, "HeaderDigest");
+	val = iscsi_param_get_val(conn->params, "HeaderDigest");
 	if (val == NULL) {
 		SPDK_ERRLOG("Getval HeaderDigest failed\n");
 		return -1;
 	}
 	if (strcasecmp(val, "CRC32C") == 0) {
-		SPDK_DEBUGLOG(SPDK_LOG_ISCSI, "set HeaderDigest=1\n");
+		SPDK_DEBUGLOG(iscsi, "set HeaderDigest=1\n");
 		conn->header_digest = 1;
 	} else {
-		SPDK_DEBUGLOG(SPDK_LOG_ISCSI, "set HeaderDigest=0\n");
+		SPDK_DEBUGLOG(iscsi, "set HeaderDigest=0\n");
 		conn->header_digest = 0;
 	}
-	val = spdk_iscsi_param_get_val(conn->params, "DataDigest");
+	val = iscsi_param_get_val(conn->params, "DataDigest");
 	if (val == NULL) {
 		SPDK_ERRLOG("Getval DataDigest failed\n");
 		return -1;
 	}
 	if (strcasecmp(val, "CRC32C") == 0) {
-		SPDK_DEBUGLOG(SPDK_LOG_ISCSI, "set DataDigest=1\n");
+		SPDK_DEBUGLOG(iscsi, "set DataDigest=1\n");
 		conn->data_digest = 1;
 	} else {
-		SPDK_DEBUGLOG(SPDK_LOG_ISCSI, "set DataDigest=0\n");
+		SPDK_DEBUGLOG(iscsi, "set DataDigest=0\n");
 		conn->data_digest = 0;
 	}
 
-	val = spdk_iscsi_param_get_val(conn->sess->params, "MaxConnections");
+	val = iscsi_param_get_val(conn->sess->params, "MaxConnections");
 	if (val == NULL) {
 		SPDK_ERRLOG("Getval MaxConnections failed\n");
 		return -1;
 	}
-	SPDK_DEBUGLOG(SPDK_LOG_ISCSI, "copy MaxConnections=%s\n", val);
+	SPDK_DEBUGLOG(iscsi, "copy MaxConnections=%s\n", val);
 	conn->sess->MaxConnections = (uint32_t) strtol(val, NULL, 10);
-	val = spdk_iscsi_param_get_val(conn->sess->params, "MaxOutstandingR2T");
+	val = iscsi_param_get_val(conn->sess->params, "MaxOutstandingR2T");
 	if (val == NULL) {
 		SPDK_ERRLOG("Getval MaxOutstandingR2T failed\n");
 		return -1;
 	}
-	SPDK_DEBUGLOG(SPDK_LOG_ISCSI, "copy MaxOutstandingR2T=%s\n", val);
+	SPDK_DEBUGLOG(iscsi, "copy MaxOutstandingR2T=%s\n", val);
 	conn->sess->MaxOutstandingR2T = (uint32_t) strtol(val, NULL, 10);
-	val = spdk_iscsi_param_get_val(conn->sess->params, "FirstBurstLength");
+	val = iscsi_param_get_val(conn->sess->params, "FirstBurstLength");
 	if (val == NULL) {
 		SPDK_ERRLOG("Getval FirstBurstLength failed\n");
 		return -1;
 	}
-	SPDK_DEBUGLOG(SPDK_LOG_ISCSI, "copy FirstBurstLength=%s\n", val);
+	SPDK_DEBUGLOG(iscsi, "copy FirstBurstLength=%s\n", val);
 	conn->sess->FirstBurstLength = (uint32_t) strtol(val, NULL, 10);
-	val = spdk_iscsi_param_get_val(conn->sess->params, "MaxBurstLength");
+	val = iscsi_param_get_val(conn->sess->params, "MaxBurstLength");
 	if (val == NULL) {
 		SPDK_ERRLOG("Getval MaxBurstLength failed\n");
 		return -1;
 	}
-	SPDK_DEBUGLOG(SPDK_LOG_ISCSI, "copy MaxBurstLength=%s\n", val);
+	SPDK_DEBUGLOG(iscsi, "copy MaxBurstLength=%s\n", val);
 	conn->sess->MaxBurstLength = (uint32_t) strtol(val, NULL, 10);
-	val = spdk_iscsi_param_get_val(conn->sess->params, "InitialR2T");
+	val = iscsi_param_get_val(conn->sess->params, "InitialR2T");
 	if (val == NULL) {
 		SPDK_ERRLOG("Getval InitialR2T failed\n");
 		return -1;
 	}
 	if (strcasecmp(val, "Yes") == 0) {
-		SPDK_DEBUGLOG(SPDK_LOG_ISCSI, "set InitialR2T=1\n");
+		SPDK_DEBUGLOG(iscsi, "set InitialR2T=1\n");
 		conn->sess->InitialR2T = true;
 	} else {
-		SPDK_DEBUGLOG(SPDK_LOG_ISCSI, "set InitialR2T=0\n");
+		SPDK_DEBUGLOG(iscsi, "set InitialR2T=0\n");
 		conn->sess->InitialR2T = false;
 	}
-	val = spdk_iscsi_param_get_val(conn->sess->params, "ImmediateData");
+	val = iscsi_param_get_val(conn->sess->params, "ImmediateData");
 	if (val == NULL) {
 		SPDK_ERRLOG("Getval ImmediateData failed\n");
 		return -1;
 	}
 	if (strcasecmp(val, "Yes") == 0) {
-		SPDK_DEBUGLOG(SPDK_LOG_ISCSI, "set ImmediateData=1\n");
+		SPDK_DEBUGLOG(iscsi, "set ImmediateData=1\n");
 		conn->sess->ImmediateData = true;
 	} else {
-		SPDK_DEBUGLOG(SPDK_LOG_ISCSI, "set ImmediateData=0\n");
+		SPDK_DEBUGLOG(iscsi, "set ImmediateData=0\n");
 		conn->sess->ImmediateData = false;
 	}
 	return 0;

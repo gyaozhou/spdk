@@ -35,19 +35,20 @@ SPDK_ROOT_DIR := $(abspath $(CURDIR)/..)
 include $(SPDK_ROOT_DIR)/mk/spdk.common.mk
 include $(SPDK_ROOT_DIR)/mk/spdk.lib_deps.mk
 
-DIRS-y += bdev blob blobfs conf copy event json jsonrpc \
-          log log_rpc lvol net rpc sock thread trace util nvme vmd nvmf scsi \
+DIRS-y += bdev blob blobfs conf accel event json jsonrpc \
+          log lvol net rpc sock thread trace util nvme vmd nvmf scsi \
           ioat ut_mock iscsi notify
 ifeq ($(OS),Linux)
 DIRS-y += nbd ftl
 endif
 
 DIRS-$(CONFIG_OCF) += env_ocf
-
+DIRS-$(CONFIG_IDXD) += idxd
 DIRS-$(CONFIG_VHOST) += vhost
 DIRS-$(CONFIG_VIRTIO) += virtio
 DIRS-$(CONFIG_REDUCE) += reduce
-DIRS-$(CONFIG_VHOST_INTERNAL_LIB) += rte_vhost
+DIRS-$(CONFIG_RDMA) += rdma
+DIRS-$(CONFIG_VFIO_USER) += vfio_user
 
 # If CONFIG_ENV is pointing at a directory in lib, build it.
 # Out-of-tree env implementations must be built separately by the user.

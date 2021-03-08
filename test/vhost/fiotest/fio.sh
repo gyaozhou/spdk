@@ -16,10 +16,13 @@ vms=()
 used_vms=""
 x=""
 readonly=""
+packed=false
 
-function usage()
-{
-	[[ -n $2 ]] && ( echo "$2"; echo ""; )
+function usage() {
+	[[ -n $2 ]] && (
+		echo "$2"
+		echo ""
+	)
 	echo "Shortcut script for doing automated test"
 	echo "Usage: $(basename $1) [OPTIONS]"
 	echo
@@ -41,6 +44,7 @@ function usage()
 	echo "                          OS - VM os disk path (optional)"
 	echo "                          DISKS - VM os test disks/devices path (virtio - optional, kernel_vhost - mandatory)"
 	echo "    --readonly            Use readonly for fio"
+	echo "    --packed              Virtqueue format is packed"
 	exit 0
 }
 
@@ -49,25 +53,28 @@ function usage()
 while getopts 'xh-:' optchar; do
 	case "$optchar" in
 		-)
-		case "$OPTARG" in
-			help) usage $0 ;;
-			fio-bin=*) fio_bin="--fio-bin=${OPTARG#*=}" ;;
-			fio-job=*) fio_job="${OPTARG#*=}" ;;
-			dry-run) dry_run=true ;;
-			no-shutdown) no_shutdown=true ;;
-			test-type=*) test_type="${OPTARG#*=}" ;;
-			vm=*) vms+=("${OPTARG#*=}") ;;
-			readonly) readonly="--readonly" ;;
-			*) usage $0 "Invalid argument '$OPTARG'" ;;
-		esac
-		;;
-	h) usage $0 ;;
-	x) set -x
-		x="-x" ;;
-	*) usage $0 "Invalid argument '$OPTARG'"
+			case "$OPTARG" in
+				help) usage $0 ;;
+				fio-bin=*) fio_bin="--fio-bin=${OPTARG#*=}" ;;
+				fio-job=*) fio_job="${OPTARG#*=}" ;;
+				dry-run) dry_run=true ;;
+				no-shutdown) no_shutdown=true ;;
+				test-type=*) test_type="${OPTARG#*=}" ;;
+				vm=*) vms+=("${OPTARG#*=}") ;;
+				readonly) readonly="--readonly" ;;
+				packed) packed=true ;;
+				*) usage $0 "Invalid argument '$OPTARG'" ;;
+			esac
+			;;
+		h) usage $0 ;;
+		x)
+			set -x
+			x="-x"
+			;;
+		*) usage $0 "Invalid argument '$OPTARG'" ;;
 	esac
 done
-shift $(( OPTIND - 1 ))
+shift $((OPTIND - 1))
 
 if [[ ! -r "$fio_job" ]]; then
 	fail "no fio job file specified"
@@ -85,7 +92,21 @@ if [[ $test_type =~ "spdk_vhost" ]]; then
 	notice "running SPDK"
 	notice ""
 	vhost_run 0
-	vhost_load_config 0 $testdir/conf.json
+	rpc_py="$rootdir/scripts/rpc.py -s $(get_vhost_dir 0)/rpc.sock"
+	$rpc_py bdev_split_create Nvme0n1 4
+	$rpc_py bdev_malloc_create -b Malloc0 128 4096
+	$rpc_py bdev_malloc_create -b Malloc1 128 4096
+	$rpc_py bdev_malloc_create -b Malloc2 64 512
+	$rpc_py bdev_malloc_create -b Malloc3 64 512
+	$rpc_py bdev_malloc_create -b Malloc4 64 512
+	$rpc_py bdev_malloc_create -b Malloc5 64 512
+	$rpc_py bdev_malloc_create -b Malloc6 64 512
+	$rpc_py bdev_raid_create -n RaidBdev0 -z 128 -r 0 -b "Malloc2 Malloc3"
+	$rpc_py bdev_raid_create -n RaidBdev1 -z 128 -r 0 -b "Nvme0n1p2 Malloc4"
+	$rpc_py bdev_raid_create -n RaidBdev2 -z 128 -r 0 -b "Malloc5 Malloc6"
+	$rpc_py vhost_create_scsi_controller --cpumask 0x1 vhost.0
+	$rpc_py vhost_scsi_controller_add_target vhost.0 0 Malloc0
+	$rpc_py vhost_create_blk_controller --cpumask 0x1 -r vhost.1 Malloc1
 	notice ""
 fi
 
@@ -139,13 +160,17 @@ for vm_conf in "${vms[@]}"; do
 				fi
 			done
 		done <<< "${conf[2]}"
-		unset IFS;
+		unset IFS
 		$rpc_py vhost_get_controllers
 	fi
 
 	setup_cmd="vm_setup --force=${conf[0]} --disk-type=$test_type"
 	[[ x"${conf[1]}" != x"" ]] && setup_cmd+=" --os=${conf[1]}"
 	[[ x"${conf[2]}" != x"" ]] && setup_cmd+=" --disks=${conf[2]}"
+
+	if [[ "$test_type" == "spdk_vhost_blk" ]] && $packed; then
+		setup_cmd+=" --packed"
+	fi
 
 	$setup_cmd
 done
@@ -174,7 +199,7 @@ if [[ $test_type == "spdk_vhost_scsi" ]]; then
 				$rpc_py vhost_scsi_controller_add_target naa.$disk.${conf[0]} 0 $based_disk
 			done
 		done <<< "${conf[2]}"
-		unset IFS;
+		unset IFS
 	done
 fi
 
@@ -219,7 +244,7 @@ run_fio $fio_bin --job-file="$fio_job" --out="$VHOST_DIR/fio_results" $fio_disks
 
 if [[ "$test_type" == "spdk_vhost_scsi" ]]; then
 	for vm_num in $used_vms; do
-	vm_reset_scsi_devices $vm_num $SCSI_DISK
+		vm_reset_scsi_devices $vm_num $SCSI_DISK
 	done
 fi
 

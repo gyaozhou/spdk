@@ -33,12 +33,12 @@
 
 #include "spdk/stdinc.h"
 
+#include "spdk/memory.h"
 #include "spdk/mmio.h"
 #include "spdk/string.h"
 #include "spdk/env.h"
 
 #include "spdk_internal/virtio.h"
-#include "spdk_internal/memory.h"
 
 struct virtio_hw {
 	uint8_t	    use_msix;
@@ -224,10 +224,15 @@ static void
 modern_destruct_dev(struct virtio_dev *vdev)
 {
 	struct virtio_hw *hw = vdev->ctx;
-	struct spdk_pci_device *pci_dev = hw->pci_dev;
+	struct spdk_pci_device *pci_dev;
 
-	free_virtio_hw(hw);
-	spdk_pci_device_detach(pci_dev);
+	if (hw != NULL) {
+		pci_dev = hw->pci_dev;
+		free_virtio_hw(hw);
+		if (pci_dev) {
+			spdk_pci_device_detach(pci_dev);
+		}
+	}
 }
 
 static uint8_t
@@ -312,11 +317,11 @@ modern_setup_queue(struct virtio_dev *dev, struct virtqueue *vq)
 
 	spdk_mmio_write_2(&hw->common_cfg->queue_enable, 1);
 
-	SPDK_DEBUGLOG(SPDK_LOG_VIRTIO_PCI, "queue %"PRIu16" addresses:\n", vq->vq_queue_index);
-	SPDK_DEBUGLOG(SPDK_LOG_VIRTIO_PCI, "\t desc_addr: %" PRIx64 "\n", desc_addr);
-	SPDK_DEBUGLOG(SPDK_LOG_VIRTIO_PCI, "\t aval_addr: %" PRIx64 "\n", avail_addr);
-	SPDK_DEBUGLOG(SPDK_LOG_VIRTIO_PCI, "\t used_addr: %" PRIx64 "\n", used_addr);
-	SPDK_DEBUGLOG(SPDK_LOG_VIRTIO_PCI, "\t notify addr: %p (notify offset: %"PRIu16")\n",
+	SPDK_DEBUGLOG(virtio_pci, "queue %"PRIu16" addresses:\n", vq->vq_queue_index);
+	SPDK_DEBUGLOG(virtio_pci, "\t desc_addr: %" PRIx64 "\n", desc_addr);
+	SPDK_DEBUGLOG(virtio_pci, "\t aval_addr: %" PRIx64 "\n", avail_addr);
+	SPDK_DEBUGLOG(virtio_pci, "\t used_addr: %" PRIx64 "\n", used_addr);
+	SPDK_DEBUGLOG(virtio_pci, "\t notify addr: %p (notify offset: %"PRIu16")\n",
 		      vq->notify_addr, notify_off);
 
 	return 0;
@@ -404,7 +409,7 @@ virtio_read_caps(struct virtio_hw *hw)
 
 	ret = spdk_pci_device_cfg_read(hw->pci_dev, &pos, 1, PCI_CAPABILITY_LIST);
 	if (ret < 0) {
-		SPDK_DEBUGLOG(SPDK_LOG_VIRTIO_PCI, "failed to read pci capability list\n");
+		SPDK_DEBUGLOG(virtio_pci, "failed to read pci capability list\n");
 		return ret;
 	}
 
@@ -420,13 +425,13 @@ virtio_read_caps(struct virtio_hw *hw)
 		}
 
 		if (cap.cap_vndr != PCI_CAP_ID_VNDR) {
-			SPDK_DEBUGLOG(SPDK_LOG_VIRTIO_PCI,
+			SPDK_DEBUGLOG(virtio_pci,
 				      "[%2"PRIx8"] skipping non VNDR cap id: %02"PRIx8"\n",
 				      pos, cap.cap_vndr);
 			goto next;
 		}
 
-		SPDK_DEBUGLOG(SPDK_LOG_VIRTIO_PCI,
+		SPDK_DEBUGLOG(virtio_pci,
 			      "[%2"PRIx8"] cfg type: %"PRIu8", bar: %"PRIu8", offset: %04"PRIx32", len: %"PRIu32"\n",
 			      pos, cap.cfg_type, cap.bar, cap.offset, cap.length);
 
@@ -453,7 +458,7 @@ next:
 
 	if (hw->common_cfg == NULL || hw->notify_base == NULL ||
 	    hw->dev_cfg == NULL    || hw->isr == NULL) {
-		SPDK_DEBUGLOG(SPDK_LOG_VIRTIO_PCI, "no modern virtio pci device found.\n");
+		SPDK_DEBUGLOG(virtio_pci, "no modern virtio pci device found.\n");
 		if (ret < 0) {
 			return ret;
 		} else {
@@ -461,12 +466,12 @@ next:
 		}
 	}
 
-	SPDK_DEBUGLOG(SPDK_LOG_VIRTIO_PCI, "found modern virtio pci device.\n");
+	SPDK_DEBUGLOG(virtio_pci, "found modern virtio pci device.\n");
 
-	SPDK_DEBUGLOG(SPDK_LOG_VIRTIO_PCI, "common cfg mapped at: %p\n", hw->common_cfg);
-	SPDK_DEBUGLOG(SPDK_LOG_VIRTIO_PCI, "device cfg mapped at: %p\n", hw->dev_cfg);
-	SPDK_DEBUGLOG(SPDK_LOG_VIRTIO_PCI, "isr cfg mapped at: %p\n", hw->isr);
-	SPDK_DEBUGLOG(SPDK_LOG_VIRTIO_PCI, "notify base: %p, notify off multiplier: %u\n",
+	SPDK_DEBUGLOG(virtio_pci, "common cfg mapped at: %p\n", hw->common_cfg);
+	SPDK_DEBUGLOG(virtio_pci, "device cfg mapped at: %p\n", hw->dev_cfg);
+	SPDK_DEBUGLOG(virtio_pci, "isr cfg mapped at: %p\n", hw->isr);
+	SPDK_DEBUGLOG(virtio_pci, "notify base: %p, notify off multiplier: %u\n",
 		      hw->notify_base, hw->notify_off_multiplier);
 
 	return 0;
@@ -533,8 +538,24 @@ virtio_pci_dev_probe_cb(void *probe_ctx, struct spdk_pci_device *pci_dev)
 {
 	struct virtio_pci_probe_ctx *ctx = probe_ctx;
 	uint16_t pci_device_id = spdk_pci_device_get_device_id(pci_dev);
+	uint16_t device_id;
 
-	if (pci_device_id != ctx->device_id) {
+	if (pci_device_id < 0x1000 || pci_device_id > 0x107f) {
+		SPDK_ERRLOG("Probe device is not a virtio device\n");
+		return 1;
+	}
+
+	if (pci_device_id < 0x1040) {
+		/* Transitional devices: use the PCI subsystem device id as
+		 * virtio device id, same as legacy driver always did.
+		 */
+		device_id = spdk_pci_device_get_subdevice_id(pci_dev);
+	} else {
+		/* Modern devices: simply use PCI device id, but start from 0x1040. */
+		device_id = pci_device_id - 0x1040;
+	}
+
+	if (device_id != ctx->device_id) {
 		return 1;
 	}
 
@@ -562,7 +583,7 @@ virtio_pci_dev_enumerate(virtio_pci_create_cb enum_cb, void *enum_ctx,
 
 int
 virtio_pci_dev_attach(virtio_pci_create_cb enum_cb, void *enum_ctx,
-		      uint16_t pci_device_id, struct spdk_pci_addr *pci_address)
+		      uint16_t device_id, struct spdk_pci_addr *pci_address)
 {
 	struct virtio_pci_probe_ctx ctx;
 
@@ -573,7 +594,7 @@ virtio_pci_dev_attach(virtio_pci_create_cb enum_cb, void *enum_ctx,
 
 	ctx.enum_cb = enum_cb;
 	ctx.enum_ctx = enum_ctx;
-	ctx.device_id = pci_device_id;
+	ctx.device_id = device_id;
 
 	return spdk_pci_device_attach(spdk_pci_virtio_get_driver(),
 				      virtio_pci_dev_probe_cb, &ctx, pci_address);
@@ -596,4 +617,4 @@ virtio_pci_dev_init(struct virtio_dev *vdev, const char *name,
 	return 0;
 }
 
-SPDK_LOG_REGISTER_COMPONENT("virtio_pci", SPDK_LOG_VIRTIO_PCI)
+SPDK_LOG_REGISTER_COMPONENT(virtio_pci)

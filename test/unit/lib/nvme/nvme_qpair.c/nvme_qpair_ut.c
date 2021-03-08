@@ -44,6 +44,8 @@ bool trace_flag = false;
 
 #include "nvme/nvme_qpair.c"
 
+SPDK_LOG_REGISTER_COMPONENT(nvme)
+
 struct nvme_driver _g_nvme_driver = {
 	.lock = PTHREAD_MUTEX_INITIALIZER,
 };
@@ -52,6 +54,9 @@ DEFINE_STUB_V(nvme_transport_qpair_abort_reqs, (struct spdk_nvme_qpair *qpair, u
 DEFINE_STUB(nvme_transport_qpair_submit_request, int,
 	    (struct spdk_nvme_qpair *qpair, struct nvme_request *req), 0);
 DEFINE_STUB(spdk_nvme_ctrlr_free_io_qpair, int, (struct spdk_nvme_qpair *qpair), 0);
+DEFINE_STUB_V(nvme_transport_ctrlr_disconnect_qpair, (struct spdk_nvme_ctrlr *ctrlr,
+		struct spdk_nvme_qpair *qpair));
+DEFINE_STUB_V(nvme_ctrlr_disconnect_qpair, (struct spdk_nvme_qpair *qpair));
 
 void
 nvme_ctrlr_fail(struct spdk_nvme_ctrlr *ctrlr, bool hot_remove)
@@ -108,6 +113,7 @@ test3(void)
 	struct nvme_request		*req;
 	struct spdk_nvme_ctrlr		ctrlr = {};
 
+	qpair.state = NVME_QPAIR_ENABLED;
 	prepare_submit_request_test(&qpair, &ctrlr);
 
 	req = nvme_allocate_request_null(&qpair, expected_success_callback, NULL);
@@ -204,7 +210,7 @@ static void test_nvme_qpair_process_completions(void)
 	/* Same if the qpair is failed at the transport layer. */
 	ctrlr.is_failed = false;
 	ctrlr.is_removed = false;
-	qpair.state = NVME_QPAIR_DISABLED;
+	qpair.state = NVME_QPAIR_DISCONNECTED;
 	rc = spdk_nvme_qpair_process_completions(&qpair, 0);
 	CU_ASSERT(rc == -ENXIO);
 	CU_ASSERT(!STAILQ_EMPTY(&qpair.queued_req));
@@ -492,15 +498,10 @@ test_nvme_qpair_add_cmd_error_injection(void)
 	cleanup_submit_request_test(&qpair);
 }
 
-static void
-test_nvme_qpair_submit_request(void)
+static struct nvme_request *
+allocate_request_tree(struct spdk_nvme_qpair *qpair)
 {
-	int				rc;
-	struct spdk_nvme_qpair		qpair = {};
-	struct spdk_nvme_ctrlr		ctrlr = {};
-	struct nvme_request		*req, *req1, *req2, *req3, *req2_1, *req2_2, *req2_3;
-
-	prepare_submit_request_test(&qpair, &ctrlr);
+	struct nvme_request	*req, *req1, *req2, *req3, *req2_1, *req2_2, *req2_3;
 
 	/*
 	 *  Build a request chain like the following:
@@ -514,48 +515,68 @@ test_nvme_qpair_submit_request(void)
 	 *     |       |       |
 	 *   req2_1  req2_2  req2_3
 	 */
-	req = nvme_allocate_request_null(&qpair, NULL, NULL);
+	req = nvme_allocate_request_null(qpair, NULL, NULL);
 	CU_ASSERT(req != NULL);
 	TAILQ_INIT(&req->children);
 
-	req1 = nvme_allocate_request_null(&qpair, NULL, NULL);
+	req1 = nvme_allocate_request_null(qpair, NULL, NULL);
 	CU_ASSERT(req1 != NULL);
 	req->num_children++;
 	TAILQ_INSERT_TAIL(&req->children, req1, child_tailq);
 	req1->parent = req;
 
-	req2 = nvme_allocate_request_null(&qpair, NULL, NULL);
+	req2 = nvme_allocate_request_null(qpair, NULL, NULL);
 	CU_ASSERT(req2 != NULL);
 	TAILQ_INIT(&req2->children);
 	req->num_children++;
 	TAILQ_INSERT_TAIL(&req->children, req2, child_tailq);
 	req2->parent = req;
 
-	req3 = nvme_allocate_request_null(&qpair, NULL, NULL);
+	req3 = nvme_allocate_request_null(qpair, NULL, NULL);
 	CU_ASSERT(req3 != NULL);
 	req->num_children++;
 	TAILQ_INSERT_TAIL(&req->children, req3, child_tailq);
 	req3->parent = req;
 
-	req2_1 = nvme_allocate_request_null(&qpair, NULL, NULL);
+	req2_1 = nvme_allocate_request_null(qpair, NULL, NULL);
 	CU_ASSERT(req2_1 != NULL);
 	req2->num_children++;
 	TAILQ_INSERT_TAIL(&req2->children, req2_1, child_tailq);
 	req2_1->parent = req2;
 
-	req2_2 = nvme_allocate_request_null(&qpair, NULL, NULL);
+	req2_2 = nvme_allocate_request_null(qpair, NULL, NULL);
 	CU_ASSERT(req2_2 != NULL);
 	req2->num_children++;
 	TAILQ_INSERT_TAIL(&req2->children, req2_2, child_tailq);
 	req2_2->parent = req2;
 
-	req2_3 = nvme_allocate_request_null(&qpair, NULL, NULL);
+	req2_3 = nvme_allocate_request_null(qpair, NULL, NULL);
 	CU_ASSERT(req2_3 != NULL);
 	req2->num_children++;
 	TAILQ_INSERT_TAIL(&req2->children, req2_3, child_tailq);
 	req2_3->parent = req2;
 
+	return req;
+}
+
+static void
+test_nvme_qpair_submit_request(void)
+{
+	int				rc;
+	struct spdk_nvme_qpair		qpair = {};
+	struct spdk_nvme_ctrlr		ctrlr = {};
+	struct nvme_request		*req;
+
+	prepare_submit_request_test(&qpair, &ctrlr);
+
+	req = allocate_request_tree(&qpair);
 	ctrlr.is_failed = true;
+	rc = nvme_qpair_submit_request(&qpair, req);
+	SPDK_CU_ASSERT_FATAL(rc == -ENXIO);
+
+	req = allocate_request_tree(&qpair);
+	ctrlr.is_failed = false;
+	qpair.state = NVME_QPAIR_DISCONNECTING;
 	rc = nvme_qpair_submit_request(&qpair, req);
 	SPDK_CU_ASSERT_FATAL(rc == -ENXIO);
 
@@ -597,35 +618,22 @@ int main(int argc, char **argv)
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	if (CU_initialize_registry() != CUE_SUCCESS) {
-		return CU_get_error();
-	}
+	CU_set_error_action(CUEA_ABORT);
+	CU_initialize_registry();
 
 	suite = CU_add_suite("nvme_qpair", NULL, NULL);
-	if (suite == NULL) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
 
-	if (CU_add_test(suite, "test3", test3) == NULL
-	    || CU_add_test(suite, "ctrlr_failed", test_ctrlr_failed) == NULL
-	    || CU_add_test(suite, "struct_packing", struct_packing) == NULL
-	    || CU_add_test(suite, "spdk_nvme_qpair_process_completions",
-			   test_nvme_qpair_process_completions) == NULL
-	    || CU_add_test(suite, "nvme_completion_is_retry", test_nvme_completion_is_retry) == NULL
+	CU_ADD_TEST(suite, test3);
+	CU_ADD_TEST(suite, test_ctrlr_failed);
+	CU_ADD_TEST(suite, struct_packing);
+	CU_ADD_TEST(suite, test_nvme_qpair_process_completions);
+	CU_ADD_TEST(suite, test_nvme_completion_is_retry);
 #ifdef DEBUG
-	    || CU_add_test(suite, "get_status_string", test_get_status_string) == NULL
+	CU_ADD_TEST(suite, test_get_status_string);
 #endif
-	    || CU_add_test(suite, "spdk_nvme_qpair_add_cmd_error_injection",
-			   test_nvme_qpair_add_cmd_error_injection) == NULL
-	    || CU_add_test(suite, "spdk_nvme_qpair_submit_request",
-			   test_nvme_qpair_submit_request) == NULL
-	    || CU_add_test(suite, "nvme_qpair_resubmit_request_with_transport_failed",
-			   test_nvme_qpair_resubmit_request_with_transport_failed) == NULL
-	   ) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
+	CU_ADD_TEST(suite, test_nvme_qpair_add_cmd_error_injection);
+	CU_ADD_TEST(suite, test_nvme_qpair_submit_request);
+	CU_ADD_TEST(suite, test_nvme_qpair_resubmit_request_with_transport_failed);
 
 	CU_basic_set_mode(CU_BRM_VERBOSE);
 	CU_basic_run_tests();

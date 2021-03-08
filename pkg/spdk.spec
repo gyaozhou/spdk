@@ -16,20 +16,13 @@ Summary: Set of libraries and utilities for high performance user-mode storage
 %define install_sbindir %{buildroot}/%{_sbindir}
 %define install_docdir %{buildroot}/%{_docdir}/%{name}
 
-# Distros that don't support python3 will use python2
-%if "%{dist}" == ".el7"
-%define use_python2 1
-%else
-%define use_python2 0
-%endif
-
 License: BSD
 
 # Only x86_64 is supported
 ExclusiveArch: x86_64
 
 BuildRequires: gcc gcc-c++ make
-BuildRequires: dpdk-devel, numactl-devel
+BuildRequires: dpdk-devel, numactl-devel, ncurses-devel
 BuildRequires: libiscsi-devel, libaio-devel, openssl-devel, libuuid-devel
 BuildRequires: libibverbs-devel, librdmacm-devel
 %if %{with doc}
@@ -37,8 +30,9 @@ BuildRequires: doxygen mscgen graphviz
 %endif
 
 # Install dependencies
-Requires: dpdk >= 17.11, numactl-libs, openssl-libs
+Requires: dpdk >= 19.11, numactl-libs, openssl-libs
 Requires: libiscsi, libaio, libuuid
+Requires: python3-configshell, python3-pexpect
 # NVMe over Fabrics
 Requires: librdmacm, librdmacm
 Requires(post): /sbin/ldconfig
@@ -62,11 +56,7 @@ developing applications with the Storage Performance Development Kit.
 
 %package tools
 Summary: Storage Performance Development Kit tools files
-%if "%{use_python2}" == "0"
 Requires: %{name}%{?_isa} = %{package_version} python3 python3-configshell python3-pexpect
-%else
-Requires: %{name}%{?_isa} = %{package_version} python python-configshell pexpect
-%endif
 BuildArch: noarch
 
 %description tools
@@ -91,12 +81,12 @@ BuildArch: noarch
 %build
 ./configure --prefix=%{_usr} \
 	--disable-tests \
+	--disable-unit-tests \
 	--without-crypto \
 	--with-dpdk=/usr/share/dpdk/x86_64-default-linuxapp-gcc \
 	--without-fio \
 	--with-vhost \
 	--without-pmdk \
-	--without-vpp \
 	--without-rbd \
 	--with-rdma \
 	--with-shared \
@@ -121,12 +111,7 @@ find scripts -type f -regextype egrep -regex '.*(spdkcli|rpc).*[.]py' \
 find %{install_datadir}/scripts -type f -regextype egrep -regex '.*([.]py|[.]sh)' \
 	-exec sed -i -E '1s@#!/usr/bin/env (.*)@#!/usr/bin/\1@' {} +
 
-%if "%{use_python2}" == "1"
-find %{install_datadir}/scripts -type f -regextype egrep -regex '.*([.]py)' \
-	-exec sed -i -E '1s@#!/usr/bin/python3@#!/usr/bin/python2@' {} +
-%endif
-
-# synlinks to tools
+# symlinks to tools
 mkdir -p %{install_sbindir}
 ln -sf -r %{install_datadir}/scripts/rpc.py %{install_sbindir}/%{name}-rpc
 ln -sf -r %{install_datadir}/scripts/spdkcli.py %{install_sbindir}/%{name}-cli

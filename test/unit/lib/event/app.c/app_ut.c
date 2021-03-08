@@ -43,13 +43,22 @@ DEFINE_STUB_V(spdk_event_call, (struct spdk_event *event));
 DEFINE_STUB(spdk_event_allocate, struct spdk_event *, (uint32_t core, spdk_event_fn fn, void *arg1,
 		void *arg2), NULL);
 DEFINE_STUB_V(spdk_subsystem_init, (spdk_subsystem_init_fn cb_fn, void *cb_arg));
+DEFINE_STUB_V(spdk_subsystem_fini, (spdk_msg_fn cb_fn, void *cb_arg));
 DEFINE_STUB_V(spdk_rpc_register_method, (const char *method, spdk_rpc_method_handler func,
 		uint32_t state_mask));
 DEFINE_STUB_V(spdk_rpc_register_alias_deprecated, (const char *method, const char *alias));
 DEFINE_STUB_V(spdk_rpc_set_state, (uint32_t state));
 DEFINE_STUB(spdk_rpc_get_state, uint32_t, (void), SPDK_RPC_RUNTIME);
+DEFINE_STUB_V(spdk_rpc_initialize, (const char *listen_addr));
+DEFINE_STUB_V(spdk_rpc_finish, (void));
 DEFINE_STUB_V(spdk_app_json_config_load, (const char *json_config_file, const char *rpc_addr,
-		spdk_subsystem_init_fn cb_fn, void *cb_arg));
+		spdk_subsystem_init_fn cb_fn, void *cb_arg, bool stop_on_error));
+DEFINE_STUB_V(spdk_reactors_start, (void));
+DEFINE_STUB_V(spdk_reactors_stop, (void *arg1));
+DEFINE_STUB(spdk_reactors_init, int, (void), 0);
+DEFINE_STUB_V(spdk_reactors_fini, (void));
+DEFINE_STUB_V(_spdk_scheduler_disable, (void));
+DEFINE_STUB(_spdk_get_scheduling_reactor, struct spdk_reactor *, (void), NULL);
 
 static void
 unittest_usage(void)
@@ -65,10 +74,10 @@ unittest_parse_args(int ch, char *arg)
 static void
 clean_opts(struct spdk_app_opts *opts)
 {
-	free(opts->pci_whitelist);
-	opts->pci_whitelist = NULL;
-	free(opts->pci_blacklist);
-	opts->pci_blacklist = NULL;
+	free(opts->pci_allowed);
+	opts->pci_allowed = NULL;
+	free(opts->pci_blocked);
+	opts->pci_blocked = NULL;
 	memset(opts, 0, sizeof(struct spdk_app_opts));
 }
 
@@ -79,7 +88,7 @@ test_spdk_app_parse_args(void)
 	struct spdk_app_opts opts = {};
 	struct option my_options[2] = {};
 	char *valid_argv[test_argc] = {"app_ut",
-				       "--wait-for-rpc",
+				       "--single-file-segments",
 				       "-d",
 				       "-p0",
 				       "-B",
@@ -96,7 +105,7 @@ test_spdk_app_parse_args(void)
 	char *argv_added_short_opt[test_argc] = {"app_ut",
 						 "-z",
 						 "-d",
-						 "--wait-for-rpc",
+						 "--single-file-segments",
 						 "-p0",
 						 "-cspdk.conf"
 						};
@@ -105,12 +114,12 @@ test_spdk_app_parse_args(void)
 						"-d",
 						"-r/var/tmp/spdk.sock",
 						"--test-long-opt",
-						"--wait-for-rpc"
+						"--single-file-segments"
 					       };
 	char *invalid_argv_missing_option[test_argc] = {"app_ut",
 							"-d",
 							"-p",
-							"--wait-for-rpc",
+							"--single-file-segments",
 							"--silence-noticelog"
 							"-R"
 						       };
@@ -177,23 +186,12 @@ main(int argc, char **argv)
 	CU_pSuite suite = NULL;
 	unsigned int num_failures;
 
-	if (CU_initialize_registry() != CUE_SUCCESS) {
-		return CU_get_error();
-	}
+	CU_set_error_action(CUEA_ABORT);
+	CU_initialize_registry();
 
 	suite = CU_add_suite("app_suite", NULL, NULL);
-	if (suite == NULL) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
 
-	if (
-		CU_add_test(suite, "test_spdk_app_parse_args",
-			    test_spdk_app_parse_args) == NULL
-	) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
+	CU_ADD_TEST(suite, test_spdk_app_parse_args);
 
 	CU_basic_set_mode(CU_BRM_VERBOSE);
 	CU_basic_run_tests();

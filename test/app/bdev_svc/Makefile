@@ -39,25 +39,10 @@ APP = bdev_svc
 
 C_SRCS := bdev_svc.c
 
-SPDK_LIB_LIST = $(ALL_MODULES_LIST)
-SPDK_LIB_LIST += event_bdev event_copy event_vmd
-SPDK_LIB_LIST += nvmf event log trace conf thread util bdev copy rpc jsonrpc json sock blobfs_bdev
-SPDK_LIB_LIST += app_rpc log_rpc bdev_rpc notify
+SPDK_LIB_LIST = $(ALL_MODULES_LIST) event_bdev
 
 ifeq ($(OS),Linux)
-SPDK_LIB_LIST += event_nbd nbd
-endif
-
-ifeq ($(CONFIG_FC),y)
-ifneq ($(strip $(CONFIG_FC_PATH)),)
-SYS_LIBS += -L$(CONFIG_FC_PATH)
-endif
-SYS_LIBS += -lufc
-endif
-
-# libfuse3 is required internally by blobfs_bdev
-ifeq ($(CONFIG_FUSE),y)
-LIBS+= -L/usr/local/lib -lfuse3
+SPDK_LIB_LIST += event_nbd
 endif
 
 include $(SPDK_ROOT_DIR)/mk/spdk.app.mk

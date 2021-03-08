@@ -42,12 +42,6 @@
 
 #include "bdev/bdev.c"
 
-DEFINE_STUB(spdk_conf_find_section, struct spdk_conf_section *, (struct spdk_conf *cp,
-		const char *name), NULL);
-DEFINE_STUB(spdk_conf_section_get_nmval, char *,
-	    (struct spdk_conf_section *sp, const char *key, int idx1, int idx2), NULL);
-DEFINE_STUB(spdk_conf_section_get_intval, int, (struct spdk_conf_section *sp, const char *key), -1);
-
 struct spdk_trace_histories *g_trace_histories;
 DEFINE_STUB_V(spdk_trace_add_register_fn, (struct spdk_trace_register_fn *reg_fn));
 DEFINE_STUB_V(spdk_trace_register_owner, (uint8_t type, char id_prefix));
@@ -116,6 +110,12 @@ static enum spdk_bdev_io_status g_io_status;
 static enum spdk_bdev_io_status g_io_exp_status = SPDK_BDEV_IO_STATUS_SUCCESS;
 static uint32_t g_bdev_ut_io_device;
 static struct bdev_ut_channel *g_bdev_ut_channel;
+static void *g_compare_read_buf;
+static uint32_t g_compare_read_buf_len;
+static void *g_compare_write_buf;
+static uint32_t g_compare_write_buf_len;
+static bool g_abort_done;
+static enum spdk_bdev_io_status g_abort_status;
 
 static struct ut_expected_io *
 ut_alloc_expected_io(uint8_t type, uint64_t offset, uint64_t length, int iovcnt)
@@ -146,9 +146,49 @@ stub_submit_request(struct spdk_io_channel *_ch, struct spdk_bdev_io *bdev_io)
 	struct bdev_ut_channel *ch = spdk_io_channel_get_ctx(_ch);
 	struct ut_expected_io *expected_io;
 	struct iovec *iov, *expected_iov;
+	struct spdk_bdev_io *bio_to_abort;
 	int i;
 
 	g_bdev_io = bdev_io;
+
+	if (g_compare_read_buf && bdev_io->type == SPDK_BDEV_IO_TYPE_READ) {
+		uint32_t len = bdev_io->u.bdev.iovs[0].iov_len;
+
+		CU_ASSERT(bdev_io->u.bdev.iovcnt == 1);
+		CU_ASSERT(g_compare_read_buf_len == len);
+		memcpy(bdev_io->u.bdev.iovs[0].iov_base, g_compare_read_buf, len);
+	}
+
+	if (g_compare_write_buf && bdev_io->type == SPDK_BDEV_IO_TYPE_WRITE) {
+		uint32_t len = bdev_io->u.bdev.iovs[0].iov_len;
+
+		CU_ASSERT(bdev_io->u.bdev.iovcnt == 1);
+		CU_ASSERT(g_compare_write_buf_len == len);
+		memcpy(g_compare_write_buf, bdev_io->u.bdev.iovs[0].iov_base, len);
+	}
+
+	if (g_compare_read_buf && bdev_io->type == SPDK_BDEV_IO_TYPE_COMPARE) {
+		uint32_t len = bdev_io->u.bdev.iovs[0].iov_len;
+
+		CU_ASSERT(bdev_io->u.bdev.iovcnt == 1);
+		CU_ASSERT(g_compare_read_buf_len == len);
+		if (memcmp(bdev_io->u.bdev.iovs[0].iov_base, g_compare_read_buf, len)) {
+			g_io_exp_status = SPDK_BDEV_IO_STATUS_MISCOMPARE;
+		}
+	}
+
+	if (bdev_io->type == SPDK_BDEV_IO_TYPE_ABORT) {
+		if (g_io_exp_status == SPDK_BDEV_IO_STATUS_SUCCESS) {
+			TAILQ_FOREACH(bio_to_abort, &ch->outstanding_io, module_link) {
+				if (bio_to_abort == bdev_io->u.abort.bio_to_abort) {
+					TAILQ_REMOVE(&ch->outstanding_io, bio_to_abort, module_link);
+					ch->outstanding_io_count--;
+					spdk_bdev_io_complete(bio_to_abort, SPDK_BDEV_IO_STATUS_FAILED);
+					break;
+				}
+			}
+		}
+	}
 
 	TAILQ_INSERT_TAIL(&ch->outstanding_io, bdev_io, module_link);
 	ch->outstanding_io_count++;
@@ -241,6 +281,7 @@ bdev_ut_get_io_channel(void *ctx)
 static bool g_io_types_supported[SPDK_BDEV_NUM_IO_TYPES] = {
 	[SPDK_BDEV_IO_TYPE_READ]		= true,
 	[SPDK_BDEV_IO_TYPE_WRITE]		= true,
+	[SPDK_BDEV_IO_TYPE_COMPARE]		= true,
 	[SPDK_BDEV_IO_TYPE_UNMAP]		= true,
 	[SPDK_BDEV_IO_TYPE_FLUSH]		= true,
 	[SPDK_BDEV_IO_TYPE_RESET]		= true,
@@ -249,6 +290,7 @@ static bool g_io_types_supported[SPDK_BDEV_NUM_IO_TYPES] = {
 	[SPDK_BDEV_IO_TYPE_NVME_IO_MD]		= true,
 	[SPDK_BDEV_IO_TYPE_WRITE_ZEROES]	= true,
 	[SPDK_BDEV_IO_TYPE_ZCOPY]		= true,
+	[SPDK_BDEV_IO_TYPE_ABORT]		= true,
 };
 
 static void
@@ -413,7 +455,6 @@ get_device_stat_cb(struct spdk_bdev *bdev, struct spdk_bdev_io_stat *stat, void 
 	CU_ASSERT_STRING_EQUAL(bdev_name, "bdev0");
 
 	free(stat);
-	free_bdev(bdev);
 
 	*(bool *)cb_arg = true;
 }
@@ -423,6 +464,11 @@ bdev_unregister_cb(void *cb_arg, int rc)
 {
 	g_unregister_arg = cb_arg;
 	g_unregister_rc = rc;
+}
+
+static void
+bdev_ut_event_cb(enum spdk_bdev_event_type type, struct spdk_bdev *bdev, void *event_ctx)
+{
 }
 
 static void
@@ -465,7 +511,7 @@ get_device_stat_test(void)
 	spdk_bdev_get_device_stat(bdev, stat, get_device_stat_cb, &done);
 	while (!done) { poll_threads(); }
 
-
+	free_bdev(bdev);
 }
 
 static void
@@ -537,51 +583,55 @@ open_write_test(void)
 	bdev[8] = allocate_vbdev("bdev8");
 
 	/* Open bdev0 read-only.  This should succeed. */
-	rc = spdk_bdev_open(bdev[0], false, NULL, NULL, &desc[0]);
+	rc = spdk_bdev_open_ext("bdev0", false, bdev_ut_event_cb, NULL, &desc[0]);
 	CU_ASSERT(rc == 0);
 	SPDK_CU_ASSERT_FATAL(desc[0] != NULL);
+	CU_ASSERT(bdev[0] == spdk_bdev_desc_get_bdev(desc[0]));
 	spdk_bdev_close(desc[0]);
 
 	/*
 	 * Open bdev1 read/write.  This should fail since bdev1 has been claimed
 	 * by a vbdev module.
 	 */
-	rc = spdk_bdev_open(bdev[1], true, NULL, NULL, &desc[1]);
+	rc = spdk_bdev_open_ext("bdev1", true, bdev_ut_event_cb, NULL, &desc[1]);
 	CU_ASSERT(rc == -EPERM);
 
 	/*
 	 * Open bdev4 read/write.  This should fail since bdev3 has been claimed
 	 * by a vbdev module.
 	 */
-	rc = spdk_bdev_open(bdev[4], true, NULL, NULL, &desc[4]);
+	rc = spdk_bdev_open_ext("bdev4", true, bdev_ut_event_cb, NULL, &desc[4]);
 	CU_ASSERT(rc == -EPERM);
 
 	/* Open bdev4 read-only.  This should succeed. */
-	rc = spdk_bdev_open(bdev[4], false, NULL, NULL, &desc[4]);
+	rc = spdk_bdev_open_ext("bdev4", false, bdev_ut_event_cb, NULL, &desc[4]);
 	CU_ASSERT(rc == 0);
 	SPDK_CU_ASSERT_FATAL(desc[4] != NULL);
+	CU_ASSERT(bdev[4] == spdk_bdev_desc_get_bdev(desc[4]));
 	spdk_bdev_close(desc[4]);
 
 	/*
 	 * Open bdev8 read/write.  This should succeed since it is a leaf
 	 * bdev.
 	 */
-	rc = spdk_bdev_open(bdev[8], true, NULL, NULL, &desc[8]);
+	rc = spdk_bdev_open_ext("bdev8", true, bdev_ut_event_cb, NULL, &desc[8]);
 	CU_ASSERT(rc == 0);
 	SPDK_CU_ASSERT_FATAL(desc[8] != NULL);
+	CU_ASSERT(bdev[8] == spdk_bdev_desc_get_bdev(desc[8]));
 	spdk_bdev_close(desc[8]);
 
 	/*
 	 * Open bdev5 read/write.  This should fail since bdev4 has been claimed
 	 * by a vbdev module.
 	 */
-	rc = spdk_bdev_open(bdev[5], true, NULL, NULL, &desc[5]);
+	rc = spdk_bdev_open_ext("bdev5", true, bdev_ut_event_cb, NULL, &desc[5]);
 	CU_ASSERT(rc == -EPERM);
 
 	/* Open bdev4 read-only.  This should succeed. */
-	rc = spdk_bdev_open(bdev[5], false, NULL, NULL, &desc[5]);
+	rc = spdk_bdev_open_ext("bdev5", false, bdev_ut_event_cb, NULL, &desc[5]);
 	CU_ASSERT(rc == 0);
 	SPDK_CU_ASSERT_FATAL(desc[5] != NULL);
+	CU_ASSERT(bdev[5] == spdk_bdev_desc_get_bdev(desc[5]));
 	spdk_bdev_close(desc[5]);
 
 	free_vbdev(bdev[8]);
@@ -639,7 +689,6 @@ num_blocks_test(void)
 {
 	struct spdk_bdev bdev;
 	struct spdk_bdev_desc *desc = NULL;
-	struct spdk_bdev_desc *desc_ext = NULL;
 	int rc;
 
 	memset(&bdev, 0, sizeof(bdev));
@@ -654,20 +703,15 @@ num_blocks_test(void)
 	/* Shrinking block number */
 	CU_ASSERT(spdk_bdev_notify_blockcnt_change(&bdev, 30) == 0);
 
-	/* In case bdev opened */
-	rc = spdk_bdev_open(&bdev, false, NULL, NULL, &desc);
+	rc = spdk_bdev_open_ext("num_blocks", false, bdev_open_cb1, &desc, &desc);
 	CU_ASSERT(rc == 0);
 	SPDK_CU_ASSERT_FATAL(desc != NULL);
+	CU_ASSERT(&bdev == spdk_bdev_desc_get_bdev(desc));
 
 	/* Growing block number */
 	CU_ASSERT(spdk_bdev_notify_blockcnt_change(&bdev, 80) == 0);
 	/* Shrinking block number */
 	CU_ASSERT(spdk_bdev_notify_blockcnt_change(&bdev, 20) != 0);
-
-	/* In case bdev opened with ext API */
-	rc = spdk_bdev_open_ext("num_blocks", false, bdev_open_cb1, &desc_ext, &desc_ext);
-	CU_ASSERT(rc == 0);
-	SPDK_CU_ASSERT_FATAL(desc_ext != NULL);
 
 	g_event_type1 = 0xFF;
 	/* Growing block number */
@@ -681,7 +725,6 @@ num_blocks_test(void)
 	CU_ASSERT(spdk_bdev_notify_blockcnt_change(&bdev, 100) == 0);
 
 	spdk_bdev_close(desc);
-	spdk_bdev_close(desc_ext);
 	spdk_bdev_unregister(&bdev, NULL, NULL);
 
 	poll_threads();
@@ -698,6 +741,8 @@ io_valid_test(void)
 	memset(&bdev, 0, sizeof(bdev));
 
 	bdev.blocklen = 512;
+	CU_ASSERT(pthread_mutex_init(&bdev.internal.mutex, NULL) == 0);
+
 	spdk_bdev_notify_blockcnt_change(&bdev, 100);
 
 	/* All parameters valid */
@@ -714,6 +759,8 @@ io_valid_test(void)
 
 	/* Offset near end of uint64_t range (2^64 - 1) */
 	CU_ASSERT(bdev_io_valid_blocks(&bdev, 18446744073709551615ULL, 1) == false);
+
+	CU_ASSERT(pthread_mutex_destroy(&bdev.internal.mutex) == 0);
 }
 
 static void
@@ -847,11 +894,12 @@ bdev_io_types_test(void)
 	struct spdk_bdev *bdev;
 	struct spdk_bdev_desc *desc = NULL;
 	struct spdk_io_channel *io_ch;
-	struct spdk_bdev_opts bdev_opts = {
-		.bdev_io_pool_size = 4,
-		.bdev_io_cache_size = 2,
-	};
+	struct spdk_bdev_opts bdev_opts = {};
 	int rc;
+
+	spdk_bdev_get_opts(&bdev_opts, sizeof(bdev_opts));
+	bdev_opts.bdev_io_pool_size = 4;
+	bdev_opts.bdev_io_cache_size = 2;
 
 	rc = spdk_bdev_set_opts(&bdev_opts);
 	CU_ASSERT(rc == 0);
@@ -860,10 +908,11 @@ bdev_io_types_test(void)
 
 	bdev = allocate_bdev("bdev0");
 
-	rc = spdk_bdev_open(bdev, true, NULL, NULL, &desc);
+	rc = spdk_bdev_open_ext("bdev0", true, bdev_ut_event_cb, NULL, &desc);
 	CU_ASSERT(rc == 0);
 	poll_threads();
 	SPDK_CU_ASSERT_FATAL(desc != NULL);
+	CU_ASSERT(bdev == spdk_bdev_desc_get_bdev(desc));
 	io_ch = spdk_bdev_get_io_channel(desc);
 	CU_ASSERT(io_ch != NULL);
 
@@ -888,13 +937,14 @@ bdev_io_wait_test(void)
 	struct spdk_bdev *bdev;
 	struct spdk_bdev_desc *desc = NULL;
 	struct spdk_io_channel *io_ch;
-	struct spdk_bdev_opts bdev_opts = {
-		.bdev_io_pool_size = 4,
-		.bdev_io_cache_size = 2,
-	};
+	struct spdk_bdev_opts bdev_opts = {};
 	struct bdev_ut_io_wait_entry io_wait_entry;
 	struct bdev_ut_io_wait_entry io_wait_entry2;
 	int rc;
+
+	spdk_bdev_get_opts(&bdev_opts, sizeof(bdev_opts));
+	bdev_opts.bdev_io_pool_size = 4;
+	bdev_opts.bdev_io_cache_size = 2;
 
 	rc = spdk_bdev_set_opts(&bdev_opts);
 	CU_ASSERT(rc == 0);
@@ -903,10 +953,11 @@ bdev_io_wait_test(void)
 
 	bdev = allocate_bdev("bdev0");
 
-	rc = spdk_bdev_open(bdev, true, NULL, NULL, &desc);
+	rc = spdk_bdev_open_ext("bdev0", true, bdev_ut_event_cb, NULL, &desc);
 	CU_ASSERT(rc == 0);
 	poll_threads();
 	SPDK_CU_ASSERT_FATAL(desc != NULL);
+	CU_ASSERT(bdev == spdk_bdev_desc_get_bdev(desc));
 	io_ch = spdk_bdev_get_io_channel(desc);
 	CU_ASSERT(io_ch != NULL);
 
@@ -961,19 +1012,24 @@ bdev_io_wait_test(void)
 }
 
 static void
-bdev_io_spans_boundary_test(void)
+bdev_io_spans_split_test(void)
 {
 	struct spdk_bdev bdev;
 	struct spdk_bdev_io bdev_io;
+	struct iovec iov[BDEV_IO_NUM_CHILD_IOV];
 
 	memset(&bdev, 0, sizeof(bdev));
+	bdev_io.u.bdev.iovs = iov;
 
 	bdev.optimal_io_boundary = 0;
+	bdev.max_segment_size = 0;
+	bdev.max_num_segments = 0;
 	bdev_io.bdev = &bdev;
 
-	/* bdev has no optimal_io_boundary set - so this should return false. */
+	/* bdev has no optimal_io_boundary and max_size set - so this should return false. */
 	CU_ASSERT(bdev_io_should_split(&bdev_io) == false);
 
+	bdev.split_on_optimal_io_boundary = true;
 	bdev.optimal_io_boundary = 32;
 	bdev_io.type = SPDK_BDEV_IO_TYPE_RESET;
 
@@ -991,22 +1047,48 @@ bdev_io_spans_boundary_test(void)
 
 	/* This I/O spans a boundary. */
 	CU_ASSERT(bdev_io_should_split(&bdev_io) == true);
+
+	bdev_io.u.bdev.num_blocks = 32;
+	bdev.max_segment_size = 512 * 32;
+	bdev.max_num_segments = 1;
+	bdev_io.u.bdev.iovcnt = 1;
+	iov[0].iov_len = 512;
+
+	/* Does not cross and exceed max_size or max_segs */
+	CU_ASSERT(bdev_io_should_split(&bdev_io) == false);
+
+	bdev.split_on_optimal_io_boundary = false;
+	bdev.max_segment_size = 512;
+	bdev.max_num_segments = 1;
+	bdev_io.u.bdev.iovcnt = 2;
+
+	/* Exceed max_segs */
+	CU_ASSERT(bdev_io_should_split(&bdev_io) == true);
+
+	bdev.max_num_segments = 2;
+	iov[0].iov_len = 513;
+	iov[1].iov_len = 512;
+
+	/* Exceed max_sizes */
+	CU_ASSERT(bdev_io_should_split(&bdev_io) == true);
 }
 
 static void
-bdev_io_split_test(void)
+bdev_io_boundary_split_test(void)
 {
 	struct spdk_bdev *bdev;
 	struct spdk_bdev_desc *desc = NULL;
 	struct spdk_io_channel *io_ch;
-	struct spdk_bdev_opts bdev_opts = {
-		.bdev_io_pool_size = 512,
-		.bdev_io_cache_size = 64,
-	};
+	struct spdk_bdev_opts bdev_opts = {};
 	struct iovec iov[BDEV_IO_NUM_CHILD_IOV * 2];
 	struct ut_expected_io *expected_io;
+	void *md_buf = (void *)0xFF000000;
 	uint64_t i;
 	int rc;
+
+	spdk_bdev_get_opts(&bdev_opts, sizeof(bdev_opts));
+	bdev_opts.bdev_io_pool_size = 512;
+	bdev_opts.bdev_io_cache_size = 64;
 
 	rc = spdk_bdev_set_opts(&bdev_opts);
 	CU_ASSERT(rc == 0);
@@ -1014,9 +1096,10 @@ bdev_io_split_test(void)
 
 	bdev = allocate_bdev("bdev0");
 
-	rc = spdk_bdev_open(bdev, true, NULL, NULL, &desc);
+	rc = spdk_bdev_open_ext("bdev0", true, bdev_ut_event_cb, NULL, &desc);
 	CU_ASSERT(rc == 0);
 	SPDK_CU_ASSERT_FATAL(desc != NULL);
+	CU_ASSERT(bdev == spdk_bdev_desc_get_bdev(desc));
 	io_ch = spdk_bdev_get_io_channel(desc);
 	CU_ASSERT(io_ch != NULL);
 
@@ -1040,6 +1123,8 @@ bdev_io_split_test(void)
 	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 0);
 
 	bdev->split_on_optimal_io_boundary = true;
+	bdev->md_interleave = false;
+	bdev->md_len = 8;
 
 	/* Now test that a single-vector command is split correctly.
 	 * Offset 14, length 8, payload 0xF000
@@ -1050,15 +1135,18 @@ bdev_io_split_test(void)
 	 */
 	g_io_done = false;
 	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 14, 2, 1);
+	expected_io->md_buf = md_buf;
 	ut_expected_io_set_iov(expected_io, 0, (void *)0xF000, 2 * 512);
 	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
 
 	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 16, 6, 1);
+	expected_io->md_buf = md_buf + 2 * 8;
 	ut_expected_io_set_iov(expected_io, 0, (void *)(0xF000 + 2 * 512), 6 * 512);
 	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
 
 	/* spdk_bdev_read_blocks will submit the first child immediately. */
-	rc = spdk_bdev_read_blocks(desc, io_ch, (void *)0xF000, 14, 8, io_done, NULL);
+	rc = spdk_bdev_read_blocks_with_md(desc, io_ch, (void *)0xF000, md_buf,
+					   14, 8, io_done, NULL);
 	CU_ASSERT(rc == 0);
 	CU_ASSERT(g_io_done == false);
 
@@ -1079,20 +1167,24 @@ bdev_io_split_test(void)
 
 	g_io_done = false;
 	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_WRITE, 14, 2, 2);
+	expected_io->md_buf = md_buf;
 	ut_expected_io_set_iov(expected_io, 0, (void *)0x10000, 512);
 	ut_expected_io_set_iov(expected_io, 1, (void *)0x20000, 512);
 	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
 
 	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_WRITE, 16, 16, 1);
+	expected_io->md_buf = md_buf + 2 * 8;
 	ut_expected_io_set_iov(expected_io, 0, (void *)(0x20000 + 512), 16 * 512);
 	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
 
 	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_WRITE, 32, 14, 2);
+	expected_io->md_buf = md_buf + 18 * 8;
 	ut_expected_io_set_iov(expected_io, 0, (void *)(0x20000 + 17 * 512), 3 * 512);
 	ut_expected_io_set_iov(expected_io, 1, (void *)0x30000, 11 * 512);
 	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
 
-	rc = spdk_bdev_writev_blocks(desc, io_ch, iov, 3, 14, 32, io_done, NULL);
+	rc = spdk_bdev_writev_blocks_with_md(desc, io_ch, iov, 3, md_buf,
+					     14, 32, io_done, NULL);
 	CU_ASSERT(rc == 0);
 	CU_ASSERT(g_io_done == false);
 
@@ -1112,6 +1204,7 @@ bdev_io_split_test(void)
 	g_io_done = false;
 	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 0, BDEV_IO_NUM_CHILD_IOV,
 					   BDEV_IO_NUM_CHILD_IOV);
+	expected_io->md_buf = md_buf;
 	for (i = 0; i < BDEV_IO_NUM_CHILD_IOV; i++) {
 		ut_expected_io_set_iov(expected_io, i, (void *)((i + 1) * 0x10000), 512);
 	}
@@ -1119,14 +1212,15 @@ bdev_io_split_test(void)
 
 	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, BDEV_IO_NUM_CHILD_IOV,
 					   BDEV_IO_NUM_CHILD_IOV, BDEV_IO_NUM_CHILD_IOV);
+	expected_io->md_buf = md_buf + BDEV_IO_NUM_CHILD_IOV * 8;
 	for (i = 0; i < BDEV_IO_NUM_CHILD_IOV; i++) {
 		ut_expected_io_set_iov(expected_io, i,
 				       (void *)((i + 1 + BDEV_IO_NUM_CHILD_IOV) * 0x10000), 512);
 	}
 	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
 
-	rc = spdk_bdev_readv_blocks(desc, io_ch, iov, BDEV_IO_NUM_CHILD_IOV * 2, 0,
-				    BDEV_IO_NUM_CHILD_IOV * 2, io_done, NULL);
+	rc = spdk_bdev_readv_blocks_with_md(desc, io_ch, iov, BDEV_IO_NUM_CHILD_IOV * 2, md_buf,
+					    0, BDEV_IO_NUM_CHILD_IOV * 2, io_done, NULL);
 	CU_ASSERT(rc == 0);
 	CU_ASSERT(g_io_done == false);
 
@@ -1166,6 +1260,7 @@ bdev_io_split_test(void)
 	g_io_done = false;
 	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 0,
 					   BDEV_IO_NUM_CHILD_IOV - 1, BDEV_IO_NUM_CHILD_IOV);
+	expected_io->md_buf = md_buf;
 	for (i = 0; i < BDEV_IO_NUM_CHILD_IOV - 2; i++) {
 		ut_expected_io_set_iov(expected_io, i,
 				       (void *)((i + 1) * 0x10000), 512);
@@ -1178,18 +1273,20 @@ bdev_io_split_test(void)
 
 	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, BDEV_IO_NUM_CHILD_IOV - 1,
 					   1, 1);
+	expected_io->md_buf = md_buf + (BDEV_IO_NUM_CHILD_IOV - 1) * 8;
 	ut_expected_io_set_iov(expected_io, 0,
 			       (void *)((BDEV_IO_NUM_CHILD_IOV + 1) * 0x10000), 512);
 	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
 
 	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, BDEV_IO_NUM_CHILD_IOV,
 					   1, 1);
+	expected_io->md_buf = md_buf + BDEV_IO_NUM_CHILD_IOV * 8;
 	ut_expected_io_set_iov(expected_io, 0,
 			       (void *)((BDEV_IO_NUM_CHILD_IOV + 2) * 0x10000), 512);
 	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
 
-	rc = spdk_bdev_readv_blocks(desc, io_ch, iov, BDEV_IO_NUM_CHILD_IOV + 2, 0,
-				    BDEV_IO_NUM_CHILD_IOV + 1, io_done, NULL);
+	rc = spdk_bdev_readv_blocks_with_md(desc, io_ch, iov, BDEV_IO_NUM_CHILD_IOV + 2, md_buf,
+					    0, BDEV_IO_NUM_CHILD_IOV + 1, io_done, NULL);
 	CU_ASSERT(rc == 0);
 	CU_ASSERT(g_io_done == false);
 
@@ -1225,6 +1322,7 @@ bdev_io_split_test(void)
 	/* The first expected io should be start from offset 0 to BDEV_IO_NUM_CHILD_IOV - 1 */
 	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 0,
 					   BDEV_IO_NUM_CHILD_IOV - 1, BDEV_IO_NUM_CHILD_IOV - 1);
+	expected_io->md_buf = md_buf;
 	for (i = 0; i < BDEV_IO_NUM_CHILD_IOV - 1; i++) {
 		ut_expected_io_set_iov(expected_io, i,
 				       (void *)((i + 1) * 0x10000), 512);
@@ -1233,6 +1331,7 @@ bdev_io_split_test(void)
 	/* The second expected io should be start from offset BDEV_IO_NUM_CHILD_IOV - 1 to BDEV_IO_NUM_CHILD_IOV */
 	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, BDEV_IO_NUM_CHILD_IOV - 1,
 					   1, 2);
+	expected_io->md_buf = md_buf + (BDEV_IO_NUM_CHILD_IOV - 1) * 8;
 	ut_expected_io_set_iov(expected_io, 0,
 			       (void *)(BDEV_IO_NUM_CHILD_IOV * 0x10000), 256);
 	ut_expected_io_set_iov(expected_io, 1,
@@ -1241,12 +1340,13 @@ bdev_io_split_test(void)
 	/* The third expected io should be start from offset BDEV_IO_NUM_CHILD_IOV to BDEV_IO_NUM_CHILD_IOV + 1 */
 	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, BDEV_IO_NUM_CHILD_IOV,
 					   1, 1);
+	expected_io->md_buf = md_buf + BDEV_IO_NUM_CHILD_IOV * 8;
 	ut_expected_io_set_iov(expected_io, 0,
 			       (void *)((BDEV_IO_NUM_CHILD_IOV + 2) * 0x10000), 512);
 	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
 
-	rc = spdk_bdev_readv_blocks(desc, io_ch, iov, BDEV_IO_NUM_CHILD_IOV * 2, 0,
-				    BDEV_IO_NUM_CHILD_IOV + 1, io_done, NULL);
+	rc = spdk_bdev_readv_blocks_with_md(desc, io_ch, iov, BDEV_IO_NUM_CHILD_IOV * 2, md_buf,
+					    0, BDEV_IO_NUM_CHILD_IOV + 1, io_done, NULL);
 	CU_ASSERT(rc == 0);
 	CU_ASSERT(g_io_done == false);
 
@@ -1341,6 +1441,7 @@ bdev_io_split_test(void)
 	 * of child iovs,
 	 */
 	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 0, 126, 32);
+	expected_io->md_buf = md_buf;
 	for (i = 0; i < 32; i++) {
 		ut_expected_io_set_iov(expected_io, i, iov[i].iov_base, iov[i].iov_len);
 	}
@@ -1350,6 +1451,7 @@ bdev_io_split_test(void)
 	 * split by the IO boundary requirement.
 	 */
 	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 126, 2, 2);
+	expected_io->md_buf = md_buf + 126 * 8;
 	ut_expected_io_set_iov(expected_io, 0, iov[32].iov_base, iov[32].iov_len);
 	ut_expected_io_set_iov(expected_io, 1, iov[33].iov_base, 864);
 	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
@@ -1358,6 +1460,7 @@ bdev_io_split_test(void)
 	 * the first 864 bytes of iov[46] split by the IO boundary requirement.
 	 */
 	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 128, 128, 14);
+	expected_io->md_buf = md_buf + 128 * 8;
 	ut_expected_io_set_iov(expected_io, 0, (void *)((uintptr_t)iov[33].iov_base + 864),
 			       iov[33].iov_len - 864);
 	ut_expected_io_set_iov(expected_io, 1, iov[34].iov_base, iov[34].iov_len);
@@ -1379,6 +1482,7 @@ bdev_io_split_test(void)
 	 * first 864 bytes of iov[52] split by the IO boundary requirement.
 	 */
 	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 256, 128, 7);
+	expected_io->md_buf = md_buf + 256 * 8;
 	ut_expected_io_set_iov(expected_io, 0, (void *)((uintptr_t)iov[46].iov_base + 864),
 			       iov[46].iov_len - 864);
 	ut_expected_io_set_iov(expected_io, 1, iov[47].iov_base, iov[47].iov_len);
@@ -1393,6 +1497,7 @@ bdev_io_split_test(void)
 	 * the first 4096 bytes of iov[57] split by the IO boundary requirement.
 	 */
 	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 384, 128, 6);
+	expected_io->md_buf = md_buf + 384 * 8;
 	ut_expected_io_set_iov(expected_io, 0, (void *)((uintptr_t)iov[52].iov_base + 864),
 			       iov[52].iov_len - 864);
 	ut_expected_io_set_iov(expected_io, 1, iov[53].iov_base, iov[53].iov_len);
@@ -1406,6 +1511,7 @@ bdev_io_split_test(void)
 	 * to the first 3936 bytes of iov[58] split by the capacity of child iovs.
 	 */
 	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 512, 30, 3);
+	expected_io->md_buf = md_buf + 512 * 8;
 	ut_expected_io_set_iov(expected_io, 0, (void *)((uintptr_t)iov[57].iov_base + 4960),
 			       iov[57].iov_len - 4960);
 	ut_expected_io_set_iov(expected_io, 1, iov[58].iov_base, iov[58].iov_len);
@@ -1414,12 +1520,14 @@ bdev_io_split_test(void)
 
 	/* The 7th child IO is from the remaining 160 bytes of iov[59] and iov[60]. */
 	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 542, 1, 2);
+	expected_io->md_buf = md_buf + 542 * 8;
 	ut_expected_io_set_iov(expected_io, 0, (void *)((uintptr_t)iov[59].iov_base + 3936),
 			       iov[59].iov_len - 3936);
 	ut_expected_io_set_iov(expected_io, 1, iov[60].iov_base, iov[60].iov_len);
 	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
 
-	rc = spdk_bdev_readv_blocks(desc, io_ch, iov, 61, 0, 543, io_done, NULL);
+	rc = spdk_bdev_readv_blocks_with_md(desc, io_ch, iov, 61, md_buf,
+					    0, 543, io_done, NULL);
 	CU_ASSERT(rc == 0);
 	CU_ASSERT(g_io_done == false);
 
@@ -1498,6 +1606,42 @@ bdev_io_split_test(void)
 	CU_ASSERT(g_io_done == true);
 	CU_ASSERT(g_io_status == SPDK_BDEV_IO_STATUS_FAILED);
 
+	/* Test if a multi vector command terminated with failure before continueing
+	 * splitting process when one of child I/O failed.
+	 * The multi vector command is as same as the above that needs to be split by strip
+	 * and then needs to be split further due to the capacity of child iovs.
+	 */
+	for (i = 0; i < BDEV_IO_NUM_CHILD_IOV - 1; i++) {
+		iov[i].iov_base = (void *)((i + 1) * 0x10000);
+		iov[i].iov_len = 512;
+	}
+	iov[BDEV_IO_NUM_CHILD_IOV - 1].iov_base = (void *)(BDEV_IO_NUM_CHILD_IOV * 0x10000);
+	iov[BDEV_IO_NUM_CHILD_IOV - 1].iov_len = 256;
+
+	iov[BDEV_IO_NUM_CHILD_IOV].iov_base = (void *)((BDEV_IO_NUM_CHILD_IOV + 1) * 0x10000);
+	iov[BDEV_IO_NUM_CHILD_IOV].iov_len = 256;
+
+	iov[BDEV_IO_NUM_CHILD_IOV + 1].iov_base = (void *)((BDEV_IO_NUM_CHILD_IOV + 2) * 0x10000);
+	iov[BDEV_IO_NUM_CHILD_IOV + 1].iov_len = 512;
+
+	bdev->optimal_io_boundary = BDEV_IO_NUM_CHILD_IOV;
+
+	g_io_exp_status = SPDK_BDEV_IO_STATUS_FAILED;
+	g_io_done = false;
+	g_io_status = SPDK_BDEV_IO_STATUS_SUCCESS;
+
+	rc = spdk_bdev_readv_blocks(desc, io_ch, iov, BDEV_IO_NUM_CHILD_IOV * 2, 0,
+				    BDEV_IO_NUM_CHILD_IOV + 1, io_done, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_io_done == false);
+
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 1);
+	stub_complete_io(1);
+	CU_ASSERT(g_io_done == true);
+	CU_ASSERT(g_io_status == SPDK_BDEV_IO_STATUS_FAILED);
+
+	g_io_exp_status = SPDK_BDEV_IO_STATUS_SUCCESS;
+
 	/* for this test we will create the following conditions to hit the code path where
 	 * we are trying to send and IO following a split that has no iovs because we had to
 	 * trim them for alignment reasons.
@@ -1571,20 +1715,568 @@ bdev_io_split_test(void)
 }
 
 static void
-bdev_io_split_with_io_wait(void)
+bdev_io_max_size_and_segment_split_test(void)
 {
 	struct spdk_bdev *bdev;
 	struct spdk_bdev_desc *desc = NULL;
 	struct spdk_io_channel *io_ch;
-	struct spdk_bdev_channel *channel;
-	struct spdk_bdev_mgmt_channel *mgmt_ch;
-	struct spdk_bdev_opts bdev_opts = {
-		.bdev_io_pool_size = 2,
-		.bdev_io_cache_size = 1,
-	};
-	struct iovec iov[3];
+	struct spdk_bdev_opts bdev_opts = {};
+	struct iovec iov[BDEV_IO_NUM_CHILD_IOV * 2];
 	struct ut_expected_io *expected_io;
+	uint64_t i;
 	int rc;
+
+	spdk_bdev_get_opts(&bdev_opts, sizeof(bdev_opts));
+	bdev_opts.bdev_io_pool_size = 512;
+	bdev_opts.bdev_io_cache_size = 64;
+
+	bdev_opts.opts_size = sizeof(bdev_opts);
+	rc = spdk_bdev_set_opts(&bdev_opts);
+	CU_ASSERT(rc == 0);
+	spdk_bdev_initialize(bdev_init_cb, NULL);
+
+	bdev = allocate_bdev("bdev0");
+
+	rc = spdk_bdev_open_ext(bdev->name, true, bdev_ut_event_cb, NULL, &desc);
+	CU_ASSERT(rc == 0);
+	SPDK_CU_ASSERT_FATAL(desc != NULL);
+	io_ch = spdk_bdev_get_io_channel(desc);
+	CU_ASSERT(io_ch != NULL);
+
+	bdev->split_on_optimal_io_boundary = false;
+	bdev->optimal_io_boundary = 0;
+
+	/* Case 0 max_num_segments == 0.
+	 * but segment size 2 * 512 > 512
+	 */
+	bdev->max_segment_size = 512;
+	bdev->max_num_segments = 0;
+	g_io_done = false;
+
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 14, 2, 2);
+	ut_expected_io_set_iov(expected_io, 0, (void *)0xF000, 512);
+	ut_expected_io_set_iov(expected_io, 1, (void *)(0xF000 + 512), 512);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	rc = spdk_bdev_read_blocks(desc, io_ch, (void *)0xF000, 14, 2, io_done, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_io_done == false);
+
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 1);
+	stub_complete_io(1);
+	CU_ASSERT(g_io_done == true);
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 0);
+
+	/* Case 1 max_segment_size == 0
+	 * but iov num 2 > 1.
+	 */
+	bdev->max_segment_size = 0;
+	bdev->max_num_segments = 1;
+	g_io_done = false;
+
+	iov[0].iov_base = (void *)0x10000;
+	iov[0].iov_len = 512;
+	iov[1].iov_base = (void *)0x20000;
+	iov[1].iov_len = 8 * 512;
+
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 14, 1, 1);
+	ut_expected_io_set_iov(expected_io, 0, iov[0].iov_base, iov[0].iov_len);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 15, 8, 1);
+	ut_expected_io_set_iov(expected_io, 0, iov[1].iov_base, iov[1].iov_len);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	rc = spdk_bdev_readv_blocks(desc, io_ch, iov, 2, 14, 9, io_done, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_io_done == false);
+
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 2);
+	stub_complete_io(2);
+	CU_ASSERT(g_io_done == true);
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 0);
+
+	/* Test that a non-vector command is split correctly.
+	 * Set up the expected values before calling spdk_bdev_read_blocks
+	 */
+	bdev->max_segment_size = 512;
+	bdev->max_num_segments = 1;
+	g_io_done = false;
+
+	/* Child IO 0 */
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 14, 1, 1);
+	ut_expected_io_set_iov(expected_io, 0, (void *)0xF000, 512);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	/* Child IO 1 */
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 15, 1, 1);
+	ut_expected_io_set_iov(expected_io, 0, (void *)(0xF000 + 1 * 512), 512);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	/* spdk_bdev_read_blocks will submit the first child immediately. */
+	rc = spdk_bdev_read_blocks(desc, io_ch, (void *)0xF000, 14, 2, io_done, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_io_done == false);
+
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 2);
+	stub_complete_io(2);
+	CU_ASSERT(g_io_done == true);
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 0);
+
+	/* Now set up a more complex, multi-vector command that needs to be split,
+	 * including splitting iovecs.
+	 */
+	bdev->max_segment_size = 2 * 512;
+	bdev->max_num_segments = 1;
+	g_io_done = false;
+
+	iov[0].iov_base = (void *)0x10000;
+	iov[0].iov_len = 2 * 512;
+	iov[1].iov_base = (void *)0x20000;
+	iov[1].iov_len = 4 * 512;
+	iov[2].iov_base = (void *)0x30000;
+	iov[2].iov_len = 6 * 512;
+
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_WRITE, 14, 2, 1);
+	ut_expected_io_set_iov(expected_io, 0, iov[0].iov_base, 512 * 2);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	/* Split iov[1].size to 2 iov entries then split the segments */
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_WRITE, 16, 2, 1);
+	ut_expected_io_set_iov(expected_io, 0, iov[1].iov_base, 512 * 2);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_WRITE, 18, 2, 1);
+	ut_expected_io_set_iov(expected_io, 0, iov[1].iov_base + 512 * 2, 512 * 2);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	/* Split iov[2].size to 3 iov entries then split the segments */
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_WRITE, 20, 2, 1);
+	ut_expected_io_set_iov(expected_io, 0, iov[2].iov_base, 512 * 2);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_WRITE, 22, 2, 1);
+	ut_expected_io_set_iov(expected_io, 0, iov[2].iov_base + 512 * 2, 512 * 2);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_WRITE, 24, 2, 1);
+	ut_expected_io_set_iov(expected_io, 0, iov[2].iov_base + 512 * 4, 512 * 2);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	rc = spdk_bdev_writev_blocks(desc, io_ch, iov, 3, 14, 12, io_done, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_io_done == false);
+
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 6);
+	stub_complete_io(6);
+	CU_ASSERT(g_io_done == true);
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 0);
+
+	/* Test multi vector command that needs to be split by strip and then needs to be
+	 * split further due to the capacity of parent IO child iovs.
+	 */
+	bdev->max_segment_size = 512;
+	bdev->max_num_segments = 1;
+	g_io_done = false;
+
+	for (i = 0; i < BDEV_IO_NUM_CHILD_IOV; i++) {
+		iov[i].iov_base = (void *)((i + 1) * 0x10000);
+		iov[i].iov_len = 512 * 2;
+	}
+
+	/* Each input iov.size is split into 2 iovs,
+	 * half of the input iov can fill all child iov entries of a single IO.
+	 */
+	for (i = 0; i < BDEV_IO_NUM_CHILD_IOV / 2; i++) {
+		expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 2 * i, 1, 1);
+		ut_expected_io_set_iov(expected_io, 0, iov[i].iov_base, 512);
+		TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+		expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 2 * i + 1, 1, 1);
+		ut_expected_io_set_iov(expected_io, 0, iov[i].iov_base + 512, 512);
+		TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+	}
+
+	/* The remaining iov is split in the second round */
+	for (i = BDEV_IO_NUM_CHILD_IOV / 2; i < BDEV_IO_NUM_CHILD_IOV; i++) {
+		expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, i * 2, 1, 1);
+		ut_expected_io_set_iov(expected_io, 0, iov[i].iov_base, 512);
+		TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+		expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, i * 2 + 1, 1, 1);
+		ut_expected_io_set_iov(expected_io, 0, iov[i].iov_base + 512, 512);
+		TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+	}
+
+	rc = spdk_bdev_readv_blocks(desc, io_ch, iov, BDEV_IO_NUM_CHILD_IOV, 0,
+				    BDEV_IO_NUM_CHILD_IOV * 2, io_done, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_io_done == false);
+
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == BDEV_IO_NUM_CHILD_IOV);
+	stub_complete_io(BDEV_IO_NUM_CHILD_IOV);
+	CU_ASSERT(g_io_done == false);
+
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == BDEV_IO_NUM_CHILD_IOV);
+	stub_complete_io(BDEV_IO_NUM_CHILD_IOV);
+	CU_ASSERT(g_io_done == true);
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 0);
+
+	/* A wrong case, a child IO that is divided does
+	 * not meet the principle of multiples of block size,
+	 * and exits with error
+	 */
+	bdev->max_segment_size = 512;
+	bdev->max_num_segments = 1;
+	g_io_done = false;
+
+	iov[0].iov_base = (void *)0x10000;
+	iov[0].iov_len = 512 + 256;
+	iov[1].iov_base = (void *)0x20000;
+	iov[1].iov_len = 256;
+
+	/* iov[0] is split to 512 and 256.
+	 * 256 is less than a block size, and it is found
+	 * in the next round of split that it is the first child IO smaller than
+	 * the block size, so the error exit
+	 */
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 0, 1, 1);
+	ut_expected_io_set_iov(expected_io, 0, iov[0].iov_base, 512);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	rc = spdk_bdev_readv_blocks(desc, io_ch, iov, 2, 0, 2, io_done, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_io_done == false);
+
+	/* First child IO is OK */
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 1);
+	stub_complete_io(1);
+	CU_ASSERT(g_io_done == true);
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 0);
+
+	/* error exit */
+	stub_complete_io(1);
+	CU_ASSERT(g_io_done == true);
+	CU_ASSERT(g_io_status == SPDK_BDEV_IO_STATUS_FAILED);
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 0);
+
+	/* Test multi vector command that needs to be split by strip and then needs to be
+	 * split further due to the capacity of child iovs.
+	 *
+	 * In this case, the last two iovs need to be split, but it will exceed the capacity
+	 * of child iovs, so it needs to wait until the first batch completed.
+	 */
+	bdev->max_segment_size = 512;
+	bdev->max_num_segments = BDEV_IO_NUM_CHILD_IOV;
+	g_io_done = false;
+
+	for (i = 0; i < BDEV_IO_NUM_CHILD_IOV - 2; i++) {
+		iov[i].iov_base = (void *)((i + 1) * 0x10000);
+		iov[i].iov_len = 512;
+	}
+	for (i = BDEV_IO_NUM_CHILD_IOV - 2; i < BDEV_IO_NUM_CHILD_IOV; i++) {
+		iov[i].iov_base = (void *)((i + 1) * 0x10000);
+		iov[i].iov_len = 512 * 2;
+	}
+
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 0,
+					   BDEV_IO_NUM_CHILD_IOV, BDEV_IO_NUM_CHILD_IOV);
+	/* 0 ~ (BDEV_IO_NUM_CHILD_IOV - 2) Will not be split */
+	for (i = 0; i < BDEV_IO_NUM_CHILD_IOV - 2; i++) {
+		ut_expected_io_set_iov(expected_io, i, iov[i].iov_base, iov[i].iov_len);
+	}
+	/* (BDEV_IO_NUM_CHILD_IOV - 2) is split */
+	ut_expected_io_set_iov(expected_io, i, iov[i].iov_base, 512);
+	ut_expected_io_set_iov(expected_io, i + 1, iov[i].iov_base + 512, 512);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	/* Child iov entries exceed the max num of parent IO so split it in next round */
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, BDEV_IO_NUM_CHILD_IOV, 2, 2);
+	ut_expected_io_set_iov(expected_io, 0, iov[i + 1].iov_base, 512);
+	ut_expected_io_set_iov(expected_io, 1, iov[i + 1].iov_base + 512, 512);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	rc = spdk_bdev_readv_blocks(desc, io_ch, iov, BDEV_IO_NUM_CHILD_IOV, 0,
+				    BDEV_IO_NUM_CHILD_IOV + 2, io_done, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_io_done == false);
+
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 1);
+	stub_complete_io(1);
+	CU_ASSERT(g_io_done == false);
+
+	/* Next round */
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 1);
+	stub_complete_io(1);
+	CU_ASSERT(g_io_done == true);
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 0);
+
+	/* This case is similar to the previous one, but the io composed of
+	 * the last few entries of child iov is not enough for a blocklen, so they
+	 * cannot be put into this IO, but wait until the next time.
+	 */
+	bdev->max_segment_size = 512;
+	bdev->max_num_segments = BDEV_IO_NUM_CHILD_IOV;
+	g_io_done = false;
+
+	for (i = 0; i < BDEV_IO_NUM_CHILD_IOV - 2; i++) {
+		iov[i].iov_base = (void *)((i + 1) * 0x10000);
+		iov[i].iov_len = 512;
+	}
+
+	for (i = BDEV_IO_NUM_CHILD_IOV - 2; i < BDEV_IO_NUM_CHILD_IOV + 2; i++) {
+		iov[i].iov_base = (void *)((i + 1) * 0x10000);
+		iov[i].iov_len = 128;
+	}
+
+	/* First child iovcnt is't BDEV_IO_NUM_CHILD_IOV but BDEV_IO_NUM_CHILD_IOV - 2.
+	 * Because the left 2 iov is not enough for a blocklen.
+	 */
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 0,
+					   BDEV_IO_NUM_CHILD_IOV - 2, BDEV_IO_NUM_CHILD_IOV - 2);
+	for (i = 0; i < BDEV_IO_NUM_CHILD_IOV - 2; i++) {
+		ut_expected_io_set_iov(expected_io, i, iov[i].iov_base, iov[i].iov_len);
+	}
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	/* The second child io waits until the end of the first child io before executing.
+	 * Because the iovcnt of the two IOs exceeds the child iovcnt of the parent IO.
+	 * BDEV_IO_NUM_CHILD_IOV - 2 to BDEV_IO_NUM_CHILD_IOV + 2
+	 */
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, BDEV_IO_NUM_CHILD_IOV - 2,
+					   1, 4);
+	ut_expected_io_set_iov(expected_io, 0, iov[i].iov_base, iov[i].iov_len);
+	ut_expected_io_set_iov(expected_io, 1, iov[i + 1].iov_base, iov[i + 1].iov_len);
+	ut_expected_io_set_iov(expected_io, 2, iov[i + 2].iov_base, iov[i + 2].iov_len);
+	ut_expected_io_set_iov(expected_io, 3, iov[i + 3].iov_base, iov[i + 3].iov_len);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	rc = spdk_bdev_readv_blocks(desc, io_ch, iov, BDEV_IO_NUM_CHILD_IOV + 2, 0,
+				    BDEV_IO_NUM_CHILD_IOV - 1, io_done, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_io_done == false);
+
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 1);
+	stub_complete_io(1);
+	CU_ASSERT(g_io_done == false);
+
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 1);
+	stub_complete_io(1);
+	CU_ASSERT(g_io_done == true);
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 0);
+
+	/* A very complicated case. Each sg entry exceeds max_segment_size and
+	 * needs to be split. At the same time, child io must be a multiple of blocklen.
+	 * At the same time, child iovcnt exceeds parent iovcnt.
+	 */
+	bdev->max_segment_size = 512 + 128;
+	bdev->max_num_segments = 3;
+	g_io_done = false;
+
+	for (i = 0; i < BDEV_IO_NUM_CHILD_IOV - 2; i++) {
+		iov[i].iov_base = (void *)((i + 1) * 0x10000);
+		iov[i].iov_len = 512 + 256;
+	}
+
+	for (i = BDEV_IO_NUM_CHILD_IOV - 2; i < BDEV_IO_NUM_CHILD_IOV + 2; i++) {
+		iov[i].iov_base = (void *)((i + 1) * 0x10000);
+		iov[i].iov_len = 512 + 128;
+	}
+
+	/* Child IOs use 9 entries per for() round and 3 * 9 = 27 child iov entries.
+	 * Consume 4 parent IO iov entries per for() round and 6 block size.
+	 * Generate 9 child IOs.
+	 */
+	for (i = 0; i < 3; i++) {
+		uint32_t j = i * 4;
+		expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, i * 6, 2, 3);
+		ut_expected_io_set_iov(expected_io, 0, iov[j].iov_base, 640);
+		ut_expected_io_set_iov(expected_io, 1, iov[j].iov_base + 640, 128);
+		ut_expected_io_set_iov(expected_io, 2, iov[j + 1].iov_base, 256);
+		TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+		/* Child io must be a multiple of blocklen
+		 * iov[j + 2] must be split. If the third entry is also added,
+		 * the multiple of blocklen cannot be guaranteed. But it still
+		 * occupies one iov entry of the parent child iov.
+		 */
+		expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, i * 6 + 2, 2, 2);
+		ut_expected_io_set_iov(expected_io, 0, iov[j + 1].iov_base + 256, 512);
+		ut_expected_io_set_iov(expected_io, 1, iov[j + 2].iov_base, 512);
+		TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+		expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, i * 6 + 4, 2, 3);
+		ut_expected_io_set_iov(expected_io, 0, iov[j + 2].iov_base + 512, 256);
+		ut_expected_io_set_iov(expected_io, 1, iov[j + 3].iov_base, 640);
+		ut_expected_io_set_iov(expected_io, 2, iov[j + 3].iov_base + 640, 128);
+		TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+	}
+
+	/* Child iov position at 27, the 10th child IO
+	 * iov entry index is 3 * 4 and offset is 3 * 6
+	 */
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 18, 2, 3);
+	ut_expected_io_set_iov(expected_io, 0, iov[12].iov_base, 640);
+	ut_expected_io_set_iov(expected_io, 1, iov[12].iov_base + 640, 128);
+	ut_expected_io_set_iov(expected_io, 2, iov[13].iov_base, 256);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	/* Child iov position at 30, the 11th child IO */
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 20, 2, 2);
+	ut_expected_io_set_iov(expected_io, 0, iov[13].iov_base + 256, 512);
+	ut_expected_io_set_iov(expected_io, 1, iov[14].iov_base, 512);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	/* The 2nd split round and iovpos is 0, the 12th child IO */
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 22, 2, 3);
+	ut_expected_io_set_iov(expected_io, 0, iov[14].iov_base + 512, 256);
+	ut_expected_io_set_iov(expected_io, 1, iov[15].iov_base, 640);
+	ut_expected_io_set_iov(expected_io, 2, iov[15].iov_base + 640, 128);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	/* Consume 9 child IOs and 27 child iov entries.
+	 * Consume 4 parent IO iov entries per for() round and 6 block size.
+	 * Parent IO iov index start from 16 and block offset start from 24
+	 */
+	for (i = 0; i < 3; i++) {
+		uint32_t j = i * 4 + 16;
+		uint32_t offset = i * 6 + 24;
+		expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, offset, 2, 3);
+		ut_expected_io_set_iov(expected_io, 0, iov[j].iov_base, 640);
+		ut_expected_io_set_iov(expected_io, 1, iov[j].iov_base + 640, 128);
+		ut_expected_io_set_iov(expected_io, 2, iov[j + 1].iov_base, 256);
+		TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+		/* Child io must be a multiple of blocklen
+		 * iov[j + 2] must be split. If the third entry is also added,
+		 * the multiple of blocklen cannot be guaranteed. But it still
+		 * occupies one iov entry of the parent child iov.
+		 */
+		expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, offset + 2, 2, 2);
+		ut_expected_io_set_iov(expected_io, 0, iov[j + 1].iov_base + 256, 512);
+		ut_expected_io_set_iov(expected_io, 1, iov[j + 2].iov_base, 512);
+		TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+		expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, offset + 4, 2, 3);
+		ut_expected_io_set_iov(expected_io, 0, iov[j + 2].iov_base + 512, 256);
+		ut_expected_io_set_iov(expected_io, 1, iov[j + 3].iov_base, 640);
+		ut_expected_io_set_iov(expected_io, 2, iov[j + 3].iov_base + 640, 128);
+		TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+	}
+
+	/* The 22th child IO, child iov position at 30 */
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 42, 1, 1);
+	ut_expected_io_set_iov(expected_io, 0, iov[28].iov_base, 512);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	/* The third round */
+	/* Here is the 23nd child IO and child iovpos is 0 */
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 43, 2, 3);
+	ut_expected_io_set_iov(expected_io, 0, iov[28].iov_base + 512, 256);
+	ut_expected_io_set_iov(expected_io, 1, iov[29].iov_base, 640);
+	ut_expected_io_set_iov(expected_io, 2, iov[29].iov_base + 640, 128);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	/* The 24th child IO */
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 45, 3, 3);
+	ut_expected_io_set_iov(expected_io, 0, iov[30].iov_base, 640);
+	ut_expected_io_set_iov(expected_io, 1, iov[31].iov_base, 640);
+	ut_expected_io_set_iov(expected_io, 2, iov[32].iov_base, 256);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	/* The 25th child IO */
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 48, 2, 2);
+	ut_expected_io_set_iov(expected_io, 0, iov[32].iov_base + 256, 384);
+	ut_expected_io_set_iov(expected_io, 1, iov[33].iov_base, 640);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	rc = spdk_bdev_readv_blocks(desc, io_ch, iov, BDEV_IO_NUM_CHILD_IOV + 2, 0,
+				    50, io_done, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_io_done == false);
+
+	/* Parent IO supports up to 32 child iovs, so it is calculated that
+	 * a maximum of 11 IOs can be split at a time, and the
+	 * splitting will continue after the first batch is over.
+	 */
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 11);
+	stub_complete_io(11);
+	CU_ASSERT(g_io_done == false);
+
+	/* The 2nd round */
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 11);
+	stub_complete_io(11);
+	CU_ASSERT(g_io_done == false);
+
+	/* The last round */
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 3);
+	stub_complete_io(3);
+	CU_ASSERT(g_io_done == true);
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 0);
+
+	/* Test an WRITE_ZEROES.  This should also not be split. */
+	bdev->max_segment_size = 512;
+	bdev->max_num_segments = 1;
+	g_io_done = false;
+
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_WRITE_ZEROES, 9, 36, 0);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	rc = spdk_bdev_write_zeroes_blocks(desc, io_ch, 9, 36, io_done, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_io_done == false);
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 1);
+	stub_complete_io(1);
+	CU_ASSERT(g_io_done == true);
+
+	/* Test an UNMAP.  This should also not be split. */
+	g_io_done = false;
+
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_UNMAP, 15, 4, 0);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	rc = spdk_bdev_unmap_blocks(desc, io_ch, 15, 4, io_done, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_io_done == false);
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 1);
+	stub_complete_io(1);
+	CU_ASSERT(g_io_done == true);
+
+	/* Test a FLUSH.  This should also not be split. */
+	g_io_done = false;
+
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_FLUSH, 15, 4, 0);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	rc = spdk_bdev_flush_blocks(desc, io_ch, 15, 2, io_done, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_io_done == false);
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 1);
+	stub_complete_io(1);
+	CU_ASSERT(g_io_done == true);
+
+	spdk_put_io_channel(io_ch);
+	spdk_bdev_close(desc);
+	free_bdev(bdev);
+	spdk_bdev_finish(bdev_fini_cb, NULL);
+	poll_threads();
+}
+
+static void
+bdev_io_mix_split_test(void)
+{
+	struct spdk_bdev *bdev;
+	struct spdk_bdev_desc *desc = NULL;
+	struct spdk_io_channel *io_ch;
+	struct spdk_bdev_opts bdev_opts = {};
+	struct iovec iov[BDEV_IO_NUM_CHILD_IOV * 2];
+	struct ut_expected_io *expected_io;
+	uint64_t i;
+	int rc;
+
+	spdk_bdev_get_opts(&bdev_opts, sizeof(bdev_opts));
+	bdev_opts.bdev_io_pool_size = 512;
+	bdev_opts.bdev_io_cache_size = 64;
 
 	rc = spdk_bdev_set_opts(&bdev_opts);
 	CU_ASSERT(rc == 0);
@@ -1592,9 +2284,280 @@ bdev_io_split_with_io_wait(void)
 
 	bdev = allocate_bdev("bdev0");
 
-	rc = spdk_bdev_open(bdev, true, NULL, NULL, &desc);
+	rc = spdk_bdev_open_ext(bdev->name, true, bdev_ut_event_cb, NULL, &desc);
+	CU_ASSERT(rc == 0);
+	SPDK_CU_ASSERT_FATAL(desc != NULL);
+	io_ch = spdk_bdev_get_io_channel(desc);
+	CU_ASSERT(io_ch != NULL);
+
+	/* First case optimal_io_boundary == max_segment_size * max_num_segments */
+	bdev->split_on_optimal_io_boundary = true;
+	bdev->optimal_io_boundary = 16;
+
+	bdev->max_segment_size = 512;
+	bdev->max_num_segments = 16;
+	g_io_done = false;
+
+	/* IO crossing the IO boundary requires split
+	 * Total 2 child IOs.
+	 */
+
+	/* The 1st child IO split the segment_size to multiple segment entry */
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 14, 2, 2);
+	ut_expected_io_set_iov(expected_io, 0, (void *)0xF000, 512);
+	ut_expected_io_set_iov(expected_io, 1, (void *)(0xF000 + 512), 512);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	/* The 2nd child IO split the segment_size to multiple segment entry */
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 16, 2, 2);
+	ut_expected_io_set_iov(expected_io, 0, (void *)(0xF000 + 2 * 512), 512);
+	ut_expected_io_set_iov(expected_io, 1, (void *)(0xF000 + 3 * 512), 512);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	rc = spdk_bdev_read_blocks(desc, io_ch, (void *)0xF000, 14, 4, io_done, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_io_done == false);
+
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 2);
+	stub_complete_io(2);
+	CU_ASSERT(g_io_done == true);
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 0);
+
+	/* Second case optimal_io_boundary > max_segment_size * max_num_segments */
+	bdev->max_segment_size = 15 * 512;
+	bdev->max_num_segments = 1;
+	g_io_done = false;
+
+	/* IO crossing the IO boundary requires split.
+	 * The 1st child IO segment size exceeds the max_segment_size,
+	 * So 1st child IO will be splitted to multiple segment entry.
+	 * Then it split to 2 child IOs because of the max_num_segments.
+	 * Total 3 child IOs.
+	 */
+
+	/* The first 2 IOs are in an IO boundary.
+	 * Because the optimal_io_boundary > max_segment_size * max_num_segments
+	 * So it split to the first 2 IOs.
+	 */
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 0, 15, 1);
+	ut_expected_io_set_iov(expected_io, 0, (void *)0xF000, 512 * 15);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 15, 1, 1);
+	ut_expected_io_set_iov(expected_io, 0, (void *)(0xF000 + 512 * 15), 512);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	/* The 3rd Child IO is because of the io boundary */
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 16, 2, 1);
+	ut_expected_io_set_iov(expected_io, 0, (void *)(0xF000 + 512 * 16), 512 * 2);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	rc = spdk_bdev_read_blocks(desc, io_ch, (void *)0xF000, 0, 18, io_done, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_io_done == false);
+
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 3);
+	stub_complete_io(3);
+	CU_ASSERT(g_io_done == true);
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 0);
+
+	/* Third case optimal_io_boundary < max_segment_size * max_num_segments */
+	bdev->max_segment_size = 17 * 512;
+	bdev->max_num_segments = 1;
+	g_io_done = false;
+
+	/* IO crossing the IO boundary requires split.
+	 * Child IO does not split.
+	 * Total 2 child IOs.
+	 */
+
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 0, 16, 1);
+	ut_expected_io_set_iov(expected_io, 0, (void *)0xF000, 512 * 16);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, 16, 2, 1);
+	ut_expected_io_set_iov(expected_io, 0, (void *)(0xF000 + 512 * 16), 512 * 2);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	rc = spdk_bdev_read_blocks(desc, io_ch, (void *)0xF000, 0, 18, io_done, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_io_done == false);
+
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 2);
+	stub_complete_io(2);
+	CU_ASSERT(g_io_done == true);
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 0);
+
+	/* Now set up a more complex, multi-vector command that needs to be split,
+	 * including splitting iovecs.
+	 * optimal_io_boundary < max_segment_size * max_num_segments
+	 */
+	bdev->max_segment_size = 3 * 512;
+	bdev->max_num_segments = 6;
+	g_io_done = false;
+
+	iov[0].iov_base = (void *)0x10000;
+	iov[0].iov_len = 4 * 512;
+	iov[1].iov_base = (void *)0x20000;
+	iov[1].iov_len = 4 * 512;
+	iov[2].iov_base = (void *)0x30000;
+	iov[2].iov_len = 10 * 512;
+
+	/* IO crossing the IO boundary requires split.
+	 * The 1st child IO segment size exceeds the max_segment_size and after
+	 * splitting segment_size, the num_segments exceeds max_num_segments.
+	 * So 1st child IO will be splitted to 2 child IOs.
+	 * Total 3 child IOs.
+	 */
+
+	/* The first 2 IOs are in an IO boundary.
+	 * After splitting segmemt size the segment num exceeds.
+	 * So it splits to 2 child IOs.
+	 */
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_WRITE, 0, 14, 6);
+	ut_expected_io_set_iov(expected_io, 0, iov[0].iov_base, 512 * 3);
+	ut_expected_io_set_iov(expected_io, 1, iov[0].iov_base + 512 * 3, 512);
+	ut_expected_io_set_iov(expected_io, 2, iov[1].iov_base, 512 * 3);
+	ut_expected_io_set_iov(expected_io, 3, iov[1].iov_base + 512 * 3, 512);
+	ut_expected_io_set_iov(expected_io, 4, iov[2].iov_base, 512 * 3);
+	ut_expected_io_set_iov(expected_io, 5, iov[2].iov_base + 512 * 3, 512 * 3);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	/* The 2nd child IO has the left segment entry */
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_WRITE, 14, 2, 1);
+	ut_expected_io_set_iov(expected_io, 0, iov[2].iov_base + 512 * 6, 512 * 2);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_WRITE, 16, 2, 1);
+	ut_expected_io_set_iov(expected_io, 0, iov[2].iov_base + 512 * 8, 512 * 2);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	rc = spdk_bdev_writev_blocks(desc, io_ch, iov, 3, 0, 18, io_done, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_io_done == false);
+
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 3);
+	stub_complete_io(3);
+	CU_ASSERT(g_io_done == true);
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 0);
+
+	/* A very complicated case. Each sg entry exceeds max_segment_size
+	 * and split on io boundary.
+	 * optimal_io_boundary < max_segment_size * max_num_segments
+	 */
+	bdev->max_segment_size = 3 * 512;
+	bdev->max_num_segments = BDEV_IO_NUM_CHILD_IOV;
+	g_io_done = false;
+
+	for (i = 0; i < 20; i++) {
+		iov[i].iov_base = (void *)((i + 1) * 0x10000);
+		iov[i].iov_len = 512 * 4;
+	}
+
+	/* IO crossing the IO boundary requires split.
+	 * 80 block length can split 5 child IOs base on offset and IO boundary.
+	 * Each iov entry needs to be splitted to 2 entries because of max_segment_size
+	 * Total 5 child IOs.
+	 */
+
+	/* 4 iov entries are in an IO boundary and each iov entry splits to 2.
+	 * So each child IO occupies 8 child iov entries.
+	 */
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_WRITE, 0, 16, 8);
+	for (i = 0; i < 4; i++) {
+		int iovcnt = i * 2;
+		ut_expected_io_set_iov(expected_io, iovcnt, iov[i].iov_base, 512 * 3);
+		ut_expected_io_set_iov(expected_io, iovcnt + 1, iov[i].iov_base + 512 * 3, 512);
+	}
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	/* 2nd child IO and total 16 child iov entries of parent IO */
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_WRITE, 16, 16, 8);
+	for (i = 4; i < 8; i++) {
+		int iovcnt = (i - 4) * 2;
+		ut_expected_io_set_iov(expected_io, iovcnt, iov[i].iov_base, 512 * 3);
+		ut_expected_io_set_iov(expected_io, iovcnt + 1, iov[i].iov_base + 512 * 3, 512);
+	}
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	/* 3rd child IO and total 24 child iov entries of parent IO */
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_WRITE, 32, 16, 8);
+	for (i = 8; i < 12; i++) {
+		int iovcnt = (i - 8) * 2;
+		ut_expected_io_set_iov(expected_io, iovcnt, iov[i].iov_base, 512 * 3);
+		ut_expected_io_set_iov(expected_io, iovcnt + 1, iov[i].iov_base + 512 * 3, 512);
+	}
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	/* 4th child IO and total 32 child iov entries of parent IO */
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_WRITE, 48, 16, 8);
+	for (i = 12; i < 16; i++) {
+		int iovcnt = (i - 12) * 2;
+		ut_expected_io_set_iov(expected_io, iovcnt, iov[i].iov_base, 512 * 3);
+		ut_expected_io_set_iov(expected_io, iovcnt + 1, iov[i].iov_base + 512 * 3, 512);
+	}
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	/* 5th child IO and because of the child iov entry it should be splitted
+	 * in next round.
+	 */
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_WRITE, 64, 16, 8);
+	for (i = 16; i < 20; i++) {
+		int iovcnt = (i - 16) * 2;
+		ut_expected_io_set_iov(expected_io, iovcnt, iov[i].iov_base, 512 * 3);
+		ut_expected_io_set_iov(expected_io, iovcnt + 1, iov[i].iov_base + 512 * 3, 512);
+	}
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	rc = spdk_bdev_writev_blocks(desc, io_ch, iov, 20, 0, 80, io_done, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_io_done == false);
+
+	/* First split round */
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 4);
+	stub_complete_io(4);
+	CU_ASSERT(g_io_done == false);
+
+	/* Second split round */
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 1);
+	stub_complete_io(1);
+	CU_ASSERT(g_io_done == true);
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 0);
+
+	spdk_put_io_channel(io_ch);
+	spdk_bdev_close(desc);
+	free_bdev(bdev);
+	spdk_bdev_finish(bdev_fini_cb, NULL);
+	poll_threads();
+}
+
+static void
+bdev_io_split_with_io_wait(void)
+{
+	struct spdk_bdev *bdev;
+	struct spdk_bdev_desc *desc = NULL;
+	struct spdk_io_channel *io_ch;
+	struct spdk_bdev_channel *channel;
+	struct spdk_bdev_mgmt_channel *mgmt_ch;
+	struct spdk_bdev_opts bdev_opts = {};
+	struct iovec iov[3];
+	struct ut_expected_io *expected_io;
+	int rc;
+
+	spdk_bdev_get_opts(&bdev_opts, sizeof(bdev_opts));
+	bdev_opts.bdev_io_pool_size = 2;
+	bdev_opts.bdev_io_cache_size = 1;
+
+	rc = spdk_bdev_set_opts(&bdev_opts);
+	CU_ASSERT(rc == 0);
+	spdk_bdev_initialize(bdev_init_cb, NULL);
+
+	bdev = allocate_bdev("bdev0");
+
+	rc = spdk_bdev_open_ext("bdev0", true, bdev_ut_event_cb, NULL, &desc);
 	CU_ASSERT(rc == 0);
 	CU_ASSERT(desc != NULL);
+	CU_ASSERT(bdev == spdk_bdev_desc_get_bdev(desc));
 	io_ch = spdk_bdev_get_io_channel(desc);
 	CU_ASSERT(io_ch != NULL);
 	channel = spdk_io_channel_get_ctx(io_ch);
@@ -1711,15 +2674,16 @@ bdev_io_alignment(void)
 	struct spdk_bdev *bdev;
 	struct spdk_bdev_desc *desc = NULL;
 	struct spdk_io_channel *io_ch;
-	struct spdk_bdev_opts bdev_opts = {
-		.bdev_io_pool_size = 20,
-		.bdev_io_cache_size = 2,
-	};
+	struct spdk_bdev_opts bdev_opts = {};
 	int rc;
-	void *buf;
+	void *buf = NULL;
 	struct iovec iovs[2];
 	int iovcnt;
 	uint64_t alignment;
+
+	spdk_bdev_get_opts(&bdev_opts, sizeof(bdev_opts));
+	bdev_opts.bdev_io_pool_size = 20;
+	bdev_opts.bdev_io_cache_size = 2;
 
 	rc = spdk_bdev_set_opts(&bdev_opts);
 	CU_ASSERT(rc == 0);
@@ -1728,9 +2692,10 @@ bdev_io_alignment(void)
 	fn_table.submit_request = stub_submit_request_get_buf;
 	bdev = allocate_bdev("bdev0");
 
-	rc = spdk_bdev_open(bdev, true, NULL, NULL, &desc);
+	rc = spdk_bdev_open_ext("bdev0", true, bdev_ut_event_cb, NULL, &desc);
 	CU_ASSERT(rc == 0);
 	CU_ASSERT(desc != NULL);
+	CU_ASSERT(bdev == spdk_bdev_desc_get_bdev(desc));
 	io_ch = spdk_bdev_get_io_channel(desc);
 	CU_ASSERT(io_ch != NULL);
 
@@ -1917,6 +2882,7 @@ bdev_io_alignment(void)
 	spdk_put_io_channel(io_ch);
 	spdk_bdev_close(desc);
 	free_bdev(bdev);
+	fn_table.submit_request = stub_submit_request;
 	spdk_bdev_finish(bdev_fini_cb, NULL);
 	poll_threads();
 
@@ -1929,16 +2895,18 @@ bdev_io_alignment_with_boundary(void)
 	struct spdk_bdev *bdev;
 	struct spdk_bdev_desc *desc = NULL;
 	struct spdk_io_channel *io_ch;
-	struct spdk_bdev_opts bdev_opts = {
-		.bdev_io_pool_size = 20,
-		.bdev_io_cache_size = 2,
-	};
+	struct spdk_bdev_opts bdev_opts = {};
 	int rc;
-	void *buf;
+	void *buf = NULL;
 	struct iovec iovs[2];
 	int iovcnt;
 	uint64_t alignment;
 
+	spdk_bdev_get_opts(&bdev_opts, sizeof(bdev_opts));
+	bdev_opts.bdev_io_pool_size = 20;
+	bdev_opts.bdev_io_cache_size = 2;
+
+	bdev_opts.opts_size = sizeof(bdev_opts);
 	rc = spdk_bdev_set_opts(&bdev_opts);
 	CU_ASSERT(rc == 0);
 	spdk_bdev_initialize(bdev_init_cb, NULL);
@@ -1946,9 +2914,10 @@ bdev_io_alignment_with_boundary(void)
 	fn_table.submit_request = stub_submit_request_get_buf;
 	bdev = allocate_bdev("bdev0");
 
-	rc = spdk_bdev_open(bdev, true, NULL, NULL, &desc);
+	rc = spdk_bdev_open_ext("bdev0", true, bdev_ut_event_cb, NULL, &desc);
 	CU_ASSERT(rc == 0);
 	CU_ASSERT(desc != NULL);
+	CU_ASSERT(bdev == spdk_bdev_desc_get_bdev(desc));
 	io_ch = spdk_bdev_get_io_channel(desc);
 	CU_ASSERT(io_ch != NULL);
 
@@ -2054,6 +3023,7 @@ bdev_io_alignment_with_boundary(void)
 	spdk_put_io_channel(io_ch);
 	spdk_bdev_close(desc);
 	free_bdev(bdev);
+	fn_table.submit_request = stub_submit_request;
 	spdk_bdev_finish(bdev_fini_cb, NULL);
 	poll_threads();
 
@@ -2094,9 +3064,10 @@ bdev_histograms(void)
 
 	bdev = allocate_bdev("bdev");
 
-	rc = spdk_bdev_open(bdev, true, NULL, NULL, &desc);
+	rc = spdk_bdev_open_ext("bdev", true, bdev_ut_event_cb, NULL, &desc);
 	CU_ASSERT(rc == 0);
 	CU_ASSERT(desc != NULL);
+	CU_ASSERT(bdev == spdk_bdev_desc_get_bdev(desc));
 
 	ch = spdk_bdev_get_io_channel(desc);
 	CU_ASSERT(ch != NULL);
@@ -2169,6 +3140,203 @@ bdev_histograms(void)
 }
 
 static void
+_bdev_compare(bool emulated)
+{
+	struct spdk_bdev *bdev;
+	struct spdk_bdev_desc *desc = NULL;
+	struct spdk_io_channel *ioch;
+	struct ut_expected_io *expected_io;
+	uint64_t offset, num_blocks;
+	uint32_t num_completed;
+	char aa_buf[512];
+	char bb_buf[512];
+	struct iovec compare_iov;
+	uint8_t io_type;
+	int rc;
+
+	if (emulated) {
+		io_type = SPDK_BDEV_IO_TYPE_READ;
+	} else {
+		io_type = SPDK_BDEV_IO_TYPE_COMPARE;
+	}
+
+	memset(aa_buf, 0xaa, sizeof(aa_buf));
+	memset(bb_buf, 0xbb, sizeof(bb_buf));
+
+	g_io_types_supported[SPDK_BDEV_IO_TYPE_COMPARE] = !emulated;
+
+	spdk_bdev_initialize(bdev_init_cb, NULL);
+	fn_table.submit_request = stub_submit_request_get_buf;
+	bdev = allocate_bdev("bdev");
+
+	rc = spdk_bdev_open_ext("bdev", true, bdev_ut_event_cb, NULL, &desc);
+	CU_ASSERT_EQUAL(rc, 0);
+	SPDK_CU_ASSERT_FATAL(desc != NULL);
+	CU_ASSERT(bdev == spdk_bdev_desc_get_bdev(desc));
+	ioch = spdk_bdev_get_io_channel(desc);
+	SPDK_CU_ASSERT_FATAL(ioch != NULL);
+
+	fn_table.submit_request = stub_submit_request_get_buf;
+	g_io_exp_status = SPDK_BDEV_IO_STATUS_SUCCESS;
+
+	offset = 50;
+	num_blocks = 1;
+	compare_iov.iov_base = aa_buf;
+	compare_iov.iov_len = sizeof(aa_buf);
+
+	expected_io = ut_alloc_expected_io(io_type, offset, num_blocks, 0);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	g_io_done = false;
+	g_compare_read_buf = aa_buf;
+	g_compare_read_buf_len = sizeof(aa_buf);
+	rc = spdk_bdev_comparev_blocks(desc, ioch, &compare_iov, 1, offset, num_blocks, io_done, NULL);
+	CU_ASSERT_EQUAL(rc, 0);
+	num_completed = stub_complete_io(1);
+	CU_ASSERT_EQUAL(num_completed, 1);
+	CU_ASSERT(g_io_done == true);
+	CU_ASSERT(g_io_status == SPDK_BDEV_IO_STATUS_SUCCESS);
+
+	expected_io = ut_alloc_expected_io(io_type, offset, num_blocks, 0);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	g_io_done = false;
+	g_compare_read_buf = bb_buf;
+	g_compare_read_buf_len = sizeof(bb_buf);
+	rc = spdk_bdev_comparev_blocks(desc, ioch, &compare_iov, 1, offset, num_blocks, io_done, NULL);
+	CU_ASSERT_EQUAL(rc, 0);
+	num_completed = stub_complete_io(1);
+	CU_ASSERT_EQUAL(num_completed, 1);
+	CU_ASSERT(g_io_done == true);
+	CU_ASSERT(g_io_status == SPDK_BDEV_IO_STATUS_MISCOMPARE);
+
+	spdk_put_io_channel(ioch);
+	spdk_bdev_close(desc);
+	free_bdev(bdev);
+	fn_table.submit_request = stub_submit_request;
+	spdk_bdev_finish(bdev_fini_cb, NULL);
+	poll_threads();
+
+	g_io_types_supported[SPDK_BDEV_IO_TYPE_COMPARE] = true;
+
+	g_compare_read_buf = NULL;
+}
+
+static void
+bdev_compare(void)
+{
+	_bdev_compare(true);
+	_bdev_compare(false);
+}
+
+static void
+bdev_compare_and_write(void)
+{
+	struct spdk_bdev *bdev;
+	struct spdk_bdev_desc *desc = NULL;
+	struct spdk_io_channel *ioch;
+	struct ut_expected_io *expected_io;
+	uint64_t offset, num_blocks;
+	uint32_t num_completed;
+	char aa_buf[512];
+	char bb_buf[512];
+	char cc_buf[512];
+	char write_buf[512];
+	struct iovec compare_iov;
+	struct iovec write_iov;
+	int rc;
+
+	memset(aa_buf, 0xaa, sizeof(aa_buf));
+	memset(bb_buf, 0xbb, sizeof(bb_buf));
+	memset(cc_buf, 0xcc, sizeof(cc_buf));
+
+	g_io_types_supported[SPDK_BDEV_IO_TYPE_COMPARE] = false;
+
+	spdk_bdev_initialize(bdev_init_cb, NULL);
+	fn_table.submit_request = stub_submit_request_get_buf;
+	bdev = allocate_bdev("bdev");
+
+	rc = spdk_bdev_open_ext("bdev", true, bdev_ut_event_cb, NULL, &desc);
+	CU_ASSERT_EQUAL(rc, 0);
+	SPDK_CU_ASSERT_FATAL(desc != NULL);
+	CU_ASSERT(bdev == spdk_bdev_desc_get_bdev(desc));
+	ioch = spdk_bdev_get_io_channel(desc);
+	SPDK_CU_ASSERT_FATAL(ioch != NULL);
+
+	fn_table.submit_request = stub_submit_request_get_buf;
+	g_io_exp_status = SPDK_BDEV_IO_STATUS_SUCCESS;
+
+	offset = 50;
+	num_blocks = 1;
+	compare_iov.iov_base = aa_buf;
+	compare_iov.iov_len = sizeof(aa_buf);
+	write_iov.iov_base = bb_buf;
+	write_iov.iov_len = sizeof(bb_buf);
+
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, offset, num_blocks, 0);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_WRITE, offset, num_blocks, 0);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	g_io_done = false;
+	g_compare_read_buf = aa_buf;
+	g_compare_read_buf_len = sizeof(aa_buf);
+	memset(write_buf, 0, sizeof(write_buf));
+	g_compare_write_buf = write_buf;
+	g_compare_write_buf_len = sizeof(write_buf);
+	rc = spdk_bdev_comparev_and_writev_blocks(desc, ioch, &compare_iov, 1, &write_iov, 1,
+			offset, num_blocks, io_done, NULL);
+	/* Trigger range locking */
+	poll_threads();
+	CU_ASSERT_EQUAL(rc, 0);
+	num_completed = stub_complete_io(1);
+	CU_ASSERT_EQUAL(num_completed, 1);
+	CU_ASSERT(g_io_done == false);
+	num_completed = stub_complete_io(1);
+	/* Trigger range unlocking */
+	poll_threads();
+	CU_ASSERT_EQUAL(num_completed, 1);
+	CU_ASSERT(g_io_done == true);
+	CU_ASSERT(g_io_status == SPDK_BDEV_IO_STATUS_SUCCESS);
+	CU_ASSERT(memcmp(write_buf, bb_buf, sizeof(write_buf)) == 0);
+
+	expected_io = ut_alloc_expected_io(SPDK_BDEV_IO_TYPE_READ, offset, num_blocks, 0);
+	TAILQ_INSERT_TAIL(&g_bdev_ut_channel->expected_io, expected_io, link);
+
+	g_io_done = false;
+	g_compare_read_buf = cc_buf;
+	g_compare_read_buf_len = sizeof(cc_buf);
+	memset(write_buf, 0, sizeof(write_buf));
+	g_compare_write_buf = write_buf;
+	g_compare_write_buf_len = sizeof(write_buf);
+	rc = spdk_bdev_comparev_and_writev_blocks(desc, ioch, &compare_iov, 1, &write_iov, 1,
+			offset, num_blocks, io_done, NULL);
+	/* Trigger range locking */
+	poll_threads();
+	CU_ASSERT_EQUAL(rc, 0);
+	num_completed = stub_complete_io(1);
+	/* Trigger range unlocking earlier because we expect error here */
+	poll_threads();
+	CU_ASSERT_EQUAL(num_completed, 1);
+	CU_ASSERT(g_io_done == true);
+	CU_ASSERT(g_io_status == SPDK_BDEV_IO_STATUS_MISCOMPARE);
+	num_completed = stub_complete_io(1);
+	CU_ASSERT_EQUAL(num_completed, 0);
+
+	spdk_put_io_channel(ioch);
+	spdk_bdev_close(desc);
+	free_bdev(bdev);
+	fn_table.submit_request = stub_submit_request;
+	spdk_bdev_finish(bdev_fini_cb, NULL);
+	poll_threads();
+
+	g_io_types_supported[SPDK_BDEV_IO_TYPE_COMPARE] = true;
+
+	g_compare_read_buf = NULL;
+	g_compare_write_buf = NULL;
+}
+
+static void
 bdev_write_zeroes(void)
 {
 	struct spdk_bdev *bdev;
@@ -2182,9 +3350,10 @@ bdev_write_zeroes(void)
 	spdk_bdev_initialize(bdev_init_cb, NULL);
 	bdev = allocate_bdev("bdev");
 
-	rc = spdk_bdev_open(bdev, true, NULL, NULL, &desc);
+	rc = spdk_bdev_open_ext("bdev", true, bdev_ut_event_cb, NULL, &desc);
 	CU_ASSERT_EQUAL(rc, 0);
 	SPDK_CU_ASSERT_FATAL(desc != NULL);
+	CU_ASSERT(bdev == spdk_bdev_desc_get_bdev(desc));
 	ioch = spdk_bdev_get_io_channel(desc);
 	SPDK_CU_ASSERT_FATAL(ioch != NULL);
 
@@ -2281,13 +3450,14 @@ bdev_open_while_hotremove(void)
 
 	bdev = allocate_bdev("bdev");
 
-	rc = spdk_bdev_open(bdev, false, NULL, NULL, &desc[0]);
+	rc = spdk_bdev_open_ext("bdev", false, bdev_ut_event_cb, NULL, &desc[0]);
 	CU_ASSERT(rc == 0);
 	SPDK_CU_ASSERT_FATAL(desc[0] != NULL);
+	CU_ASSERT(bdev == spdk_bdev_desc_get_bdev(desc[0]));
 
 	spdk_bdev_unregister(bdev, NULL, NULL);
 
-	rc = spdk_bdev_open(bdev, false, NULL, NULL, &desc[1]);
+	rc = spdk_bdev_open_ext("bdev", false, bdev_ut_event_cb, NULL, &desc[1]);
 	CU_ASSERT(rc == -ENODEV);
 	SPDK_CU_ASSERT_FATAL(desc[1] == NULL);
 
@@ -2306,6 +3476,8 @@ bdev_close_while_hotremove(void)
 
 	rc = spdk_bdev_open_ext("bdev", true, bdev_open_cb1, &desc, &desc);
 	CU_ASSERT_EQUAL(rc, 0);
+	SPDK_CU_ASSERT_FATAL(desc != NULL);
+	CU_ASSERT(bdev == spdk_bdev_desc_get_bdev(desc));
 
 	/* Simulate hot-unplug by unregistering bdev */
 	g_event_type1 = 0xFF;
@@ -2409,8 +3581,10 @@ bdev_set_io_timeout(void)
 
 	bdev = allocate_bdev("bdev");
 
-	CU_ASSERT(spdk_bdev_open(bdev, true, NULL, NULL, &desc) == 0);
+	CU_ASSERT(spdk_bdev_open_ext("bdev", true, bdev_ut_event_cb, NULL, &desc) == 0);
 	SPDK_CU_ASSERT_FATAL(desc != NULL);
+	CU_ASSERT(bdev == spdk_bdev_desc_get_bdev(desc));
+
 	io_ch = spdk_bdev_get_io_channel(desc);
 	CU_ASSERT(io_ch != NULL);
 
@@ -2442,13 +3616,10 @@ bdev_set_io_timeout(void)
 	 * Set up the expected values before calling spdk_bdev_read_blocks
 	 */
 	CU_ASSERT(spdk_bdev_read_blocks(desc, io_ch, (void *)0xF000, 14, 8, io_done, NULL) == 0);
-	/* We only count the submitted IO by the user
-	 * Even the IO split into two IOs but we only count one.
-	 * Becauce the user only see one IO.
-	 */
-	CU_ASSERT(bdev_channel_count_submitted_io(bdev_ch) == 1);
+	/* We count all submitted IOs including IO that are generated by splitting. */
+	CU_ASSERT(bdev_channel_count_submitted_io(bdev_ch) == 3);
 	stub_complete_io(1);
-	CU_ASSERT(bdev_channel_count_submitted_io(bdev_ch) == 1);
+	CU_ASSERT(bdev_channel_count_submitted_io(bdev_ch) == 2);
 	stub_complete_io(1);
 	CU_ASSERT(bdev_channel_count_submitted_io(bdev_ch) == 0);
 
@@ -2541,47 +3712,634 @@ bdev_set_io_timeout(void)
 	poll_threads();
 }
 
+static void
+lba_range_overlap(void)
+{
+	struct lba_range r1, r2;
+
+	r1.offset = 100;
+	r1.length = 50;
+
+	r2.offset = 0;
+	r2.length = 1;
+	CU_ASSERT(!bdev_lba_range_overlapped(&r1, &r2));
+
+	r2.offset = 0;
+	r2.length = 100;
+	CU_ASSERT(!bdev_lba_range_overlapped(&r1, &r2));
+
+	r2.offset = 0;
+	r2.length = 110;
+	CU_ASSERT(bdev_lba_range_overlapped(&r1, &r2));
+
+	r2.offset = 100;
+	r2.length = 10;
+	CU_ASSERT(bdev_lba_range_overlapped(&r1, &r2));
+
+	r2.offset = 110;
+	r2.length = 20;
+	CU_ASSERT(bdev_lba_range_overlapped(&r1, &r2));
+
+	r2.offset = 140;
+	r2.length = 150;
+	CU_ASSERT(bdev_lba_range_overlapped(&r1, &r2));
+
+	r2.offset = 130;
+	r2.length = 200;
+	CU_ASSERT(bdev_lba_range_overlapped(&r1, &r2));
+
+	r2.offset = 150;
+	r2.length = 100;
+	CU_ASSERT(!bdev_lba_range_overlapped(&r1, &r2));
+
+	r2.offset = 110;
+	r2.length = 0;
+	CU_ASSERT(!bdev_lba_range_overlapped(&r1, &r2));
+}
+
+static bool g_lock_lba_range_done;
+static bool g_unlock_lba_range_done;
+
+static void
+lock_lba_range_done(void *ctx, int status)
+{
+	g_lock_lba_range_done = true;
+}
+
+static void
+unlock_lba_range_done(void *ctx, int status)
+{
+	g_unlock_lba_range_done = true;
+}
+
+static void
+lock_lba_range_check_ranges(void)
+{
+	struct spdk_bdev *bdev;
+	struct spdk_bdev_desc *desc = NULL;
+	struct spdk_io_channel *io_ch;
+	struct spdk_bdev_channel *channel;
+	struct lba_range *range;
+	int ctx1;
+	int rc;
+
+	spdk_bdev_initialize(bdev_init_cb, NULL);
+
+	bdev = allocate_bdev("bdev0");
+
+	rc = spdk_bdev_open_ext("bdev0", true, bdev_ut_event_cb, NULL, &desc);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(desc != NULL);
+	CU_ASSERT(bdev == spdk_bdev_desc_get_bdev(desc));
+	io_ch = spdk_bdev_get_io_channel(desc);
+	CU_ASSERT(io_ch != NULL);
+	channel = spdk_io_channel_get_ctx(io_ch);
+
+	g_lock_lba_range_done = false;
+	rc = bdev_lock_lba_range(desc, io_ch, 20, 10, lock_lba_range_done, &ctx1);
+	CU_ASSERT(rc == 0);
+	poll_threads();
+
+	CU_ASSERT(g_lock_lba_range_done == true);
+	range = TAILQ_FIRST(&channel->locked_ranges);
+	SPDK_CU_ASSERT_FATAL(range != NULL);
+	CU_ASSERT(range->offset == 20);
+	CU_ASSERT(range->length == 10);
+	CU_ASSERT(range->owner_ch == channel);
+
+	/* Unlocks must exactly match a lock. */
+	g_unlock_lba_range_done = false;
+	rc = bdev_unlock_lba_range(desc, io_ch, 20, 1, unlock_lba_range_done, &ctx1);
+	CU_ASSERT(rc == -EINVAL);
+	CU_ASSERT(g_unlock_lba_range_done == false);
+
+	rc = bdev_unlock_lba_range(desc, io_ch, 20, 10, unlock_lba_range_done, &ctx1);
+	CU_ASSERT(rc == 0);
+	spdk_delay_us(100);
+	poll_threads();
+
+	CU_ASSERT(g_unlock_lba_range_done == true);
+	CU_ASSERT(TAILQ_EMPTY(&channel->locked_ranges));
+
+	spdk_put_io_channel(io_ch);
+	spdk_bdev_close(desc);
+	free_bdev(bdev);
+	spdk_bdev_finish(bdev_fini_cb, NULL);
+	poll_threads();
+}
+
+static void
+lock_lba_range_with_io_outstanding(void)
+{
+	struct spdk_bdev *bdev;
+	struct spdk_bdev_desc *desc = NULL;
+	struct spdk_io_channel *io_ch;
+	struct spdk_bdev_channel *channel;
+	struct lba_range *range;
+	char buf[4096];
+	int ctx1;
+	int rc;
+
+	spdk_bdev_initialize(bdev_init_cb, NULL);
+
+	bdev = allocate_bdev("bdev0");
+
+	rc = spdk_bdev_open_ext("bdev0", true, bdev_ut_event_cb, NULL, &desc);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(desc != NULL);
+	CU_ASSERT(bdev == spdk_bdev_desc_get_bdev(desc));
+	io_ch = spdk_bdev_get_io_channel(desc);
+	CU_ASSERT(io_ch != NULL);
+	channel = spdk_io_channel_get_ctx(io_ch);
+
+	g_io_done = false;
+	rc = spdk_bdev_read_blocks(desc, io_ch, buf, 20, 1, io_done, &ctx1);
+	CU_ASSERT(rc == 0);
+
+	g_lock_lba_range_done = false;
+	rc = bdev_lock_lba_range(desc, io_ch, 20, 10, lock_lba_range_done, &ctx1);
+	CU_ASSERT(rc == 0);
+	poll_threads();
+
+	/* The lock should immediately become valid, since there are no outstanding
+	 * write I/O.
+	 */
+	CU_ASSERT(g_io_done == false);
+	CU_ASSERT(g_lock_lba_range_done == true);
+	range = TAILQ_FIRST(&channel->locked_ranges);
+	SPDK_CU_ASSERT_FATAL(range != NULL);
+	CU_ASSERT(range->offset == 20);
+	CU_ASSERT(range->length == 10);
+	CU_ASSERT(range->owner_ch == channel);
+	CU_ASSERT(range->locked_ctx == &ctx1);
+
+	rc = bdev_unlock_lba_range(desc, io_ch, 20, 10, lock_lba_range_done, &ctx1);
+	CU_ASSERT(rc == 0);
+	stub_complete_io(1);
+	spdk_delay_us(100);
+	poll_threads();
+
+	CU_ASSERT(TAILQ_EMPTY(&channel->locked_ranges));
+
+	/* Now try again, but with a write I/O. */
+	g_io_done = false;
+	rc = spdk_bdev_write_blocks(desc, io_ch, buf, 20, 1, io_done, &ctx1);
+	CU_ASSERT(rc == 0);
+
+	g_lock_lba_range_done = false;
+	rc = bdev_lock_lba_range(desc, io_ch, 20, 10, lock_lba_range_done, &ctx1);
+	CU_ASSERT(rc == 0);
+	poll_threads();
+
+	/* The lock should not be fully valid yet, since a write I/O is outstanding.
+	 * But note that the range should be on the channel's locked_list, to make sure no
+	 * new write I/O are started.
+	 */
+	CU_ASSERT(g_io_done == false);
+	CU_ASSERT(g_lock_lba_range_done == false);
+	range = TAILQ_FIRST(&channel->locked_ranges);
+	SPDK_CU_ASSERT_FATAL(range != NULL);
+	CU_ASSERT(range->offset == 20);
+	CU_ASSERT(range->length == 10);
+
+	/* Complete the write I/O.  This should make the lock valid (checked by confirming
+	 * our callback was invoked).
+	 */
+	stub_complete_io(1);
+	spdk_delay_us(100);
+	poll_threads();
+	CU_ASSERT(g_io_done == true);
+	CU_ASSERT(g_lock_lba_range_done == true);
+
+	rc = bdev_unlock_lba_range(desc, io_ch, 20, 10, unlock_lba_range_done, &ctx1);
+	CU_ASSERT(rc == 0);
+	poll_threads();
+
+	CU_ASSERT(TAILQ_EMPTY(&channel->locked_ranges));
+
+	spdk_put_io_channel(io_ch);
+	spdk_bdev_close(desc);
+	free_bdev(bdev);
+	spdk_bdev_finish(bdev_fini_cb, NULL);
+	poll_threads();
+}
+
+static void
+lock_lba_range_overlapped(void)
+{
+	struct spdk_bdev *bdev;
+	struct spdk_bdev_desc *desc = NULL;
+	struct spdk_io_channel *io_ch;
+	struct spdk_bdev_channel *channel;
+	struct lba_range *range;
+	int ctx1;
+	int rc;
+
+	spdk_bdev_initialize(bdev_init_cb, NULL);
+
+	bdev = allocate_bdev("bdev0");
+
+	rc = spdk_bdev_open_ext("bdev0", true, bdev_ut_event_cb, NULL, &desc);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(desc != NULL);
+	CU_ASSERT(bdev == spdk_bdev_desc_get_bdev(desc));
+	io_ch = spdk_bdev_get_io_channel(desc);
+	CU_ASSERT(io_ch != NULL);
+	channel = spdk_io_channel_get_ctx(io_ch);
+
+	/* Lock range 20-29. */
+	g_lock_lba_range_done = false;
+	rc = bdev_lock_lba_range(desc, io_ch, 20, 10, lock_lba_range_done, &ctx1);
+	CU_ASSERT(rc == 0);
+	poll_threads();
+
+	CU_ASSERT(g_lock_lba_range_done == true);
+	range = TAILQ_FIRST(&channel->locked_ranges);
+	SPDK_CU_ASSERT_FATAL(range != NULL);
+	CU_ASSERT(range->offset == 20);
+	CU_ASSERT(range->length == 10);
+
+	/* Try to lock range 25-39.  It should not lock immediately, since it overlaps with
+	 * 20-29.
+	 */
+	g_lock_lba_range_done = false;
+	rc = bdev_lock_lba_range(desc, io_ch, 25, 15, lock_lba_range_done, &ctx1);
+	CU_ASSERT(rc == 0);
+	poll_threads();
+
+	CU_ASSERT(g_lock_lba_range_done == false);
+	range = TAILQ_FIRST(&bdev->internal.pending_locked_ranges);
+	SPDK_CU_ASSERT_FATAL(range != NULL);
+	CU_ASSERT(range->offset == 25);
+	CU_ASSERT(range->length == 15);
+
+	/* Unlock 20-29.  This should result in range 25-39 now getting locked since it
+	 * no longer overlaps with an active lock.
+	 */
+	g_unlock_lba_range_done = false;
+	rc = bdev_unlock_lba_range(desc, io_ch, 20, 10, unlock_lba_range_done, &ctx1);
+	CU_ASSERT(rc == 0);
+	poll_threads();
+
+	CU_ASSERT(g_unlock_lba_range_done == true);
+	CU_ASSERT(TAILQ_EMPTY(&bdev->internal.pending_locked_ranges));
+	range = TAILQ_FIRST(&channel->locked_ranges);
+	SPDK_CU_ASSERT_FATAL(range != NULL);
+	CU_ASSERT(range->offset == 25);
+	CU_ASSERT(range->length == 15);
+
+	/* Lock 40-59.  This should immediately lock since it does not overlap with the
+	 * currently active 25-39 lock.
+	 */
+	g_lock_lba_range_done = false;
+	rc = bdev_lock_lba_range(desc, io_ch, 40, 20, lock_lba_range_done, &ctx1);
+	CU_ASSERT(rc == 0);
+	poll_threads();
+
+	CU_ASSERT(g_lock_lba_range_done == true);
+	range = TAILQ_FIRST(&bdev->internal.locked_ranges);
+	SPDK_CU_ASSERT_FATAL(range != NULL);
+	range = TAILQ_NEXT(range, tailq);
+	SPDK_CU_ASSERT_FATAL(range != NULL);
+	CU_ASSERT(range->offset == 40);
+	CU_ASSERT(range->length == 20);
+
+	/* Try to lock 35-44.  Note that this overlaps with both 25-39 and 40-59. */
+	g_lock_lba_range_done = false;
+	rc = bdev_lock_lba_range(desc, io_ch, 35, 10, lock_lba_range_done, &ctx1);
+	CU_ASSERT(rc == 0);
+	poll_threads();
+
+	CU_ASSERT(g_lock_lba_range_done == false);
+	range = TAILQ_FIRST(&bdev->internal.pending_locked_ranges);
+	SPDK_CU_ASSERT_FATAL(range != NULL);
+	CU_ASSERT(range->offset == 35);
+	CU_ASSERT(range->length == 10);
+
+	/* Unlock 25-39.  Make sure that 35-44 is still in the pending list, since
+	 * the 40-59 lock is still active.
+	 */
+	g_unlock_lba_range_done = false;
+	rc = bdev_unlock_lba_range(desc, io_ch, 25, 15, unlock_lba_range_done, &ctx1);
+	CU_ASSERT(rc == 0);
+	poll_threads();
+
+	CU_ASSERT(g_unlock_lba_range_done == true);
+	CU_ASSERT(g_lock_lba_range_done == false);
+	range = TAILQ_FIRST(&bdev->internal.pending_locked_ranges);
+	SPDK_CU_ASSERT_FATAL(range != NULL);
+	CU_ASSERT(range->offset == 35);
+	CU_ASSERT(range->length == 10);
+
+	/* Unlock 40-59.  This should result in 35-44 now getting locked, since there are
+	 * no longer any active overlapping locks.
+	 */
+	g_unlock_lba_range_done = false;
+	rc = bdev_unlock_lba_range(desc, io_ch, 40, 20, unlock_lba_range_done, &ctx1);
+	CU_ASSERT(rc == 0);
+	poll_threads();
+
+	CU_ASSERT(g_unlock_lba_range_done == true);
+	CU_ASSERT(g_lock_lba_range_done == true);
+	CU_ASSERT(TAILQ_EMPTY(&bdev->internal.pending_locked_ranges));
+	range = TAILQ_FIRST(&bdev->internal.locked_ranges);
+	SPDK_CU_ASSERT_FATAL(range != NULL);
+	CU_ASSERT(range->offset == 35);
+	CU_ASSERT(range->length == 10);
+
+	/* Finally, unlock 35-44. */
+	g_unlock_lba_range_done = false;
+	rc = bdev_unlock_lba_range(desc, io_ch, 35, 10, unlock_lba_range_done, &ctx1);
+	CU_ASSERT(rc == 0);
+	poll_threads();
+
+	CU_ASSERT(g_unlock_lba_range_done == true);
+	CU_ASSERT(TAILQ_EMPTY(&bdev->internal.locked_ranges));
+
+	spdk_put_io_channel(io_ch);
+	spdk_bdev_close(desc);
+	free_bdev(bdev);
+	spdk_bdev_finish(bdev_fini_cb, NULL);
+	poll_threads();
+}
+
+static void
+abort_done(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
+{
+	g_abort_done = true;
+	g_abort_status = bdev_io->internal.status;
+	spdk_bdev_free_io(bdev_io);
+}
+
+static void
+bdev_io_abort(void)
+{
+	struct spdk_bdev *bdev;
+	struct spdk_bdev_desc *desc = NULL;
+	struct spdk_io_channel *io_ch;
+	struct spdk_bdev_channel *channel;
+	struct spdk_bdev_mgmt_channel *mgmt_ch;
+	struct spdk_bdev_opts bdev_opts = {};
+	struct iovec iov[BDEV_IO_NUM_CHILD_IOV * 2];
+	uint64_t io_ctx1 = 0, io_ctx2 = 0, i;
+	int rc;
+
+	spdk_bdev_get_opts(&bdev_opts, sizeof(bdev_opts));
+	bdev_opts.bdev_io_pool_size = 7;
+	bdev_opts.bdev_io_cache_size = 2;
+
+	rc = spdk_bdev_set_opts(&bdev_opts);
+	CU_ASSERT(rc == 0);
+	spdk_bdev_initialize(bdev_init_cb, NULL);
+
+	bdev = allocate_bdev("bdev0");
+
+	rc = spdk_bdev_open_ext("bdev0", true, bdev_ut_event_cb, NULL, &desc);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(desc != NULL);
+	CU_ASSERT(bdev == spdk_bdev_desc_get_bdev(desc));
+	io_ch = spdk_bdev_get_io_channel(desc);
+	CU_ASSERT(io_ch != NULL);
+	channel = spdk_io_channel_get_ctx(io_ch);
+	mgmt_ch = channel->shared_resource->mgmt_ch;
+
+	g_abort_done = false;
+
+	ut_enable_io_type(SPDK_BDEV_IO_TYPE_ABORT, false);
+
+	rc = spdk_bdev_abort(desc, io_ch, &io_ctx1, abort_done, NULL);
+	CU_ASSERT(rc == -ENOTSUP);
+
+	ut_enable_io_type(SPDK_BDEV_IO_TYPE_ABORT, true);
+
+	rc = spdk_bdev_abort(desc, io_ch, &io_ctx2, abort_done, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_abort_done == true);
+	CU_ASSERT(g_abort_status == SPDK_BDEV_IO_STATUS_FAILED);
+
+	/* Test the case that the target I/O was successfully aborted. */
+	g_io_done = false;
+
+	rc = spdk_bdev_read_blocks(desc, io_ch, NULL, 0, 1, io_done, &io_ctx1);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_io_done == false);
+
+	g_abort_done = false;
+	g_io_exp_status = SPDK_BDEV_IO_STATUS_SUCCESS;
+
+	rc = spdk_bdev_abort(desc, io_ch, &io_ctx1, abort_done, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_io_done == true);
+	CU_ASSERT(g_io_status == SPDK_BDEV_IO_STATUS_FAILED);
+	stub_complete_io(1);
+	CU_ASSERT(g_abort_done == true);
+	CU_ASSERT(g_abort_status == SPDK_BDEV_IO_STATUS_SUCCESS);
+
+	/* Test the case that the target I/O was not aborted because it completed
+	 * in the middle of execution of the abort.
+	 */
+	g_io_done = false;
+
+	rc = spdk_bdev_read_blocks(desc, io_ch, NULL, 0, 1, io_done, &io_ctx1);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_io_done == false);
+
+	g_abort_done = false;
+	g_io_exp_status = SPDK_BDEV_IO_STATUS_FAILED;
+
+	rc = spdk_bdev_abort(desc, io_ch, &io_ctx1, abort_done, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_io_done == false);
+
+	g_io_exp_status = SPDK_BDEV_IO_STATUS_SUCCESS;
+	stub_complete_io(1);
+	CU_ASSERT(g_io_done == true);
+	CU_ASSERT(g_io_status == SPDK_BDEV_IO_STATUS_SUCCESS);
+
+	g_io_exp_status = SPDK_BDEV_IO_STATUS_FAILED;
+	stub_complete_io(1);
+	CU_ASSERT(g_abort_done == true);
+	CU_ASSERT(g_abort_status == SPDK_BDEV_IO_STATUS_SUCCESS);
+
+	g_io_exp_status = SPDK_BDEV_IO_STATUS_SUCCESS;
+
+	bdev->optimal_io_boundary = 16;
+	bdev->split_on_optimal_io_boundary = true;
+
+	/* Test that a single-vector command which is split is aborted correctly.
+	 * Offset 14, length 8, payload 0xF000
+	 *  Child - Offset 14, length 2, payload 0xF000
+	 *  Child - Offset 16, length 6, payload 0xF000 + 2 * 512
+	 */
+	g_io_done = false;
+
+	rc = spdk_bdev_read_blocks(desc, io_ch, (void *)0xF000, 14, 8, io_done, &io_ctx1);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_io_done == false);
+
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 2);
+
+	g_io_exp_status = SPDK_BDEV_IO_STATUS_SUCCESS;
+
+	rc = spdk_bdev_abort(desc, io_ch, &io_ctx1, abort_done, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_io_done == true);
+	CU_ASSERT(g_io_status == SPDK_BDEV_IO_STATUS_FAILED);
+	stub_complete_io(2);
+	CU_ASSERT(g_abort_done == true);
+	CU_ASSERT(g_abort_status == SPDK_BDEV_IO_STATUS_SUCCESS);
+
+	/* Test that a multi-vector command that needs to be split by strip and then
+	 * needs to be split is aborted correctly. Abort is requested before the second
+	 * child I/O was submitted. The parent I/O should complete with failure without
+	 * submitting the second child I/O.
+	 */
+	for (i = 0; i < BDEV_IO_NUM_CHILD_IOV * 2; i++) {
+		iov[i].iov_base = (void *)((i + 1) * 0x10000);
+		iov[i].iov_len = 512;
+	}
+
+	bdev->optimal_io_boundary = BDEV_IO_NUM_CHILD_IOV;
+	g_io_done = false;
+	rc = spdk_bdev_readv_blocks(desc, io_ch, iov, BDEV_IO_NUM_CHILD_IOV * 2, 0,
+				    BDEV_IO_NUM_CHILD_IOV * 2, io_done, &io_ctx1);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_io_done == false);
+
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 1);
+
+	g_io_exp_status = SPDK_BDEV_IO_STATUS_SUCCESS;
+
+	rc = spdk_bdev_abort(desc, io_ch, &io_ctx1, abort_done, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_io_done == true);
+	CU_ASSERT(g_io_status == SPDK_BDEV_IO_STATUS_FAILED);
+	stub_complete_io(1);
+	CU_ASSERT(g_abort_done == true);
+	CU_ASSERT(g_abort_status == SPDK_BDEV_IO_STATUS_SUCCESS);
+
+	g_io_exp_status = SPDK_BDEV_IO_STATUS_SUCCESS;
+
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 0);
+
+	bdev->optimal_io_boundary = 16;
+	g_io_done = false;
+
+	/* Test that a ingle-vector command which is split is aborted correctly.
+	 * Differently from the above, the child abort request will be submitted
+	 * sequentially due to the capacity of spdk_bdev_io.
+	 */
+	rc = spdk_bdev_read_blocks(desc, io_ch, (void *)0xF000, 14, 50, io_done, &io_ctx1);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_io_done == false);
+
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 4);
+
+	g_abort_done = false;
+	g_io_exp_status = SPDK_BDEV_IO_STATUS_SUCCESS;
+
+	rc = spdk_bdev_abort(desc, io_ch, &io_ctx1, abort_done, NULL);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(!TAILQ_EMPTY(&mgmt_ch->io_wait_queue));
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 4);
+
+	stub_complete_io(1);
+	CU_ASSERT(g_io_done == true);
+	CU_ASSERT(g_io_status == SPDK_BDEV_IO_STATUS_FAILED);
+	stub_complete_io(3);
+	CU_ASSERT(g_abort_done == true);
+	CU_ASSERT(g_abort_status == SPDK_BDEV_IO_STATUS_SUCCESS);
+
+	g_io_exp_status = SPDK_BDEV_IO_STATUS_SUCCESS;
+
+	CU_ASSERT(g_bdev_ut_channel->outstanding_io_count == 0);
+
+	spdk_put_io_channel(io_ch);
+	spdk_bdev_close(desc);
+	free_bdev(bdev);
+	spdk_bdev_finish(bdev_fini_cb, NULL);
+	poll_threads();
+}
+
+static void
+bdev_set_options_test(void)
+{
+	struct spdk_bdev_opts bdev_opts = {};
+	int rc;
+
+	/* Case1: Do not set opts_size */
+	rc = spdk_bdev_set_opts(&bdev_opts);
+	CU_ASSERT(rc == -1);
+
+	spdk_bdev_get_opts(&bdev_opts, sizeof(bdev_opts));
+	bdev_opts.bdev_io_pool_size = 4;
+	bdev_opts.bdev_io_cache_size = 2;
+	bdev_opts.small_buf_pool_size = 4;
+
+	/* Case 2: Do not set valid small_buf_pool_size and large_buf_pool_size */
+	rc = spdk_bdev_set_opts(&bdev_opts);
+	CU_ASSERT(rc == -1);
+
+	/* Case 3: Do not set valid large_buf_pool_size */
+	bdev_opts.small_buf_pool_size = BUF_SMALL_POOL_SIZE;
+	bdev_opts.large_buf_pool_size = BUF_LARGE_POOL_SIZE - 1;
+	rc = spdk_bdev_set_opts(&bdev_opts);
+	CU_ASSERT(rc == -1);
+
+	/* Case4: set valid large buf_pool_size */
+	bdev_opts.large_buf_pool_size = BUF_LARGE_POOL_SIZE;
+	rc = spdk_bdev_set_opts(&bdev_opts);
+	CU_ASSERT(rc == 0);
+
+	/* Case5: Set different valid value for small and large buf pool */
+	bdev_opts.large_buf_pool_size = BUF_SMALL_POOL_SIZE + 3;
+	bdev_opts.large_buf_pool_size = BUF_LARGE_POOL_SIZE + 3;
+	rc = spdk_bdev_set_opts(&bdev_opts);
+	CU_ASSERT(rc == 0);
+}
+
 int
 main(int argc, char **argv)
 {
 	CU_pSuite		suite = NULL;
 	unsigned int		num_failures;
 
-	if (CU_initialize_registry() != CUE_SUCCESS) {
-		return CU_get_error();
-	}
+	CU_set_error_action(CUEA_ABORT);
+	CU_initialize_registry();
 
 	suite = CU_add_suite("bdev", null_init, null_clean);
-	if (suite == NULL) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
 
-	if (
-		CU_add_test(suite, "bytes_to_blocks_test", bytes_to_blocks_test) == NULL ||
-		CU_add_test(suite, "num_blocks_test", num_blocks_test) == NULL ||
-		CU_add_test(suite, "io_valid", io_valid_test) == NULL ||
-		CU_add_test(suite, "open_write", open_write_test) == NULL ||
-		CU_add_test(suite, "alias_add_del", alias_add_del_test) == NULL ||
-		CU_add_test(suite, "get_device_stat", get_device_stat_test) == NULL ||
-		CU_add_test(suite, "bdev_io_types", bdev_io_types_test) == NULL ||
-		CU_add_test(suite, "bdev_io_wait", bdev_io_wait_test) == NULL ||
-		CU_add_test(suite, "bdev_io_spans_boundary", bdev_io_spans_boundary_test) == NULL ||
-		CU_add_test(suite, "bdev_io_split", bdev_io_split_test) == NULL ||
-		CU_add_test(suite, "bdev_io_split_with_io_wait", bdev_io_split_with_io_wait) == NULL ||
-		CU_add_test(suite, "bdev_io_alignment_with_boundary", bdev_io_alignment_with_boundary) == NULL ||
-		CU_add_test(suite, "bdev_io_alignment", bdev_io_alignment) == NULL ||
-		CU_add_test(suite, "bdev_histograms", bdev_histograms) == NULL ||
-		CU_add_test(suite, "bdev_write_zeroes", bdev_write_zeroes) == NULL ||
-		CU_add_test(suite, "bdev_open_while_hotremove", bdev_open_while_hotremove) == NULL ||
-		CU_add_test(suite, "bdev_close_while_hotremove", bdev_close_while_hotremove) == NULL ||
-		CU_add_test(suite, "bdev_open_ext", bdev_open_ext) == NULL ||
-		CU_add_test(suite, "bdev_set_io_timeout", bdev_set_io_timeout) == NULL
-	) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
+	CU_ADD_TEST(suite, bytes_to_blocks_test);
+	CU_ADD_TEST(suite, num_blocks_test);
+	CU_ADD_TEST(suite, io_valid_test);
+	CU_ADD_TEST(suite, open_write_test);
+	CU_ADD_TEST(suite, alias_add_del_test);
+	CU_ADD_TEST(suite, get_device_stat_test);
+	CU_ADD_TEST(suite, bdev_io_types_test);
+	CU_ADD_TEST(suite, bdev_io_wait_test);
+	CU_ADD_TEST(suite, bdev_io_spans_split_test);
+	CU_ADD_TEST(suite, bdev_io_boundary_split_test);
+	CU_ADD_TEST(suite, bdev_io_max_size_and_segment_split_test);
+	CU_ADD_TEST(suite, bdev_io_mix_split_test);
+	CU_ADD_TEST(suite, bdev_io_split_with_io_wait);
+	CU_ADD_TEST(suite, bdev_io_alignment_with_boundary);
+	CU_ADD_TEST(suite, bdev_io_alignment);
+	CU_ADD_TEST(suite, bdev_histograms);
+	CU_ADD_TEST(suite, bdev_write_zeroes);
+	CU_ADD_TEST(suite, bdev_compare_and_write);
+	CU_ADD_TEST(suite, bdev_compare);
+	CU_ADD_TEST(suite, bdev_open_while_hotremove);
+	CU_ADD_TEST(suite, bdev_close_while_hotremove);
+	CU_ADD_TEST(suite, bdev_open_ext);
+	CU_ADD_TEST(suite, bdev_set_io_timeout);
+	CU_ADD_TEST(suite, lba_range_overlap);
+	CU_ADD_TEST(suite, lock_lba_range_check_ranges);
+	CU_ADD_TEST(suite, lock_lba_range_with_io_outstanding);
+	CU_ADD_TEST(suite, lock_lba_range_overlapped);
+	CU_ADD_TEST(suite, bdev_io_abort);
+	CU_ADD_TEST(suite, bdev_set_options_test);
 
+	allocate_cores(1);
 	allocate_threads(1);
 	set_thread(0);
 
@@ -2591,6 +4349,7 @@ main(int argc, char **argv)
 	CU_cleanup_registry();
 
 	free_threads();
+	free_cores();
 
 	return num_failures;
 }

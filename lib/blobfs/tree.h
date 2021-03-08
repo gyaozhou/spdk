@@ -43,16 +43,14 @@ struct cache_buffer {
 	bool			in_progress;
 };
 
-extern uint32_t g_fs_cache_buffer_shift;
-
-#define CACHE_BUFFER_SHIFT_DEFAULT 18
-#define CACHE_BUFFER_SIZE (1U << g_fs_cache_buffer_shift)
+#define CACHE_BUFFER_SHIFT (18)
+#define CACHE_BUFFER_SIZE (1U << CACHE_BUFFER_SHIFT)
 #define NEXT_CACHE_BUFFER_OFFSET(offset)	\
-	(((offset + CACHE_BUFFER_SIZE) >> g_fs_cache_buffer_shift) << g_fs_cache_buffer_shift)
+	(((offset + CACHE_BUFFER_SIZE) >> CACHE_BUFFER_SHIFT) << CACHE_BUFFER_SHIFT)
 
 #define CACHE_TREE_SHIFT 6
 #define CACHE_TREE_WIDTH (1U << CACHE_TREE_SHIFT)
-#define CACHE_TREE_LEVEL_SHIFT(level)	(g_fs_cache_buffer_shift + (level) * CACHE_TREE_SHIFT)
+#define CACHE_TREE_LEVEL_SHIFT(level)	(CACHE_BUFFER_SHIFT + (level) * CACHE_TREE_SHIFT)
 #define CACHE_TREE_LEVEL_SIZE(level)	(1ULL << CACHE_TREE_LEVEL_SHIFT(level))
 #define CACHE_TREE_LEVEL_MASK(level)	(CACHE_TREE_LEVEL_SIZE(level) - 1)
 #define CACHE_TREE_INDEX(level, offset)	((offset >> CACHE_TREE_LEVEL_SHIFT(level)) & (CACHE_TREE_WIDTH - 1))
@@ -66,12 +64,12 @@ struct cache_tree {
 	} u;
 };
 
-void spdk_cache_buffer_free(struct cache_buffer *cache_buffer);
+void cache_buffer_free(struct cache_buffer *cache_buffer);
 
-struct cache_tree *spdk_tree_insert_buffer(struct cache_tree *root, struct cache_buffer *buffer);
-void spdk_tree_free_buffers(struct cache_tree *tree);
-struct cache_buffer *spdk_tree_find_buffer(struct cache_tree *tree, uint64_t offset);
-struct cache_buffer *spdk_tree_find_filled_buffer(struct cache_tree *tree, uint64_t offset);
-void spdk_tree_remove_buffer(struct cache_tree *tree, struct cache_buffer *buffer);
+struct cache_tree *tree_insert_buffer(struct cache_tree *root, struct cache_buffer *buffer);
+void tree_free_buffers(struct cache_tree *tree);
+struct cache_buffer *tree_find_buffer(struct cache_tree *tree, uint64_t offset);
+struct cache_buffer *tree_find_filled_buffer(struct cache_tree *tree, uint64_t offset);
+void tree_remove_buffer(struct cache_tree *tree, struct cache_buffer *buffer);
 
 #endif /* SPDK_TREE_H_ */

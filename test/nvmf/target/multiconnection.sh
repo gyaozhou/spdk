@@ -13,7 +13,7 @@ NVMF_SUBSYS=11
 rpc_py="$rootdir/scripts/rpc.py"
 
 nvmftestinit
-nvmfappstart "-m 0xF"
+nvmfappstart -m 0xF
 
 # SoftRoce does not have enough queues available for
 # multiconnection tests. Detect if we're using software RDMA.
@@ -25,8 +25,7 @@ fi
 
 $rpc_py nvmf_create_transport $NVMF_TRANSPORT_OPTS -u 8192
 
-for i in $(seq 1 $NVMF_SUBSYS)
-do
+for i in $(seq 1 $NVMF_SUBSYS); do
 	$rpc_py bdev_malloc_create $MALLOC_BDEV_SIZE $MALLOC_BLOCK_SIZE -b Malloc$i
 	$rpc_py nvmf_create_subsystem nqn.2016-06.io.spdk:cnode$i -a -s SPDK$i
 	$rpc_py nvmf_subsystem_add_ns nqn.2016-06.io.spdk:cnode$i Malloc$i
@@ -34,10 +33,8 @@ do
 done
 
 for i in $(seq 1 $NVMF_SUBSYS); do
-	k=$((i-1))
 	nvme connect -t $TEST_TRANSPORT -n "nqn.2016-06.io.spdk:cnode${i}" -a "$NVMF_FIRST_TARGET_IP" -s "$NVMF_PORT"
-
-	waitforblk "nvme${k}n1"
+	waitforserial SPDK$i
 done
 
 $rootdir/scripts/fio.py -p nvmf -i 262144 -d 64 -t read -r 10

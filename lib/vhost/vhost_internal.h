@@ -40,11 +40,12 @@
 #include <rte_vhost.h>
 
 #include "spdk_internal/vhost_user.h"
-#include "spdk_internal/log.h"
-#include "spdk/event.h"
+#include "spdk/log.h"
 #include "spdk/util.h"
 #include "spdk/rpc.h"
 #include "spdk/config.h"
+
+extern bool g_packed_ring_recovery;
 
 #define SPDK_VHOST_MAX_VQUEUES	256
 #define SPDK_VHOST_MAX_VQ_SIZE	1024
@@ -52,6 +53,8 @@
 #define SPDK_VHOST_SCSI_CTRLR_MAX_DEVS 8
 
 #define SPDK_VHOST_IOVS_MAX 129
+
+#define SPDK_VHOST_VQ_MAX_SUBMISSIONS	32
 
 /*
  * Rate at which stats are checked for interrupt coalescing.
@@ -68,31 +71,43 @@
  */
 #define SPDK_VHOST_COALESCING_DELAY_BASE_US 0
 
-
 #define SPDK_VHOST_FEATURES ((1ULL << VHOST_F_LOG_ALL) | \
 	(1ULL << VHOST_USER_F_PROTOCOL_FEATURES) | \
 	(1ULL << VIRTIO_F_VERSION_1) | \
 	(1ULL << VIRTIO_F_NOTIFY_ON_EMPTY) | \
 	(1ULL << VIRTIO_RING_F_EVENT_IDX) | \
-	(1ULL << VIRTIO_RING_F_INDIRECT_DESC))
+	(1ULL << VIRTIO_RING_F_INDIRECT_DESC) | \
+	(1ULL << VIRTIO_F_RING_PACKED))
 
 #define SPDK_VHOST_DISABLED_FEATURES ((1ULL << VIRTIO_RING_F_EVENT_IDX) | \
 	(1ULL << VIRTIO_F_NOTIFY_ON_EMPTY))
 
-struct vhost_poll_group {
-	struct spdk_thread *thread;
-	unsigned ref;
-	TAILQ_ENTRY(vhost_poll_group) tailq;
-};
+#define VRING_DESC_F_AVAIL	(1ULL << VRING_PACKED_DESC_F_AVAIL)
+#define VRING_DESC_F_USED	(1ULL << VRING_PACKED_DESC_F_USED)
+#define VRING_DESC_F_AVAIL_USED	(VRING_DESC_F_AVAIL | VRING_DESC_F_USED)
 
 typedef struct rte_vhost_resubmit_desc spdk_vhost_resubmit_desc;
 typedef struct rte_vhost_resubmit_info spdk_vhost_resubmit_info;
+typedef struct rte_vhost_inflight_desc_packed	spdk_vhost_inflight_desc;
 
 struct spdk_vhost_virtqueue {
 	struct rte_vhost_vring vring;
 	struct rte_vhost_ring_inflight vring_inflight;
 	uint16_t last_avail_idx;
 	uint16_t last_used_idx;
+
+	struct {
+		/* To mark a descriptor as available in packed ring
+		 * Equal to avail_wrap_counter in spec.
+		 */
+		uint8_t avail_phase	: 1;
+		/* To mark a descriptor as used in packed ring
+		 * Equal to used_wrap_counter in spec.
+		 */
+		uint8_t used_phase	: 1;
+		uint8_t padding		: 5;
+		bool packed_ring	: 1;
+	} packed;
 
 	void *tasks;
 
@@ -110,6 +125,10 @@ struct spdk_vhost_virtqueue {
 
 	/* Associated vhost_virtqueue in the virtio device's virtqueue list */
 	uint32_t vring_idx;
+
+	struct spdk_vhost_session *vsession;
+
+	struct spdk_interrupt *intr;
 } __attribute((aligned(SPDK_CACHE_LINE_SIZE)));
 
 struct spdk_vhost_session {
@@ -123,12 +142,11 @@ struct spdk_vhost_session {
 	/* Unique session name. */
 	char *name;
 
-	struct vhost_poll_group *poll_group;
-
 	bool initialized;
 	bool started;
 	bool needs_restart;
 	bool forced_polling;
+	bool interrupt_mode;
 
 	struct rte_vhost_memory *mem;
 
@@ -157,7 +175,7 @@ struct spdk_vhost_dev {
 	char *name;
 	char *path;
 
-	struct spdk_cpuset cpumask;
+	struct spdk_thread *thread;
 	bool registered;
 
 	uint64_t virtio_features;
@@ -231,7 +249,7 @@ uint16_t vhost_vq_avail_ring_get(struct spdk_vhost_virtqueue *vq, uint16_t *reqs
 				 uint16_t reqs_len);
 
 /**
- * Get a virtio descriptor at given index in given virtqueue.
+ * Get a virtio split descriptor at given index in given virtqueue.
  * The descriptor will provide access to the entire descriptor
  * chain. The subsequent descriptors are accesible via
  * \c spdk_vhost_vring_desc_get_next.
@@ -252,6 +270,32 @@ int vhost_vq_get_desc(struct spdk_vhost_session *vsession, struct spdk_vhost_vir
 		      uint32_t *desc_table_size);
 
 /**
+ * Get a virtio packed descriptor at given index in given virtqueue.
+ * The descriptor will provide access to the entire descriptor
+ * chain. The subsequent descriptors are accesible via
+ * \c vhost_vring_packed_desc_get_next.
+ * \param vsession vhost session
+ * \param vq virtqueue
+ * \param req_idx descriptor index
+ * \param desc pointer to be set to the descriptor
+ * \param desc_table descriptor table to be used with
+ * \c spdk_vhost_vring_desc_get_next. This might be either
+ * \c NULL or per-chain indirect table.
+ * \param desc_table_size size of the *desc_table*
+ * \return 0 on success, -1 if given index is invalid.
+ * If -1 is returned, the content of params is undefined.
+ */
+int vhost_vq_get_desc_packed(struct spdk_vhost_session *vsession,
+			     struct spdk_vhost_virtqueue *virtqueue,
+			     uint16_t req_idx, struct vring_packed_desc **desc,
+			     struct vring_packed_desc **desc_table, uint32_t *desc_table_size);
+
+int vhost_inflight_queue_get_desc(struct spdk_vhost_session *vsession,
+				  spdk_vhost_inflight_desc *desc_array,
+				  uint16_t req_idx, spdk_vhost_inflight_desc **desc,
+				  struct vring_packed_desc  **desc_table, uint32_t *desc_table_size);
+
+/**
  * Send IRQ/call client (if pending) for \c vq.
  * \param vsession vhost session
  * \param vq virtqueue
@@ -269,9 +313,31 @@ int vhost_vq_used_signal(struct spdk_vhost_session *vsession, struct spdk_vhost_
  */
 void vhost_session_used_signal(struct spdk_vhost_session *vsession);
 
+/**
+ * Send IRQs for the queue that need to be signaled.
+ * \param vq virtqueue
+ */
+void vhost_session_vq_used_signal(struct spdk_vhost_virtqueue *virtqueue);
+
 void vhost_vq_used_ring_enqueue(struct spdk_vhost_session *vsession,
 				struct spdk_vhost_virtqueue *vq,
 				uint16_t id, uint32_t len);
+
+/**
+ * Enqueue the entry to the used ring when device complete the request.
+ * \param vsession vhost session
+ * \param vq virtqueue
+ * \req_idx descriptor index. It's the first index of this descriptor chain.
+ * \num_descs descriptor count. It's the count of the number of buffers in the chain.
+ * \buffer_id descriptor buffer ID.
+ * \length device write length. Specify the length of the buffer that has been initialized
+ * (written to) by the device
+ * \inflight_head the head idx of this IO inflight desc chain.
+ */
+void vhost_vq_packed_ring_enqueue(struct spdk_vhost_session *vsession,
+				  struct spdk_vhost_virtqueue *virtqueue,
+				  uint16_t num_descs, uint16_t buffer_id,
+				  uint32_t length, uint16_t inflight_head);
 
 /**
  * Get subsequent descriptor from given table.
@@ -286,10 +352,48 @@ void vhost_vq_used_ring_enqueue(struct spdk_vhost_session *vsession,
  */
 int vhost_vring_desc_get_next(struct vring_desc **desc,
 			      struct vring_desc *desc_table, uint32_t desc_table_size);
-bool vhost_vring_desc_is_wr(struct vring_desc *cur_desc);
+static inline bool
+vhost_vring_desc_is_wr(struct vring_desc *cur_desc)
+{
+	return !!(cur_desc->flags & VRING_DESC_F_WRITE);
+}
 
 int vhost_vring_desc_to_iov(struct spdk_vhost_session *vsession, struct iovec *iov,
 			    uint16_t *iov_index, const struct vring_desc *desc);
+
+bool vhost_vq_packed_ring_is_avail(struct spdk_vhost_virtqueue *virtqueue);
+
+/**
+ * Get subsequent descriptor from vq or desc table.
+ * \param desc current descriptor, will be set to the
+ * next descriptor (NULL in case this is the last
+ * descriptor in the chain or the next desc is invalid)
+ * \req_idx index of current desc, will be set to the next
+ * index. If desc_table != NULL the req_idx is the the vring index
+ * or the req_idx is the desc_table index.
+ * \param desc_table descriptor table
+ * \param desc_table_size size of the *desc_table*
+ * \return 0 on success, -1 if given index is invalid
+ * The *desc* param will be set regardless of the
+ * return value.
+ */
+int vhost_vring_packed_desc_get_next(struct vring_packed_desc **desc, uint16_t *req_idx,
+				     struct spdk_vhost_virtqueue *vq,
+				     struct vring_packed_desc *desc_table,
+				     uint32_t desc_table_size);
+
+bool vhost_vring_packed_desc_is_wr(struct vring_packed_desc *cur_desc);
+
+int vhost_vring_packed_desc_to_iov(struct spdk_vhost_session *vsession, struct iovec *iov,
+				   uint16_t *iov_index, const struct vring_packed_desc *desc);
+
+bool vhost_vring_inflight_desc_is_wr(spdk_vhost_inflight_desc *cur_desc);
+
+int vhost_vring_inflight_desc_to_iov(struct spdk_vhost_session *vsession, struct iovec *iov,
+				     uint16_t *iov_index, const spdk_vhost_inflight_desc *desc);
+
+uint16_t vhost_vring_packed_desc_get_buffer_id(struct spdk_vhost_virtqueue *vq, uint16_t req_idx,
+		uint16_t *num_descs);
 
 static inline bool __attribute__((always_inline))
 vhost_dev_has_feature(struct spdk_vhost_session *vsession, unsigned feature_id)
@@ -301,8 +405,6 @@ int vhost_dev_register(struct spdk_vhost_dev *vdev, const char *name, const char
 		       const struct spdk_vhost_dev_backend *backend);
 int vhost_dev_unregister(struct spdk_vhost_dev *vdev);
 
-int vhost_scsi_controller_construct(void);
-int vhost_blk_controller_construct(void);
 void vhost_dump_info_json(struct spdk_vhost_dev *vdev, struct spdk_json_write_ctx *w);
 
 /*
@@ -313,12 +415,6 @@ int vhost_new_connection_cb(int vid, const char *ifname);
 int vhost_start_device_cb(int vid);
 int vhost_stop_device_cb(int vid);
 int vhost_destroy_connection_cb(int vid);
-
-#ifdef SPDK_CONFIG_VHOST_INTERNAL_LIB
-int vhost_get_config_cb(int vid, uint8_t *config, uint32_t len);
-int vhost_set_config_cb(int vid, uint8_t *config, uint32_t offset,
-			uint32_t size, uint32_t flags);
-#endif
 
 /*
  * Memory registration functions used in start/stop device callbacks
@@ -351,7 +447,6 @@ void vhost_dev_foreach_session(struct spdk_vhost_dev *dev,
  * will unlock for the time it's waiting. It's meant to be called only
  * from start/stop session callbacks.
  *
- * \param pg designated session's poll group
  * \param vsession vhost session
  * \param cb_fn the function to call. The void *arg parameter in cb_fn
  * is always NULL.
@@ -360,8 +455,7 @@ void vhost_dev_foreach_session(struct spdk_vhost_dev *dev,
  * \param errmsg error message to print once the timeout expires
  * \return return the code passed to spdk_vhost_session_event_done().
  */
-int vhost_session_send_event(struct vhost_poll_group *pg,
-			     struct spdk_vhost_session *vsession,
+int vhost_session_send_event(struct spdk_vhost_session *vsession,
 			     spdk_vhost_session_fn cb_fn, unsigned timeout_sec,
 			     const char *errmsg);
 
@@ -402,20 +496,6 @@ int vhost_driver_unregister(const char *path);
 int vhost_get_mem_table(int vid, struct rte_vhost_memory **mem);
 int vhost_get_negotiated_features(int vid, uint64_t *negotiated_features);
 
-struct vhost_poll_group *vhost_get_poll_group(struct spdk_cpuset *cpumask);
-
 int remove_vhost_controller(struct spdk_vhost_dev *vdev);
-
-#ifdef SPDK_CONFIG_VHOST_INTERNAL_LIB
-int vhost_nvme_admin_passthrough(int vid, void *cmd, void *cqe, void *buf);
-int vhost_nvme_set_cq_call(int vid, uint16_t qid, int fd);
-int vhost_nvme_set_bar_mr(int vid, void *bar_addr, uint64_t bar_size);
-int vhost_nvme_get_cap(int vid, uint64_t *cap);
-int vhost_nvme_controller_construct(void);
-int vhost_nvme_dev_construct(const char *name, const char *cpumask, uint32_t io_queues);
-int vhost_nvme_dev_remove(struct spdk_vhost_dev *vdev);
-int vhost_nvme_dev_add_ns(struct spdk_vhost_dev *vdev,
-			  const char *bdev_name);
-#endif
 
 #endif /* SPDK_VHOST_INTERNAL_H */

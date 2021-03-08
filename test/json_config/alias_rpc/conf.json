@@ -1,8 +1,8 @@
 {
   "subsystems": [
     {
-      "subsystem": "copy",
-      "config": null
+      "subsystem": "accel",
+      "config": []
     },
     {
       "subsystem": "interface",

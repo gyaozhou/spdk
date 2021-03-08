@@ -39,6 +39,7 @@
 #include "spdk/blob_bdev.h"
 #include "spdk/blob.h"
 #include "spdk/log.h"
+#include "spdk/string.h"
 
 /*
  * We'll use this struct to gather housekeeping hello_context to pass between
@@ -385,12 +386,19 @@ bs_init_complete(void *cb_arg, struct spdk_blob_store *bs,
 	hello_context->io_unit_size = spdk_bs_get_io_unit_size(hello_context->bs);
 
 	/*
-	 * The blostore has been initialized, let's create a blob.
+	 * The blobstore has been initialized, let's create a blob.
 	 * Note that we could pass a message back to ourselves using
 	 * spdk_thread_send_msg() if we wanted to keep our processing
 	 * time limited.
 	 */
 	create_blob(hello_context);
+}
+
+static void
+base_bdev_event_cb(enum spdk_bdev_event_type type, struct spdk_bdev *bdev,
+		   void *event_ctx)
+{
+	SPDK_WARNLOG("Unsupported bdev event: type %d\n", type);
 }
 
 /*
@@ -400,24 +408,16 @@ static void
 hello_start(void *arg1)
 {
 	struct hello_context_t *hello_context = arg1;
-	struct spdk_bdev *bdev = NULL;
 	struct spdk_bs_dev *bs_dev = NULL;
+	int rc;
 
 	SPDK_NOTICELOG("entry\n");
-	/*
-	 * Get the bdev. For this example it is our malloc (RAM)
-	 * disk configured via hello_blob.conf that was passed
-	 * in when we started the SPDK app framework so we can
-	 * get it via its name.
-	 */
-	bdev = spdk_bdev_get_by_name("Malloc0");
-	if (bdev == NULL) {
-		SPDK_ERRLOG("Could not find a bdev\n");
-		spdk_app_stop(-1);
-		return;
-	}
 
 	/*
+	 * In this example, use our malloc (RAM) disk configured via
+	 * hello_blob.conf that was passed in when we started the
+	 * SPDK app framework.
+	 *
 	 * spdk_bs_init() requires us to fill out the structure
 	 * spdk_bs_dev with a set of callbacks. These callbacks
 	 * implement read, write, and other operations on the
@@ -430,9 +430,10 @@ hello_start(void *arg1)
 	 * However blobstore can be more tightly integrated into
 	 * any lower layer, such as NVMe for example.
 	 */
-	bs_dev = spdk_bdev_create_bs_dev(bdev, NULL, NULL);
-	if (bs_dev == NULL) {
-		SPDK_ERRLOG("Could not create blob bdev!!\n");
+	rc = spdk_bdev_create_bs_dev_ext("Malloc0", base_bdev_event_cb, NULL, &bs_dev);
+	if (rc != 0) {
+		SPDK_ERRLOG("Could not create blob bdev, %s!!\n",
+			    spdk_strerror(-rc));
 		spdk_app_stop(-1);
 		return;
 	}
@@ -450,7 +451,7 @@ main(int argc, char **argv)
 	SPDK_NOTICELOG("entry\n");
 
 	/* Set default values in opts structure. */
-	spdk_app_opts_init(&opts);
+	spdk_app_opts_init(&opts, sizeof(opts));
 
 	/*
 	 * Setup a few specifics before we init, for most SPDK cmd line
@@ -459,11 +460,11 @@ main(int argc, char **argv)
 	 * specify a name for the app.
 	 */
 	opts.name = "hello_blob";
-	opts.config_file = "hello_blob.conf";
+	opts.json_config_file = argv[1];
 
 
 	/*
-	 * Now we'll allocate and intialize the blobstore itself. We
+	 * Now we'll allocate and initialize the blobstore itself. We
 	 * can pass in an spdk_bs_opts if we want something other than
 	 * the defaults (cluster size, etc), but here we'll just take the
 	 * defaults.  We'll also pass in a struct that we'll use for
@@ -483,7 +484,7 @@ main(int argc, char **argv)
 		if (rc) {
 			SPDK_NOTICELOG("ERROR!\n");
 		} else {
-			SPDK_NOTICELOG("SUCCCESS!\n");
+			SPDK_NOTICELOG("SUCCESS!\n");
 		}
 		/* Free up memory that we allocated */
 		hello_cleanup(hello_context);

@@ -34,8 +34,7 @@
 #include "spdk/stdinc.h"
 
 #include "spdk/bdev.h"
-#include "spdk/copy_engine.h"
-#include "spdk/conf.h"
+#include "spdk/accel_engine.h"
 #include "spdk/env.h"
 #include "spdk/thread.h"
 #include "spdk/log.h"
@@ -43,7 +42,6 @@
 #include "spdk/queue.h"
 #include "spdk/util.h"
 
-#include "spdk_internal/thread.h"
 #include "spdk_internal/event.h"
 
 #include "config-host.h"
@@ -59,8 +57,9 @@
 struct spdk_fio_options {
 	void *pad;
 	char *conf;
+	char *json_conf;
 	unsigned mem_mb;
-	bool mem_single_seg;
+	int mem_single_seg;
 };
 
 struct spdk_fio_request {
@@ -86,13 +85,22 @@ struct spdk_fio_thread {
 	struct io_u		**iocq;		/* io completion queue */
 	unsigned int		iocq_count;	/* number of iocq entries filled by last getevents */
 	unsigned int		iocq_size;	/* number of iocq entries allocated */
+
+	TAILQ_ENTRY(spdk_fio_thread)	link;
 };
 
 static bool g_spdk_env_initialized = false;
+static const char *g_json_config_file = NULL;
 
 static int spdk_fio_init(struct thread_data *td);
 static void spdk_fio_cleanup(struct thread_data *td);
 static size_t spdk_fio_poll_thread(struct spdk_fio_thread *fio_thread);
+
+static pthread_t g_init_thread_id = 0;
+static pthread_mutex_t g_init_mtx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_init_cond;
+static bool g_poll_loop = true;
+static TAILQ_HEAD(, spdk_fio_thread) g_threads = TAILQ_HEAD_INITIALIZER(g_threads);
 
 /* Default polling timeout (ns) */
 #define SPDK_FIO_POLLING_TIMEOUT 1000000000ULL
@@ -147,16 +155,9 @@ spdk_fio_cleanup_thread(struct spdk_fio_thread *fio_thread)
 {
 	spdk_thread_send_msg(fio_thread->thread, spdk_fio_bdev_close_targets, fio_thread);
 
-	while (!spdk_thread_is_idle(fio_thread->thread)) {
-		spdk_fio_poll_thread(fio_thread);
-	}
-
-	spdk_set_thread(fio_thread->thread);
-
-	spdk_thread_exit(fio_thread->thread);
-	spdk_thread_destroy(fio_thread->thread);
-	free(fio_thread->iocq);
-	free(fio_thread);
+	pthread_mutex_lock(&g_init_mtx);
+	TAILQ_INSERT_TAIL(&g_threads, fio_thread, link);
+	pthread_mutex_unlock(&g_init_mtx);
 }
 
 static void
@@ -184,11 +185,6 @@ spdk_fio_calc_timeout(struct spdk_fio_thread *fio_thread, struct timespec *ts)
 	}
 }
 
-static pthread_t g_init_thread_id = 0;
-static pthread_mutex_t g_init_mtx = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t g_init_cond;
-static bool g_poll_loop = true;
-
 static void
 spdk_fio_bdev_init_done(int rc, void *cb_arg)
 {
@@ -200,7 +196,8 @@ spdk_fio_bdev_init_start(void *arg)
 {
 	bool *done = arg;
 
-	spdk_subsystem_init(spdk_fio_bdev_init_done, done);
+	spdk_app_json_config_load(g_json_config_file, SPDK_DEFAULT_RPC_ADDR,
+				  spdk_fio_bdev_init_done, done, true);
 }
 
 static void
@@ -222,7 +219,7 @@ spdk_init_thread_poll(void *arg)
 {
 	struct spdk_fio_options		*eo = arg;
 	struct spdk_fio_thread		*fio_thread;
-	struct spdk_conf		*config;
+	struct spdk_fio_thread		*thread, *tmp;
 	struct spdk_env_opts		opts;
 	bool				done;
 	int				rc;
@@ -235,32 +232,20 @@ spdk_init_thread_poll(void *arg)
 
 	/* Parse the SPDK configuration file */
 	eo = arg;
-	if (!eo->conf || !strlen(eo->conf)) {
+
+	if (eo->conf && eo->json_conf) {
+		SPDK_ERRLOG("Cannot provide two types of configuration files\n");
+		rc = EINVAL;
+		goto err_exit;
+	} else if (eo->conf && strlen(eo->conf)) {
+		g_json_config_file = eo->conf;
+	} else if (eo->json_conf && strlen(eo->json_conf)) {
+		g_json_config_file = eo->json_conf;
+	} else {
 		SPDK_ERRLOG("No configuration file provided\n");
 		rc = EINVAL;
 		goto err_exit;
 	}
-
-	config = spdk_conf_allocate();
-	if (!config) {
-		SPDK_ERRLOG("Unable to allocate configuration file\n");
-		rc = ENOMEM;
-		goto err_exit;
-	}
-
-	rc = spdk_conf_read(config, eo->conf);
-	if (rc != 0) {
-		SPDK_ERRLOG("Invalid configuration file format\n");
-		spdk_conf_free(config);
-		goto err_exit;
-	}
-	if (spdk_conf_first_section(config) == NULL) {
-		SPDK_ERRLOG("Invalid configuration file format\n");
-		spdk_conf_free(config);
-		rc = EINVAL;
-		goto err_exit;
-	}
-	spdk_conf_set_as_default(config);
 
 	/* Initialize the environment library */
 	spdk_env_opts_init(&opts);
@@ -273,7 +258,6 @@ spdk_init_thread_poll(void *arg)
 
 	if (spdk_env_init(&opts) < 0) {
 		SPDK_ERRLOG("Unable to initialize SPDK env\n");
-		spdk_conf_free(config);
 		rc = EINVAL;
 		goto err_exit;
 	}
@@ -308,19 +292,37 @@ spdk_init_thread_poll(void *arg)
 	pthread_mutex_lock(&g_init_mtx);
 	pthread_cond_signal(&g_init_cond);
 
+	pthread_mutex_unlock(&g_init_mtx);
+
 	while (g_poll_loop) {
 		spdk_fio_poll_thread(fio_thread);
 
+		pthread_mutex_lock(&g_init_mtx);
+		if (!TAILQ_EMPTY(&g_threads)) {
+			TAILQ_FOREACH_SAFE(thread, &g_threads, link, tmp) {
+				spdk_fio_poll_thread(thread);
+			}
+
+			/* If there are exiting threads to poll, don't sleep. */
+			pthread_mutex_unlock(&g_init_mtx);
+			continue;
+		}
+
+		/* Figure out how long to sleep. */
 		clock_gettime(CLOCK_MONOTONIC, &ts);
 		spdk_fio_calc_timeout(fio_thread, &ts);
 
 		rc = pthread_cond_timedwait(&g_init_cond, &g_init_mtx, &ts);
+		pthread_mutex_unlock(&g_init_mtx);
+
 		if (rc != ETIMEDOUT) {
 			break;
 		}
+
+
 	}
 
-	pthread_mutex_unlock(&g_init_mtx);
+	spdk_fio_cleanup_thread(fio_thread);
 
 	/* Finalize the bdev layer */
 	done = false;
@@ -328,9 +330,32 @@ spdk_init_thread_poll(void *arg)
 
 	do {
 		spdk_fio_poll_thread(fio_thread);
-	} while (!done && !spdk_thread_is_idle(fio_thread->thread));
 
-	spdk_fio_cleanup_thread(fio_thread);
+		TAILQ_FOREACH_SAFE(thread, &g_threads, link, tmp) {
+			spdk_fio_poll_thread(thread);
+		}
+	} while (!done);
+
+	/* Now exit all the threads */
+	TAILQ_FOREACH(thread, &g_threads, link) {
+		spdk_set_thread(thread->thread);
+		spdk_thread_exit(thread->thread);
+		spdk_set_thread(NULL);
+	}
+
+	/* And wait for them to gracefully exit */
+	while (!TAILQ_EMPTY(&g_threads)) {
+		TAILQ_FOREACH_SAFE(thread, &g_threads, link, tmp) {
+			if (spdk_thread_is_exited(thread->thread)) {
+				TAILQ_REMOVE(&g_threads, thread, link);
+				spdk_thread_destroy(thread->thread);
+				free(thread->iocq);
+				free(thread);
+			} else {
+				spdk_thread_poll(thread->thread, 0, 0);
+			}
+		}
+	}
 
 	pthread_exit(NULL);
 
@@ -391,6 +416,20 @@ spdk_fio_setup(struct thread_data *td)
 	unsigned int i;
 	struct fio_file *f;
 
+	/* we might be running in a daemonized FIO instance where standard
+	 * input and output were closed and fds 0, 1, and 2 are reused
+	 * for something important by FIO. We can't ensure we won't print
+	 * anything (and so will our dependencies, e.g. DPDK), so abort early.
+	 * (is_backend is an fio global variable)
+	 */
+	if (is_backend) {
+		char buf[1024];
+		snprintf(buf, sizeof(buf),
+			 "SPDK FIO plugin won't work with daemonized FIO server.");
+		fio_server_text_output(FIO_LOG_ERR, buf, sizeof(buf));
+		return -1;
+	}
+
 	if (!td->o.use_thread) {
 		SPDK_ERRLOG("must set thread=1 when using spdk plugin\n");
 		return -1;
@@ -405,8 +444,21 @@ spdk_fio_setup(struct thread_data *td)
 		g_spdk_env_initialized = true;
 	}
 
+	if (td->o.nr_files == 1 && strcmp(td->files[0]->file_name, "*") == 0) {
+		struct spdk_bdev *bdev;
+
+		/* add all available bdevs as fio targets */
+		for (bdev = spdk_bdev_first_leaf(); bdev; bdev = spdk_bdev_next_leaf(bdev)) {
+			add_file(td, spdk_bdev_get_name(bdev), 0, 1);
+		}
+	}
+
 	for_each_file(td, f, i) {
 		struct spdk_bdev *bdev;
+
+		if (strcmp(f->file_name, "*") == 0) {
+			continue;
+		}
 
 		bdev = spdk_bdev_get_by_name(f->file_name);
 		if (!bdev) {
@@ -423,6 +475,13 @@ spdk_fio_setup(struct thread_data *td)
 }
 
 static void
+fio_bdev_event_cb(enum spdk_bdev_event_type type, struct spdk_bdev *bdev,
+		  void *event_ctx)
+{
+	SPDK_WARNLOG("Unsupported bdev event: type %d\n", type);
+}
+
+static void
 spdk_fio_bdev_open(void *arg)
 {
 	struct thread_data *td = arg;
@@ -436,6 +495,10 @@ spdk_fio_bdev_open(void *arg)
 	for_each_file(td, f, i) {
 		struct spdk_fio_target *target;
 
+		if (strcmp(f->file_name, "*") == 0) {
+			continue;
+		}
+
 		target = calloc(1, sizeof(*target));
 		if (!target) {
 			SPDK_ERRLOG("Unable to allocate memory for I/O target.\n");
@@ -443,21 +506,16 @@ spdk_fio_bdev_open(void *arg)
 			return;
 		}
 
-		target->bdev = spdk_bdev_get_by_name(f->file_name);
-		if (!target->bdev) {
-			SPDK_ERRLOG("Unable to find bdev with name %s\n", f->file_name);
-			free(target);
-			fio_thread->failed = true;
-			return;
-		}
-
-		rc = spdk_bdev_open(target->bdev, true, NULL, NULL, &target->desc);
+		rc = spdk_bdev_open_ext(f->file_name, true, fio_bdev_event_cb, NULL,
+					&target->desc);
 		if (rc) {
 			SPDK_ERRLOG("Unable to open bdev %s\n", f->file_name);
 			free(target);
 			fio_thread->failed = true;
 			return;
 		}
+
+		target->bdev = spdk_bdev_desc_get_bdev(target->desc);
 
 		target->ch = spdk_bdev_get_io_channel(target->desc);
 		if (!target->ch) {
@@ -617,6 +675,11 @@ spdk_fio_queue(struct thread_data *td, struct io_u *io_u)
 				     io_u->offset, io_u->xfer_buflen,
 				     spdk_fio_completion_cb, fio_req);
 		break;
+	case DDIR_SYNC:
+		rc = spdk_bdev_flush(target->desc, target->ch,
+				     io_u->offset, io_u->xfer_buflen,
+				     spdk_fio_completion_cb, fio_req);
+		break;
 	default:
 		assert(false);
 		break;
@@ -698,9 +761,18 @@ static struct fio_option options[] = {
 		.lname		= "SPDK configuration file",
 		.type		= FIO_OPT_STR_STORE,
 		.off1		= offsetof(struct spdk_fio_options, conf),
-		.help		= "A SPDK configuration file",
+		.help		= "A SPDK JSON configuration file",
 		.category	= FIO_OPT_C_ENGINE,
 		.group		= FIO_OPT_G_INVALID,
+	},
+	{
+		.name           = "spdk_json_conf",
+		.lname          = "SPDK JSON configuration file",
+		.type           = FIO_OPT_STR_STORE,
+		.off1           = offsetof(struct spdk_fio_options, json_conf),
+		.help           = "A SPDK JSON configuration file",
+		.category       = FIO_OPT_C_ENGINE,
+		.group          = FIO_OPT_G_INVALID,
 	},
 	{
 		.name		= "spdk_mem",
@@ -717,6 +789,7 @@ static struct fio_option options[] = {
 		.type		= FIO_OPT_BOOL,
 		.off1		= offsetof(struct spdk_fio_options, mem_single_seg),
 		.help		= "If set to 1, SPDK will use just a single hugetlbfs file",
+		.def            = "0",
 		.category	= FIO_OPT_C_ENGINE,
 		.group		= FIO_OPT_G_INVALID,
 	},

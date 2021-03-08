@@ -40,6 +40,7 @@
 #define SPDK_LOG_H
 
 #include "spdk/stdinc.h"
+#include "spdk/queue.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -70,6 +71,11 @@ void spdk_log_open(logfunc *logf);
  */
 void spdk_log_close(void);
 
+/**
+ * Enable or disable timestamps
+ */
+void spdk_log_enable_timestamps(bool value);
+
 enum spdk_log_level {
 	/** All messages will be suppressed. */
 	SPDK_LOG_DISABLED = -1,
@@ -96,26 +102,6 @@ void spdk_log_set_level(enum spdk_log_level level);
 enum spdk_log_level spdk_log_get_level(void);
 
 /**
- * Set the log level threshold to include stack trace in log messages.
- * Messages with a higher level than this will not contain stack trace. You
- * can use \c SPDK_LOG_DISABLED to completely disable stack trace printing
- * even if it is supported.
- *
- * \note This function has no effect if SPDK is built without stack trace
- *  printing support.
- *
- * \param level Log level threshold for stacktrace.
- */
-void spdk_log_set_backtrace_level(enum spdk_log_level level);
-
-/**
- * Get the current log level threshold for showing stack trace in log message.
- *
- * \return the current log level threshold for stack trace.
- */
-enum spdk_log_level spdk_log_get_backtrace_level(void);
-
-/**
  * Set the current log level threshold for printing to stderr.
  * Messages with a level less than or equal to this level
  * are also printed to stderr. You can use \c SPDK_LOG_DISABLED to completely
@@ -132,12 +118,49 @@ void spdk_log_set_print_level(enum spdk_log_level level);
  */
 enum spdk_log_level spdk_log_get_print_level(void);
 
+#ifdef DEBUG
+#define SPDK_DEBUGLOG_FLAG_ENABLED(name) spdk_log_get_flag(name)
+#else
+#define SPDK_DEBUGLOG_FLAG_ENABLED(name) false
+#endif
+
 #define SPDK_NOTICELOG(...) \
 	spdk_log(SPDK_LOG_NOTICE, __FILE__, __LINE__, __func__, __VA_ARGS__)
 #define SPDK_WARNLOG(...) \
 	spdk_log(SPDK_LOG_WARN, __FILE__, __LINE__, __func__, __VA_ARGS__)
 #define SPDK_ERRLOG(...) \
 	spdk_log(SPDK_LOG_ERROR, __FILE__, __LINE__, __func__, __VA_ARGS__)
+#define SPDK_PRINTF(...) \
+	spdk_log(SPDK_LOG_NOTICE, NULL, -1, NULL, __VA_ARGS__)
+#define SPDK_INFOLOG(FLAG, ...)									\
+	do {											\
+		extern struct spdk_log_flag SPDK_LOG_##FLAG;					\
+		if (SPDK_LOG_##FLAG.enabled) {							\
+			spdk_log(SPDK_LOG_INFO, __FILE__, __LINE__, __func__, __VA_ARGS__);	\
+		}										\
+	} while (0)
+
+#ifdef DEBUG
+#define SPDK_DEBUGLOG(FLAG, ...)								\
+	do {											\
+		extern struct spdk_log_flag SPDK_LOG_##FLAG;					\
+		if (SPDK_LOG_##FLAG.enabled) {							\
+			spdk_log(SPDK_LOG_DEBUG, __FILE__, __LINE__, __func__, __VA_ARGS__);	\
+		}										\
+	} while (0)
+
+#define SPDK_LOGDUMP(FLAG, LABEL, BUF, LEN)				\
+	do {								\
+		extern struct spdk_log_flag SPDK_LOG_##FLAG;		\
+		if (SPDK_LOG_##FLAG.enabled) {				\
+			spdk_log_dump(stderr, (LABEL), (BUF), (LEN));	\
+		}							\
+	} while (0)
+
+#else
+#define SPDK_DEBUGLOG(...) do { } while (0)
+#define SPDK_LOGDUMP(...) do { } while (0)
+#endif
 
 /**
  * Write messages to the log file. If \c level is set to \c SPDK_LOG_DISABLED,
@@ -153,6 +176,20 @@ void spdk_log(enum spdk_log_level level, const char *file, const int line, const
 	      const char *format, ...) __attribute__((__format__(__printf__, 5, 6)));
 
 /**
+ * Same as spdk_log except that instead of being called with variable number of
+ * arguments it is called with an argument list as defined in stdarg.h
+ *
+ * \param level Log level threshold.
+ * \param file Name of the current source file.
+ * \param line Current source line number.
+ * \param func Current source function name.
+ * \param format Format string to the message.
+ * \param ap printf arguments
+ */
+void spdk_vlog(enum spdk_log_level level, const char *file, const int line, const char *func,
+	       const char *format, va_list ap);
+
+/**
  * Log the contents of a raw buffer to a file.
  *
  * \param fp File to hold the log.
@@ -161,6 +198,46 @@ void spdk_log(enum spdk_log_level level, const char *file, const int line, const
  * \param len Length of buffer to dump.
  */
 void spdk_log_dump(FILE *fp, const char *label, const void *buf, size_t len);
+
+struct spdk_log_flag {
+	TAILQ_ENTRY(spdk_log_flag) tailq;
+	const char *name;
+	bool enabled;
+};
+
+/**
+ * Register a log flag.
+ *
+ * \param name Name of the log flag.
+ * \param flag Log flag to be added.
+ */
+void spdk_log_register_flag(const char *name, struct spdk_log_flag *flag);
+
+#define SPDK_LOG_REGISTER_COMPONENT(FLAG) \
+struct spdk_log_flag SPDK_LOG_##FLAG = { \
+	.enabled = false, \
+	.name = #FLAG, \
+}; \
+__attribute__((constructor)) static void register_flag_##FLAG(void) \
+{ \
+	spdk_log_register_flag(#FLAG, &SPDK_LOG_##FLAG); \
+}
+
+/**
+ * Get the first registered log flag.
+ *
+ * \return The first registered log flag.
+ */
+struct spdk_log_flag *spdk_log_get_first_flag(void);
+
+/**
+ * Get the next registered log flag.
+ *
+ * \param flag The current log flag.
+ *
+ * \return The next registered log flag.
+ */
+struct spdk_log_flag *spdk_log_get_next_flag(struct spdk_log_flag *flag);
 
 /**
  * Check whether the log flag exists and is enabled.

@@ -2,6 +2,7 @@
 #  BSD LICENSE
 #
 #  Copyright (c) Intel Corporation.
+#  Copyright (c) 2020 Mellanox Technologies LTD
 #  All rights reserved.
 #
 #  Redistribution and use in source and binary forms, with or without
@@ -34,8 +35,13 @@
 SPDK_ROOT_DIR := $(abspath $(CURDIR)/../..)
 include $(SPDK_ROOT_DIR)/mk/spdk.common.mk
 
-C_SRCS = sock.c net_framework.c
+SO_VER := 5
+SO_MINOR := 0
+
+C_SRCS = sock.c sock_rpc.c
 
 LIBNAME = sock
+
+SPDK_MAP_FILE = $(abspath $(CURDIR)/spdk_sock.map)
 
 include $(SPDK_ROOT_DIR)/mk/spdk.lib.mk

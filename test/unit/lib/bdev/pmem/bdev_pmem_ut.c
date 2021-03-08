@@ -36,16 +36,7 @@
 #include "common/lib/ut_multithread.c"
 #include "unit/lib/json_mock.c"
 
-#include "spdk_internal/thread.h"
-
 #include "bdev/pmem/bdev_pmem.c"
-
-DEFINE_STUB(spdk_conf_find_section, struct spdk_conf_section *,
-	    (struct spdk_conf *cp, const char *name), NULL);
-DEFINE_STUB(spdk_conf_section_get_nval, char *,
-	    (struct spdk_conf_section *sp, const char *key, int idx), NULL);
-DEFINE_STUB(spdk_conf_section_get_nmval, char *,
-	    (struct spdk_conf_section *sp, const char *key, int idx1, int idx2), NULL);
 
 static struct spdk_bdev_module *g_bdev_pmem_module;
 static int g_bdev_module_cnt;
@@ -413,51 +404,51 @@ ut_pmem_open_close(void)
 	pools_cnt = g_opened_pools;
 
 	/* Try opening with NULL name */
-	rc = spdk_create_pmem_disk(NULL, NULL, &bdev);
+	rc = create_pmem_disk(NULL, NULL, &bdev);
 	CU_ASSERT_PTR_NULL(bdev);
 	CU_ASSERT_EQUAL(pools_cnt, g_opened_pools);
 	CU_ASSERT_NOT_EQUAL(rc, 0);
 
 	/* Open non-existent pool */
-	rc = spdk_create_pmem_disk("non existent pool", NULL, &bdev);
+	rc = create_pmem_disk("non existent pool", NULL, &bdev);
 	CU_ASSERT_PTR_NULL(bdev);
 	CU_ASSERT_EQUAL(pools_cnt, g_opened_pools);
 	CU_ASSERT_NOT_EQUAL(rc, 0);
 
 	/* Open inconsistent pool */
-	rc = spdk_create_pmem_disk(g_pool_inconsistent.name, NULL, &bdev);
+	rc = create_pmem_disk(g_pool_inconsistent.name, NULL, &bdev);
 	CU_ASSERT_PTR_NULL(bdev);
 	CU_ASSERT_EQUAL(pools_cnt, g_opened_pools);
 	CU_ASSERT_NOT_EQUAL(rc, 0);
 
 	/* Open consistent pool fail the open from unknown reason. */
 	g_pmemblk_open_allow_open = false;
-	rc = spdk_create_pmem_disk(g_pool_inconsistent.name, NULL, &bdev);
+	rc = create_pmem_disk(g_pool_inconsistent.name, NULL, &bdev);
 	g_pmemblk_open_allow_open = true;
 	CU_ASSERT_PTR_NULL(bdev);
 	CU_ASSERT_EQUAL(pools_cnt, g_opened_pools);
 	CU_ASSERT_NOT_EQUAL(rc, 0);
 
 	/* Open pool with nblocks = 0 */
-	rc = spdk_create_pmem_disk(g_pool_nblock_0.name, NULL, &bdev);
+	rc = create_pmem_disk(g_pool_nblock_0.name, NULL, &bdev);
 	CU_ASSERT_PTR_NULL(bdev);
 	CU_ASSERT_EQUAL(pools_cnt, g_opened_pools);
 	CU_ASSERT_NOT_EQUAL(rc, 0);
 
 	/* Open pool with bsize = 0 */
-	rc = spdk_create_pmem_disk(g_pool_bsize_0.name, NULL, &bdev);
+	rc = create_pmem_disk(g_pool_bsize_0.name, NULL, &bdev);
 	CU_ASSERT_PTR_NULL(bdev);
 	CU_ASSERT_EQUAL(pools_cnt, g_opened_pools);
 	CU_ASSERT_NOT_EQUAL(rc, 0);
 
 	/* Open pool with NULL name */
-	rc = spdk_create_pmem_disk(g_pool_ok.name, NULL, &bdev);
+	rc = create_pmem_disk(g_pool_ok.name, NULL, &bdev);
 	CU_ASSERT_PTR_NULL(bdev);
 	CU_ASSERT_EQUAL(pools_cnt, g_opened_pools);
 	CU_ASSERT_NOT_EQUAL(rc, 0);
 
 	/* Open good pool */
-	rc = spdk_create_pmem_disk(g_pool_ok.name, g_bdev_name, &bdev);
+	rc = create_pmem_disk(g_pool_ok.name, g_bdev_name, &bdev);
 	SPDK_CU_ASSERT_FATAL(bdev != NULL);
 	CU_ASSERT_TRUE(g_pool_ok.is_open);
 	CU_ASSERT_EQUAL(pools_cnt + 1, g_opened_pools);
@@ -489,7 +480,7 @@ ut_pmem_write_read(void)
 		{ 0, 4 * bsize },
 	};
 
-	rc = spdk_create_pmem_disk(g_pool_ok.name, g_bdev_name, &bdev);
+	rc = create_pmem_disk(g_pool_ok.name, g_bdev_name, &bdev);
 	CU_ASSERT_EQUAL(rc, 0);
 
 	SPDK_CU_ASSERT_FATAL(g_pool_ok.nblock > 40);
@@ -663,7 +654,7 @@ ut_pmem_reset(void)
 	struct spdk_bdev *bdev;
 	int rc;
 
-	rc = spdk_create_pmem_disk(g_pool_ok.name, g_bdev_name, &bdev);
+	rc = create_pmem_disk(g_pool_ok.name, g_bdev_name, &bdev);
 	CU_ASSERT_EQUAL(rc, 0);
 	SPDK_CU_ASSERT_FATAL(bdev != NULL);
 
@@ -683,7 +674,7 @@ ut_pmem_unmap_write_zero(int16_t io_type)
 	int rc;
 
 	CU_ASSERT(io_type == SPDK_BDEV_IO_TYPE_UNMAP || io_type == SPDK_BDEV_IO_TYPE_WRITE_ZEROES);
-	rc = spdk_create_pmem_disk(g_pool_ok.name, g_bdev_name, &bdev);
+	rc = create_pmem_disk(g_pool_ok.name, g_bdev_name, &bdev);
 	CU_ASSERT_EQUAL(rc, 0);
 	SPDK_CU_ASSERT_FATAL(bdev != NULL);
 	SPDK_CU_ASSERT_FATAL(g_pool_ok.nblock > 40);
@@ -751,27 +742,17 @@ main(int argc, char **argv)
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	if (CU_initialize_registry() != CUE_SUCCESS) {
-		return CU_get_error();
-	}
+	CU_set_error_action(CUEA_ABORT);
+	CU_initialize_registry();
 
 	suite = CU_add_suite("bdev_pmem", ut_pmem_blk_init, ut_pmem_blk_clean);
-	if (suite == NULL) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
 
-	if (
-		CU_add_test(suite, "ut_pmem_init", ut_pmem_init) == NULL ||
-		CU_add_test(suite, "ut_pmem_open_close", ut_pmem_open_close) == NULL ||
-		CU_add_test(suite, "ut_pmem_write_read", ut_pmem_write_read) == NULL ||
-		CU_add_test(suite, "ut_pmem_reset", ut_pmem_reset) == NULL ||
-		CU_add_test(suite, "ut_pmem_write_zero", ut_pmem_write_zero) == NULL ||
-		CU_add_test(suite, "ut_pmem_unmap", ut_pmem_unmap) == NULL
-	) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
+	CU_ADD_TEST(suite, ut_pmem_init);
+	CU_ADD_TEST(suite, ut_pmem_open_close);
+	CU_ADD_TEST(suite, ut_pmem_write_read);
+	CU_ADD_TEST(suite, ut_pmem_reset);
+	CU_ADD_TEST(suite, ut_pmem_write_zero);
+	CU_ADD_TEST(suite, ut_pmem_unmap);
 
 	CU_basic_set_mode(CU_BRM_VERBOSE);
 	CU_basic_run_tests();

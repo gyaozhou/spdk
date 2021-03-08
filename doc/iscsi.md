@@ -10,7 +10,7 @@ This following section describes how to run iscsi from your cloned package.
 This guide starts by assuming that you can already build the standard SPDK distribution on your
 platform.
 
-Once built, the binary will be in `app/iscsi_tgt`.
+Once built, the binary will be in `build/bin`.
 
 If you want to kill the application by using signal, make sure use the SIGTERM, then the application
 will release all the shared memory resource before exit, the SIGKILL will make the shared memory
@@ -22,24 +22,6 @@ The following diagram shows relations between different parts of iSCSI structure
 document.
 
 ![iSCSI structure](iscsi.svg)
-
-## Configuring iSCSI Target via config file {#iscsi_config}
-
-A `iscsi_tgt` specific configuration file is used to configure the iSCSI target. A fully documented
-example configuration file is located at `etc/spdk/iscsi.conf.in`.
-
-The configuration file is used to configure the SPDK iSCSI target. This file defines the following:
-TCP ports to use as iSCSI portals; general iSCSI parameters; initiator names and addresses to allow
-access to iSCSI target nodes; number and types of storage backends to export over iSCSI LUNs; iSCSI
-target node mappings between portal groups, initiator groups, and LUNs.
-
-You should make a copy of the example configuration file, modify it to suit your environment, and
-then run the iscsi_tgt application and pass it the configuration file using the -c option. Right now,
-the target requires elevated privileges (root) to run.
-
-~~~
-app/iscsi_tgt/iscsi_tgt -c /path/to/iscsi.conf
-~~~
 
 ### Assigning CPU Cores to the iSCSI Target {#iscsi_config_lcore}
 
@@ -57,26 +39,9 @@ command line option is used to configure the SPDK iSCSI target:
 This is a hexadecimal bit mask of the CPU cores where the iSCSI target will start polling threads.
 In this example, CPU cores 24, 25, 26 and 27 would be used.
 
-### Configuring a LUN in the iSCSI Target {#iscsi_lun}
-
-Each LUN in an iSCSI target node is associated with an SPDK block device.  See @ref bdev
-for details on configuring SPDK block devices.  The block device to LUN mappings are specified in the
-configuration file as:
-
-~~~~
-[TargetNodeX]
-  LUN0 Malloc0
-  LUN1 Nvme0n1
-~~~~
-
-This exports a malloc'd target. The disk is a RAM disk that is a chunk of memory allocated by iscsi in
-user space. It will use offload engine to do the copy job instead of memcpy if the system has enough DMA
-channels.
-
 ## Configuring iSCSI Target via RPC method {#iscsi_rpc}
 
-In addition to the configuration file, the iSCSI target may also be configured via JSON-RPC calls. See
-@ref jsonrpc for details.
+The iSCSI target is configured via JSON-RPC calls. See @ref jsonrpc for details.
 
 ### Portal groups
 
@@ -218,7 +183,7 @@ echo "1024" > /sys/block/sdc/queue/nr_requests
 
 ### Example: Configure simple iSCSI Target with one portal and two LUNs
 
-Assuming we have one iSCSI Target server with portal at 10.0.0.1:3200, two LUNs (Malloc0 and Malloc),
+Assuming we have one iSCSI Target server with portal at 10.0.0.1:3200, two LUNs (Malloc0 and Malloc1),
  and accepting initiators on 10.0.0.2/32, like on diagram below:
 
 ![Sample iSCSI configuration](iscsi_example.svg)
@@ -227,33 +192,33 @@ Assuming we have one iSCSI Target server with portal at 10.0.0.1:3200, two LUNs 
 
 Start iscsi_tgt application:
 ```
-$ ./app/iscsi_tgt/iscsi_tgt
+./build/bin/iscsi_tgt
 ```
 
 Construct two 64MB Malloc block devices with 512B sector size "Malloc0" and "Malloc1":
 
 ```
-$ ./scripts/rpc.py bdev_malloc_create -b Malloc0 64 512
-$ ./scripts/rpc.py bdev_malloc_create -b Malloc1 64 512
+./scripts/rpc.py bdev_malloc_create -b Malloc0 64 512
+./scripts/rpc.py bdev_malloc_create -b Malloc1 64 512
 ```
 
 Create new portal group with id 1, and address 10.0.0.1:3260:
 
 ```
-$ ./scripts/rpc.py iscsi_create_portal_group 1 10.0.0.1:3260
+./scripts/rpc.py iscsi_create_portal_group 1 10.0.0.1:3260
 ```
 
 Create one initiator group with id 2 to accept any connection from 10.0.0.2/32:
 
 ```
-$ ./scripts/rpc.py iscsi_create_initiator_group 2 ANY 10.0.0.2/32
+./scripts/rpc.py iscsi_create_initiator_group 2 ANY 10.0.0.2/32
 ```
 
 Finally construct one target using previously created bdevs as LUN0 (Malloc0) and LUN1 (Malloc1)
 with a name "disk1" and alias "Data Disk1" using portal group 1 and initiator group 2.
 
 ```
-$ ./scripts/rpc.py iscsi_create_target_node disk1 "Data Disk1" "Malloc0:0 Malloc1:1" 1:2 64 -d
+./scripts/rpc.py iscsi_create_target_node disk1 "Data Disk1" "Malloc0:0 Malloc1:1" 1:2 64 -d
 ```
 
 #### Configure initiator
@@ -268,7 +233,7 @@ $ iscsiadm -m discovery -t sendtargets -p 10.0.0.1
 Connect to the target
 
 ~~~
-$ iscsiadm -m node --login
+iscsiadm -m node --login
 ~~~
 
 At this point the iSCSI target should show up as SCSI disks.
@@ -309,26 +274,54 @@ sde
 At the iSCSI level, we provide the following support for Hotplug:
 
 1. bdev/nvme:
-At the bdev/nvme level, we start one hotplug monitor which will call
-spdk_nvme_probe() periodically to get the hotplug events. We provide the
-private attach_cb and remove_cb for spdk_nvme_probe(). For the attach_cb,
-we will create the block device base on the NVMe device attached, and for the
-remove_cb, we will unregister the block device, which will also notify the
-upper level stack (for iSCSI target, the upper level stack is scsi/lun) to
-handle the hot-remove event.
+  At the bdev/nvme level, we start one hotplug monitor which will call
+  spdk_nvme_probe() periodically to get the hotplug events. We provide the
+  private attach_cb and remove_cb for spdk_nvme_probe(). For the attach_cb,
+  we will create the block device base on the NVMe device attached, and for the
+  remove_cb, we will unregister the block device, which will also notify the
+  upper level stack (for iSCSI target, the upper level stack is scsi/lun) to
+  handle the hot-remove event.
 
 2. scsi/lun:
-When the LUN receive the hot-remove notification from block device layer,
-the LUN will be marked as removed, and all the IOs after this point will
-return with check condition status. Then the LUN starts one poller which will
-wait for all the commands which have already been submitted to block device to
-return back; after all the commands return back, the LUN will be deleted.
-
-## Known bugs and limitations {#iscsi_hotplug_bugs}
-
-For write command, if you want to test hotplug with write command which will
-cause r2t, for example 1M size IO, it will crash the iscsi tgt.
-For read command, if you want to test hotplug with large read IO, for example 1M
-size IO, it will probably crash the iscsi tgt.
+  When the LUN receive the hot-remove notification from block device layer,
+  the LUN will be marked as removed, and all the IOs after this point will
+  return with check condition status. Then the LUN starts one poller which will
+  wait for all the commands which have already been submitted to block device to
+  return back; after all the commands return back, the LUN will be deleted.
 
 @sa spdk_nvme_probe
+
+# iSCSI Login Redirection {#iscsi_login_redirection}
+
+The SPDK iSCSI target application supports iSCSI login redirection feature.
+
+A portal refers to an IP address and TCP port number pair, and a portal group
+contains a set of portals. Users for the SPDK iSCSI target application configure
+portals through portal groups.
+
+To support login redirection feature, we utilize two types of portal groups,
+public portal group and private portal group.
+
+The SPDK iSCSI target application usually has a discovery portal. The discovery
+portal is connected by an initiator to get a list of targets, as well as the list
+of portals on which these target may be accessed, by a discovery session.
+
+Public portal groups have their portals returned by a discovery session. Private
+portal groups do not have their portals returned by a discovery session. A public
+portal group may optionally have a redirect portal for non-discovery logins for
+each associated target. This redirect portal must be from a private portal group.
+
+Initiators configure portals in public portal groups as target portals. When an
+initator logs in to a target through a portal in an associated public portal group,
+the target sends a temporary redirection response with a redirect portal. Then the
+initiator logs in to the target again through the redirect portal.
+
+Users set a portal group to public or private at creation using the
+`iscsi_create_portal_group` RPC, associate portal groups with a target using the
+`iscsi_create_target_node` RPC or the `iscsi_target_node_add_pg_ig_maps` RPC,
+specify a up-to-date redirect portal in a public portal group for a target using
+the `iscsi_target_node_set_redirect` RPC, and terminate the corresponding connections
+by asynchronous logout request using the `iscsi_target_node_request_logout` RPC.
+
+Typically users will use the login redirection feature in scale out iSCSI target
+system, which runs multiple SPDK iSCSI target applications.

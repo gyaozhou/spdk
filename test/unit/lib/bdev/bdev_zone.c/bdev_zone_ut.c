@@ -206,8 +206,8 @@ bdev_channel_get_io(struct spdk_bdev_channel *channel)
 }
 
 int
-spdk_bdev_open(struct spdk_bdev *bdev, bool write, spdk_bdev_remove_cb_t remove_cb,
-	       void *remove_ctx, struct spdk_bdev_desc **_desc)
+spdk_bdev_open_ext(const char *bdev_name, bool write, spdk_bdev_event_cb_t event_cb,
+		   void *event_ctx, struct spdk_bdev_desc **_desc)
 {
 	*_desc = (void *)0x1;
 	return 0;
@@ -305,7 +305,7 @@ test_zone_get_operation(void)
     int rc; \
     memset(&bdev, 0, sizeof(bdev)); \
     bdev.name = "bdev_zone_ut"; \
-    rc = spdk_bdev_open(&bdev, true, NULL, NULL, &desc); \
+    rc = spdk_bdev_open_ext(bdev.name, true, NULL, NULL, &desc); \
     CU_ASSERT(rc == 0); \
     SPDK_CU_ASSERT_FATAL(desc != NULL); \
     ch = spdk_bdev_get_io_channel(desc); \
@@ -410,26 +410,16 @@ main(int argc, char **argv)
 	CU_pSuite suite = NULL;
 	unsigned int num_failures;
 
-	if (CU_initialize_registry() != CUE_SUCCESS) {
-		return CU_get_error();
-	}
+	CU_set_error_action(CUEA_ABORT);
+	CU_initialize_registry();
 
 	suite = CU_add_suite("zone", test_setup, test_cleanup);
-	if (suite == NULL) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
-
-	if (CU_add_test(suite, "test_zone_get_operation", test_zone_get_operation) == NULL
-	    ||  CU_add_test(suite, "test_bdev_zone_get_info", test_bdev_zone_get_info) == NULL
-	    ||  CU_add_test(suite, "test_bdev_zone_management", test_bdev_zone_management) == NULL
-	    ||  CU_add_test(suite, "test_bdev_zone_append", test_bdev_zone_append) == NULL
-	    ||  CU_add_test(suite, "test_bdev_zone_append_with_md", test_bdev_zone_append_with_md) == NULL
-	    ||  CU_add_test(suite, "test_bdev_io_get_append_location", test_bdev_io_get_append_location) == NULL
-	   ) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
+	CU_ADD_TEST(suite, test_zone_get_operation);
+	CU_ADD_TEST(suite, test_bdev_zone_get_info);
+	CU_ADD_TEST(suite, test_bdev_zone_management);
+	CU_ADD_TEST(suite, test_bdev_zone_append);
+	CU_ADD_TEST(suite, test_bdev_zone_append_with_md);
+	CU_ADD_TEST(suite, test_bdev_io_get_append_location);
 
 	CU_basic_set_mode(CU_BRM_VERBOSE);
 	CU_basic_run_tests();

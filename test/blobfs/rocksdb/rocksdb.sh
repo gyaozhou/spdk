@@ -4,6 +4,22 @@ testdir=$(readlink -f $(dirname $0))
 rootdir=$(readlink -f $testdir/../../..)
 source $rootdir/test/common/autotest_common.sh
 
+sanitize_results() {
+	process_core
+	[[ -d $RESULTS_DIR ]] && chmod 644 "$RESULTS_DIR/"*
+}
+
+dump_db_bench_on_err() {
+	# Fetch std dump of the last run_step that might have failed
+	[[ -e $db_bench ]] || return 0
+
+	# Dump entire *.txt to stderr to clearly see what might have failed
+	xtrace_disable
+	mapfile -t step_map < "$db_bench"
+	printf '%s\n' "${step_map[@]/#/* $step (FAILED)}" >&2
+	xtrace_restore
+}
+
 run_step() {
 	if [ -z "$1" ]; then
 		echo run_step called with no parameter
@@ -11,14 +27,15 @@ run_step() {
 	fi
 
 	cat <<- EOL >> "$1"_flags.txt
-	--spdk=$ROCKSDB_CONF
-	--spdk_bdev=Nvme0n1
-	--spdk_cache_size=$CACHE_SIZE
+		--spdk=$ROCKSDB_CONF
+		--spdk_bdev=Nvme0n1
+		--spdk_cache_size=$CACHE_SIZE
 	EOL
 
+	db_bench=$1_db_bench.txt
 	echo -n Start $1 test phase...
-	/usr/bin/time taskset 0xFF $DB_BENCH --flagfile="$1"_flags.txt &> "$1"_db_bench.txt
-	DB_BENCH_FILE=$(grep /dev/shm "$1"_db_bench.txt | cut -f 6 -d ' ')
+	time taskset 0xFF $DB_BENCH --flagfile="$1"_flags.txt &> "$db_bench"
+	DB_BENCH_FILE=$(grep -o '/dev/shm/\(\w\|\.\|\d\|/\)*' "$db_bench")
 	gzip $DB_BENCH_FILE
 	mv $DB_BENCH_FILE.gz "$1"_trace.gz
 	chmod 644 "$1"_trace.gz
@@ -26,17 +43,18 @@ run_step() {
 }
 
 run_bsdump() {
-	$rootdir/examples/blob/cli/blobcli -c $ROCKSDB_CONF -b Nvme0n1 -D &> bsdump.txt
+	# 0x80 is the bit mask for BlobFS tracepoints
+	$SPDK_EXAMPLE_DIR/blobcli -j $ROCKSDB_CONF -b Nvme0n1 --tpoint-group-mask 0x80 &> bsdump.txt
 }
 
 # In the autotest job, we copy the rocksdb source to just outside the spdk directory.
 DB_BENCH_DIR="$rootdir/../rocksdb"
 DB_BENCH=$DB_BENCH_DIR/db_bench
-ROCKSDB_CONF=$testdir/rocksdb.conf
+ROCKSDB_CONF=$testdir/rocksdb.json
 
 if [ ! -e $DB_BENCH_DIR ]; then
-	echo $DB_BENCH_DIR does not exist, skipping rocksdb tests
-	exit 0
+	echo $DB_BENCH_DIR does not exist
+	false
 fi
 
 timing_enter db_bench_build
@@ -45,20 +63,25 @@ pushd $DB_BENCH_DIR
 if [ -z "$SKIP_GIT_CLEAN" ]; then
 	git clean -x -f -d
 fi
-$MAKE db_bench $MAKEFLAGS $MAKECONFIG DEBUG_LEVEL=0 SPDK_DIR=$rootdir
+
+EXTRA_CXXFLAGS=""
+GCC_VERSION=$(cc -dumpversion | cut -d. -f1)
+if ((GCC_VERSION >= 9)); then
+	EXTRA_CXXFLAGS+="-Wno-deprecated-copy -Wno-pessimizing-move -Wno-error=stringop-truncation"
+fi
+
+$MAKE db_bench $MAKEFLAGS $MAKECONFIG DEBUG_LEVEL=0 SPDK_DIR=$rootdir EXTRA_CXXFLAGS="$EXTRA_CXXFLAGS"
 popd
 
 timing_exit db_bench_build
 
-$rootdir/scripts/gen_nvme.sh > $ROCKSDB_CONF
-# 0x80 is the bit mask for BlobFS tracepoints
-echo "[Global]" >> $ROCKSDB_CONF
-echo "TpointGroupMask 0x80" >> $ROCKSDB_CONF
+$rootdir/scripts/gen_nvme.sh --json-with-subsystems > $ROCKSDB_CONF
 
-trap 'run_bsdump; rm -f $ROCKSDB_CONF; exit 1' SIGINT SIGTERM EXIT
+trap 'dump_db_bench_on_err; run_bsdump || :; rm -f $ROCKSDB_CONF; sanitize_results; exit 1' SIGINT SIGTERM EXIT
 
 if [ -z "$SKIP_MKFS" ]; then
-	run_test "blobfs_mkfs" $rootdir/test/blobfs/mkfs/mkfs $ROCKSDB_CONF Nvme0n1
+	# 0x80 is the bit mask for BlobFS tracepoints
+	run_test "blobfs_mkfs" $rootdir/test/blobfs/mkfs/mkfs $ROCKSDB_CONF Nvme0n1 --tpoint-group-mask 0x80
 fi
 
 mkdir -p $output_dir/rocksdb
@@ -72,6 +95,15 @@ else
 	DURATION=20
 	NUM_KEYS=20000000
 fi
+# Make sure that there's enough memory available for the mempool. Unfortunately,
+# db_bench doesn't seem to allocate memory from all numa nodes since all of it
+# comes exclusively from node0. With that in mind, try to allocate CACHE_SIZE
+# + some_overhead (1G) of pages but only on node0 to make sure that we end up
+# with the right amount not allowing setup.sh to split it by using the global
+# nr_hugepages setting. Instead of bypassing it completely, we use it to also
+# get the right size of hugepages.
+HUGEMEM=$((CACHE_SIZE + 1024)) HUGENODE=0 \
+	"$rootdir/scripts/setup.sh"
 
 cd $RESULTS_DIR
 cp $testdir/common_flags.txt insert_flags.txt
@@ -134,5 +166,4 @@ trap - SIGINT SIGTERM EXIT
 
 run_bsdump
 rm -f $ROCKSDB_CONF
-
-report_test_completion "blobfs"
+sanitize_results

@@ -38,7 +38,7 @@
 #include "spdk_internal/event.h"
 
 static void
-spdk_interface_subsystem_init(void)
+interface_subsystem_init(void)
 {
 	int rc;
 
@@ -48,7 +48,7 @@ spdk_interface_subsystem_init(void)
 }
 
 static void
-spdk_interface_subsystem_destroy(void)
+interface_subsystem_destroy(void)
 {
 	spdk_interface_destroy();
 	spdk_subsystem_fini_next();
@@ -56,43 +56,8 @@ spdk_interface_subsystem_destroy(void)
 
 static struct spdk_subsystem g_spdk_subsystem_interface = {
 	.name = "interface",
-	.init = spdk_interface_subsystem_init,
-	.fini = spdk_interface_subsystem_destroy,
-	.config = NULL,
+	.init = interface_subsystem_init,
+	.fini = interface_subsystem_destroy,
 };
 
 SPDK_SUBSYSTEM_REGISTER(g_spdk_subsystem_interface);
-
-static void
-spdk_net_start_complete(void *cb_arg, int rc)
-{
-	spdk_subsystem_init_next(rc);
-}
-
-static void
-spdk_net_subsystem_start(void)
-{
-	spdk_net_framework_start(spdk_net_start_complete, NULL);
-}
-
-static void
-spdk_net_fini_done(void *cb_arg)
-{
-	spdk_subsystem_fini_next();
-}
-
-static void
-spdk_net_subsystem_fini(void)
-{
-	spdk_net_framework_fini(spdk_net_fini_done, NULL);
-}
-
-static struct spdk_subsystem g_spdk_subsystem_net_framework = {
-	.name = "net_framework",
-	.init = spdk_net_subsystem_start,
-	.fini = spdk_net_subsystem_fini,
-	.config = NULL,
-};
-
-SPDK_SUBSYSTEM_REGISTER(g_spdk_subsystem_net_framework);
-SPDK_SUBSYSTEM_DEPEND(net_framework, interface)

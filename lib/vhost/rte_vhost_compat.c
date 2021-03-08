@@ -42,12 +42,13 @@
 #include "spdk/likely.h"
 #include "spdk/string.h"
 #include "spdk/util.h"
+#include "spdk/memory.h"
 #include "spdk/barrier.h"
 #include "spdk/vhost.h"
 #include "vhost_internal.h"
+#include <rte_version.h>
 
 #include "spdk_internal/vhost_user.h"
-#include "spdk_internal/memory.h"
 
 static inline void
 vhost_session_mem_region_calc(uint64_t *previous_start, uint64_t *start, uint64_t *end,
@@ -72,7 +73,7 @@ vhost_session_mem_register(struct rte_vhost_memory *mem)
 
 	for (i = 0; i < mem->nregions; i++) {
 		vhost_session_mem_region_calc(&previous_start, &start, &end, &len, &mem->regions[i]);
-		SPDK_INFOLOG(SPDK_LOG_VHOST, "Registering VM memory for vtophys translation - 0x%jx len:0x%jx\n",
+		SPDK_INFOLOG(vhost, "Registering VM memory for vtophys translation - 0x%jx len:0x%jx\n",
 			     start, len);
 
 		if (spdk_mem_register((void *)start, len) != 0) {
@@ -138,20 +139,10 @@ static const struct vhost_device_ops g_spdk_vhost_ops = {
 	.destroy_device = stop_device,
 	.new_connection = new_connection,
 	.destroy_connection = destroy_connection,
-#ifdef SPDK_CONFIG_VHOST_INTERNAL_LIB
-	.get_config = vhost_get_config_cb,
-	.set_config = vhost_set_config_cb,
-	.vhost_nvme_admin_passthrough = vhost_nvme_admin_passthrough,
-	.vhost_nvme_set_cq_call = vhost_nvme_set_cq_call,
-	.vhost_nvme_get_cap = vhost_nvme_get_cap,
-	.vhost_nvme_set_bar_mr = vhost_nvme_set_bar_mr,
-#endif
 };
 
-#ifndef SPDK_CONFIG_VHOST_INTERNAL_LIB
-
 static enum rte_vhost_msg_result
-spdk_extern_vhost_pre_msg_handler(int vid, void *_msg)
+extern_vhost_pre_msg_handler(int vid, void *_msg)
 {
 	struct vhost_user_msg *msg = _msg;
 	struct spdk_vhost_session *vsession;
@@ -175,7 +166,6 @@ spdk_extern_vhost_pre_msg_handler(int vid, void *_msg)
 	case VHOST_USER_SET_VRING_BASE:
 	case VHOST_USER_SET_VRING_ADDR:
 	case VHOST_USER_SET_VRING_NUM:
-	case VHOST_USER_SET_VRING_KICK:
 		if (vsession->forced_polling && vsession->started) {
 			/* Additional queues are being initialized, so we either processed
 			 * enough I/Os and are switching from SeaBIOS to the OS now, or
@@ -186,6 +176,12 @@ spdk_extern_vhost_pre_msg_handler(int vid, void *_msg)
 			vsession->forced_polling = false;
 		}
 		break;
+	case VHOST_USER_SET_VRING_KICK:
+		/* rte_vhost(after 20.08) will call new_device after one active vring is
+		 * configured, we will start the session before all vrings are available,
+		 * so for each new vring, if the session is started, we need to restart it
+		 * again.
+		 */
 	case VHOST_USER_SET_VRING_CALL:
 		/* rte_vhost will close the previous callfd and won't notify
 		 * us about any change. This will effectively make SPDK fail
@@ -245,7 +241,7 @@ spdk_extern_vhost_pre_msg_handler(int vid, void *_msg)
 }
 
 static enum rte_vhost_msg_result
-spdk_extern_vhost_post_msg_handler(int vid, void *_msg)
+extern_vhost_post_msg_handler(int vid, void *_msg)
 {
 	struct vhost_user_msg *msg = _msg;
 	struct spdk_vhost_session *vsession;
@@ -297,8 +293,8 @@ spdk_extern_vhost_post_msg_handler(int vid, void *_msg)
 }
 
 struct rte_vhost_user_extern_ops g_spdk_extern_vhost_ops = {
-	.pre_msg_handle = spdk_extern_vhost_pre_msg_handler,
-	.post_msg_handle = spdk_extern_vhost_post_msg_handler,
+	.pre_msg_handle = extern_vhost_pre_msg_handler,
+	.post_msg_handle = extern_vhost_post_msg_handler,
 };
 
 void
@@ -314,24 +310,12 @@ vhost_session_install_rte_compat_hooks(struct spdk_vhost_session *vsession)
 	}
 }
 
-#else /* SPDK_CONFIG_VHOST_INTERNAL_LIB */
-
-void
-vhost_session_install_rte_compat_hooks(struct spdk_vhost_session *vsession)
-{
-	/* nothing to do. all the changes are already incorporated into rte_vhost */
-}
-
-#endif
-
 int
 vhost_register_unix_socket(const char *path, const char *ctrl_name,
 			   uint64_t virtio_features, uint64_t disabled_features, uint64_t protocol_features)
 {
 	struct stat file_stat;
-#ifndef SPDK_CONFIG_VHOST_INTERNAL_LIB
 	uint64_t features = 0;
-#endif
 
 	/* Register vhost driver to handle vhost messages. */
 	if (stat(path, &file_stat) != -1) {
@@ -348,7 +332,11 @@ vhost_register_unix_socket(const char *path, const char *ctrl_name,
 		}
 	}
 
+#if RTE_VERSION < RTE_VERSION_NUM(20, 8, 0, 0)
 	if (rte_vhost_driver_register(path, 0) != 0) {
+#else
+	if (rte_vhost_driver_register(path, RTE_VHOST_USER_ASYNC_COPY) != 0) {
+#endif
 		SPDK_ERRLOG("Could not register controller %s with vhost library\n", ctrl_name);
 		SPDK_ERRLOG("Check if domain socket %s already exists\n", path);
 		return -EIO;
@@ -367,11 +355,9 @@ vhost_register_unix_socket(const char *path, const char *ctrl_name,
 		return -EIO;
 	}
 
-#ifndef SPDK_CONFIG_VHOST_INTERNAL_LIB
 	rte_vhost_driver_get_protocol_features(path, &features);
 	features |= protocol_features;
 	rte_vhost_driver_set_protocol_features(path, features);
-#endif
 
 	if (rte_vhost_driver_start(path) != 0) {
 		SPDK_ERRLOG("Failed to start vhost driver for controller %s (%d): %s\n",

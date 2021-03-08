@@ -44,9 +44,7 @@
 #include "unit/lib/json_mock.c"
 #include "common/lib/test_env.c"
 
-struct spdk_iscsi_globals g_spdk_iscsi;
-
-const char *config_file;
+struct spdk_iscsi_globals g_iscsi;
 
 DEFINE_STUB(spdk_scsi_dev_get_id,
 	    int,
@@ -71,11 +69,24 @@ DEFINE_STUB(spdk_sock_is_ipv6, bool, (struct spdk_sock *sock), false);
 
 DEFINE_STUB(spdk_sock_is_ipv4, bool, (struct spdk_sock *sock), false);
 
-DEFINE_STUB(spdk_iscsi_portal_grp_find_by_tag,
+DEFINE_STUB(iscsi_portal_grp_find_by_tag,
 	    struct spdk_iscsi_portal_grp *, (int tag), NULL);
 
-DEFINE_STUB(spdk_iscsi_init_grp_find_by_tag, struct spdk_iscsi_init_grp *,
+DEFINE_STUB(iscsi_init_grp_find_by_tag, struct spdk_iscsi_init_grp *,
 	    (int tag), NULL);
+
+DEFINE_STUB_V(iscsi_op_abort_task_set,
+	      (struct spdk_iscsi_task *task, uint8_t function));
+
+DEFINE_STUB(iscsi_parse_redirect_addr,
+	    int,
+	    (struct sockaddr_storage *sa, const char *host, const char *port),
+	    0);
+
+DEFINE_STUB(iscsi_portal_grp_find_portal_by_addr,
+	    struct spdk_iscsi_portal *,
+	    (struct spdk_iscsi_portal_grp *pg, const char *host, const char *port),
+	    NULL);
 
 struct spdk_scsi_lun *
 spdk_scsi_dev_get_lun(struct spdk_scsi_dev *dev, int lun_id)
@@ -111,69 +122,40 @@ add_lun_test_cases(void)
 	/* case 1 */
 	tgtnode.num_active_conns = 1;
 
-	rc = spdk_iscsi_tgt_node_add_lun(&tgtnode, bdev_name, lun_id);
+	rc = iscsi_tgt_node_add_lun(&tgtnode, bdev_name, lun_id);
 	CU_ASSERT(rc != 0);
 
 	/* case 2 */
 	tgtnode.num_active_conns = 0;
 	lun_id = -2;
 
-	rc = spdk_iscsi_tgt_node_add_lun(&tgtnode, bdev_name, lun_id);
+	rc = iscsi_tgt_node_add_lun(&tgtnode, bdev_name, lun_id);
 	CU_ASSERT(rc != 0);
 
 	/* case 3 */
 	lun_id = SPDK_SCSI_DEV_MAX_LUN;
 
-	rc = spdk_iscsi_tgt_node_add_lun(&tgtnode, bdev_name, lun_id);
+	rc = iscsi_tgt_node_add_lun(&tgtnode, bdev_name, lun_id);
 	CU_ASSERT(rc != 0);
 
 	/* case 4 */
 	lun_id = -1;
 	tgtnode.dev = NULL;
 
-	rc = spdk_iscsi_tgt_node_add_lun(&tgtnode, bdev_name, lun_id);
+	rc = iscsi_tgt_node_add_lun(&tgtnode, bdev_name, lun_id);
 	CU_ASSERT(rc != 0);
 
 	/* case 5 */
 	tgtnode.dev = &scsi_dev;
 
-	rc = spdk_iscsi_tgt_node_add_lun(&tgtnode, bdev_name, lun_id);
+	rc = iscsi_tgt_node_add_lun(&tgtnode, bdev_name, lun_id);
 	CU_ASSERT(rc != 0);
 
 	/* case 6 */
 	bdev_name = "LUN0";
 
-	rc = spdk_iscsi_tgt_node_add_lun(&tgtnode, bdev_name, lun_id);
+	rc = iscsi_tgt_node_add_lun(&tgtnode, bdev_name, lun_id);
 	CU_ASSERT(rc == 0);
-}
-
-static void
-config_file_fail_cases(void)
-{
-	struct spdk_conf *config;
-	struct spdk_conf_section *sp;
-	char section_name[64];
-	int section_index;
-	int rc;
-
-	config = spdk_conf_allocate();
-
-	rc = spdk_conf_read(config, config_file);
-	CU_ASSERT(rc == 0);
-
-	section_index = 0;
-	while (true) {
-		snprintf(section_name, sizeof(section_name), "Failure%d", section_index);
-		sp = spdk_conf_find_section(config, section_name);
-		if (sp == NULL) {
-			break;
-		}
-		rc = iscsi_parse_tgt_node(sp);
-		CU_ASSERT(rc < 0);
-		section_index++;
-	}
-
-	spdk_conf_free(config);
 }
 
 static void
@@ -390,7 +372,7 @@ node_access_allowed(void)
 	iqn = "iqn.2017-10.spdk.io:0001";
 	addr = "192.168.2.1";
 
-	result = spdk_iscsi_tgt_node_access(&conn, &tgtnode, iqn, addr);
+	result = iscsi_tgt_node_access(&conn, &tgtnode, iqn, addr);
 	CU_ASSERT(result == true);
 
 	iscsi_pg_map_delete_ig_map(pg_map, &ig);
@@ -446,7 +428,7 @@ node_access_denied_by_empty_netmask(void)
 	iqn = "iqn.2017-10.spdk.io:0001";
 	addr = "192.168.3.1";
 
-	result = spdk_iscsi_tgt_node_access(&conn, &tgtnode, iqn, addr);
+	result = iscsi_tgt_node_access(&conn, &tgtnode, iqn, addr);
 	CU_ASSERT(result == false);
 
 	iscsi_pg_map_delete_ig_map(pg_map, &ig);
@@ -533,7 +515,7 @@ node_access_multi_initiator_groups_cases(void)
 	 */
 	snprintf(iname1.name, sizeof(iname1.name), NO_IQN1);
 
-	result = spdk_iscsi_tgt_node_access(&conn, &tgtnode, iqn, addr);
+	result = iscsi_tgt_node_access(&conn, &tgtnode, iqn, addr);
 	CU_ASSERT(result == false);
 
 	/*
@@ -550,7 +532,7 @@ node_access_multi_initiator_groups_cases(void)
 	snprintf(iname1.name, sizeof(iname1.name), IQN1);
 	snprintf(imask1.mask, sizeof(imask1.mask), IP1);
 
-	result = spdk_iscsi_tgt_node_access(&conn, &tgtnode, iqn, addr);
+	result = iscsi_tgt_node_access(&conn, &tgtnode, iqn, addr);
 	CU_ASSERT(result == true);
 
 	/*
@@ -568,7 +550,7 @@ node_access_multi_initiator_groups_cases(void)
 	snprintf(imask1.mask, sizeof(imask1.mask), IP2);
 	snprintf(iname2.name, sizeof(iname2.name), NO_IQN1);
 
-	result = spdk_iscsi_tgt_node_access(&conn, &tgtnode, iqn, addr);
+	result = iscsi_tgt_node_access(&conn, &tgtnode, iqn, addr);
 	CU_ASSERT(result == false);
 
 	/*
@@ -587,7 +569,7 @@ node_access_multi_initiator_groups_cases(void)
 	snprintf(iname2.name, sizeof(iname2.name), IQN1);
 	snprintf(imask2.mask, sizeof(imask2.mask), IP1);
 
-	result = spdk_iscsi_tgt_node_access(&conn, &tgtnode, iqn, addr);
+	result = iscsi_tgt_node_access(&conn, &tgtnode, iqn, addr);
 	CU_ASSERT(result == true);
 
 	/*
@@ -606,7 +588,7 @@ node_access_multi_initiator_groups_cases(void)
 	snprintf(iname2.name, sizeof(iname2.name), IQN1);
 	snprintf(imask2.mask, sizeof(imask2.mask), IP2);
 
-	result = spdk_iscsi_tgt_node_access(&conn, &tgtnode, iqn, addr);
+	result = iscsi_tgt_node_access(&conn, &tgtnode, iqn, addr);
 	CU_ASSERT(result == false);
 
 	/*
@@ -624,7 +606,7 @@ node_access_multi_initiator_groups_cases(void)
 	snprintf(imask1.mask, sizeof(imask1.mask), IP2);
 	snprintf(iname2.name, sizeof(iname2.name), IQN2);
 
-	result = spdk_iscsi_tgt_node_access(&conn, &tgtnode, iqn, addr);
+	result = iscsi_tgt_node_access(&conn, &tgtnode, iqn, addr);
 	CU_ASSERT(result == false);
 
 	/*
@@ -641,7 +623,7 @@ node_access_multi_initiator_groups_cases(void)
 	snprintf(iname1.name, sizeof(iname1.name), IQN2);
 	snprintf(iname2.name, sizeof(iname2.name), NO_IQN1);
 
-	result = spdk_iscsi_tgt_node_access(&conn, &tgtnode, iqn, addr);
+	result = iscsi_tgt_node_access(&conn, &tgtnode, iqn, addr);
 	CU_ASSERT(result == false);
 
 	/*
@@ -659,7 +641,7 @@ node_access_multi_initiator_groups_cases(void)
 	snprintf(iname2.name, sizeof(iname2.name), IQN1);
 	snprintf(imask2.mask, sizeof(imask2.mask), IP1);
 
-	result = spdk_iscsi_tgt_node_access(&conn, &tgtnode, iqn, addr);
+	result = iscsi_tgt_node_access(&conn, &tgtnode, iqn, addr);
 	CU_ASSERT(result == true);
 
 	/*
@@ -677,7 +659,7 @@ node_access_multi_initiator_groups_cases(void)
 	snprintf(iname2.name, sizeof(iname2.name), IQN1);
 	snprintf(imask2.mask, sizeof(imask2.mask), IP2);
 
-	result = spdk_iscsi_tgt_node_access(&conn, &tgtnode, iqn, addr);
+	result = iscsi_tgt_node_access(&conn, &tgtnode, iqn, addr);
 	CU_ASSERT(result == false);
 
 	/*
@@ -694,7 +676,7 @@ node_access_multi_initiator_groups_cases(void)
 	snprintf(iname1.name, sizeof(iname1.name), IQN2);
 	snprintf(iname2.name, sizeof(iname2.name), IQN2);
 
-	result = spdk_iscsi_tgt_node_access(&conn, &tgtnode, iqn, addr);
+	result = iscsi_tgt_node_access(&conn, &tgtnode, iqn, addr);
 	CU_ASSERT(result == false);
 
 	iscsi_pg_map_delete_ig_map(pg_map, &ig1);
@@ -756,39 +738,39 @@ allow_iscsi_name_multi_maps_case(void)
 
 /*
  * static bool
- * spdk_iscsi_check_chap_params(bool disable_chap, bool require_chap,
+ * iscsi_check_chap_params(bool disable_chap, bool require_chap,
  *                              bool mutual_chap, int chap_group);
  */
 static void
 chap_param_test_cases(void)
 {
 	/* Auto */
-	CU_ASSERT(spdk_iscsi_check_chap_params(false, false, false, 0) == true);
+	CU_ASSERT(iscsi_check_chap_params(false, false, false, 0) == true);
 
 	/* None */
-	CU_ASSERT(spdk_iscsi_check_chap_params(true, false, false, 0) == true);
+	CU_ASSERT(iscsi_check_chap_params(true, false, false, 0) == true);
 
 	/* CHAP */
-	CU_ASSERT(spdk_iscsi_check_chap_params(false, true, false, 0) == true);
+	CU_ASSERT(iscsi_check_chap_params(false, true, false, 0) == true);
 
 	/* CHAP Mutual */
-	CU_ASSERT(spdk_iscsi_check_chap_params(false, true, true, 0) == true);
+	CU_ASSERT(iscsi_check_chap_params(false, true, true, 0) == true);
 
 	/* Check mutual exclusiveness of disabled and required */
-	CU_ASSERT(spdk_iscsi_check_chap_params(true, true, false, 0) == false);
+	CU_ASSERT(iscsi_check_chap_params(true, true, false, 0) == false);
 
 	/* Mutual requires Required */
-	CU_ASSERT(spdk_iscsi_check_chap_params(false, false, true, 0) == false);
+	CU_ASSERT(iscsi_check_chap_params(false, false, true, 0) == false);
 
 	/* Remaining combinations */
-	CU_ASSERT(spdk_iscsi_check_chap_params(true, false, true, 0) == false);
-	CU_ASSERT(spdk_iscsi_check_chap_params(true, true, true, 0) == false);
+	CU_ASSERT(iscsi_check_chap_params(true, false, true, 0) == false);
+	CU_ASSERT(iscsi_check_chap_params(true, true, true, 0) == false);
 
 	/* Valid auth group ID */
-	CU_ASSERT(spdk_iscsi_check_chap_params(false, false, false, 1) == true);
+	CU_ASSERT(iscsi_check_chap_params(false, false, false, 1) == true);
 
 	/* Invalid auth group ID */
-	CU_ASSERT(spdk_iscsi_check_chap_params(false, false, false, -1) == false);
+	CU_ASSERT(iscsi_check_chap_params(false, false, false, -1) == false);
 }
 
 int
@@ -797,45 +779,24 @@ main(int argc, char **argv)
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	if (argc < 2) {
-		fprintf(stderr, "usage: %s <config file>\n", argv[0]);
-		exit(1);
-	}
-
-	if (CU_initialize_registry() != CUE_SUCCESS) {
-		return CU_get_error();
-	}
-
-	config_file = argv[1];
+	CU_set_error_action(CUEA_ABORT);
+	CU_initialize_registry();
 
 	suite = CU_add_suite("iscsi_target_node_suite", NULL, NULL);
-	if (suite == NULL) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
 
-	if (
-		CU_add_test(suite, "add lun test cases", add_lun_test_cases) == NULL
-		|| CU_add_test(suite, "config file fail cases", config_file_fail_cases) == NULL
-		|| CU_add_test(suite, "allow any allowed case", allow_any_allowed) == NULL
-		|| CU_add_test(suite, "allow ipv6 allowed case", allow_ipv6_allowed) == NULL
-		|| CU_add_test(suite, "allow ipv6 denied case", allow_ipv6_denied) == NULL
-		|| CU_add_test(suite, "allow ipv6 invalid case", allow_ipv6_invalid) == NULL
-		|| CU_add_test(suite, "allow ipv4 allowed case", allow_ipv4_allowed) == NULL
-		|| CU_add_test(suite, "allow ipv4 denied case", allow_ipv4_denied) == NULL
-		|| CU_add_test(suite, "allow ipv4 invalid case", allow_ipv4_invalid) == NULL
-		|| CU_add_test(suite, "node access allowed case", node_access_allowed) == NULL
-		|| CU_add_test(suite, "node access denied case (empty netmask)",
-			       node_access_denied_by_empty_netmask) == NULL
-		|| CU_add_test(suite, "node access multiple initiator groups cases",
-			       node_access_multi_initiator_groups_cases) == NULL
-		|| CU_add_test(suite, "allow iscsi name case",
-			       allow_iscsi_name_multi_maps_case) == NULL
-		|| CU_add_test(suite, "chap param test cases", chap_param_test_cases) == NULL
-	) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
+	CU_ADD_TEST(suite, add_lun_test_cases);
+	CU_ADD_TEST(suite, allow_any_allowed);
+	CU_ADD_TEST(suite, allow_ipv6_allowed);
+	CU_ADD_TEST(suite, allow_ipv6_denied);
+	CU_ADD_TEST(suite, allow_ipv6_invalid);
+	CU_ADD_TEST(suite, allow_ipv4_allowed);
+	CU_ADD_TEST(suite, allow_ipv4_denied);
+	CU_ADD_TEST(suite, allow_ipv4_invalid);
+	CU_ADD_TEST(suite, node_access_allowed);
+	CU_ADD_TEST(suite, node_access_denied_by_empty_netmask);
+	CU_ADD_TEST(suite, node_access_multi_initiator_groups_cases);
+	CU_ADD_TEST(suite, allow_iscsi_name_multi_maps_case);
+	CU_ADD_TEST(suite, chap_param_test_cases);
 
 	CU_basic_set_mode(CU_BRM_VERBOSE);
 	CU_basic_run_tests();

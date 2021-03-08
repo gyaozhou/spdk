@@ -5,9 +5,7 @@ rootdir=$(readlink -f $testdir/../../..)
 source $rootdir/test/common/autotest_common.sh
 source $rootdir/test/iscsi_tgt/common.sh
 
-# $1 = "iso" - triggers isolation mode (setting up required environment).
-# $2 = test type posix or vpp. defaults to posix.
-iscsitestinit $1 $2
+iscsitestinit
 
 TRACE_TMP_FOLDER=./tmp-trace
 TRACE_RECORD_OUTPUT=${TRACE_TMP_FOLDER}/record.trace
@@ -38,11 +36,11 @@ fio_py="$rootdir/scripts/fio.py"
 timing_enter start_iscsi_tgt
 
 echo "start iscsi_tgt with trace enabled"
-$ISCSI_APP -m 0xf --num-trace-entries $NUM_TRACE_ENTRIES --tpoint-group-mask 0xf &
+"${ISCSI_APP[@]}" -m 0xf --num-trace-entries $NUM_TRACE_ENTRIES --tpoint-group-mask 0xf &
 iscsi_pid=$!
 echo "Process pid: $iscsi_pid"
 
-trap 'killprocess $iscsi_pid; iscsitestfini $1 $2; exit 1' SIGINT SIGTERM EXIT
+trap 'killprocess $iscsi_pid; iscsitestfini; exit 1' SIGINT SIGTERM EXIT
 
 waitforlisten $iscsi_pid
 
@@ -51,7 +49,7 @@ echo "iscsi_tgt is listening. Running tests..."
 timing_exit start_iscsi_tgt
 
 mkdir -p ${TRACE_TMP_FOLDER}
-./app/trace_record/spdk_trace_record -s iscsi -p ${iscsi_pid} -f ${TRACE_RECORD_OUTPUT} -q 1>${TRACE_RECORD_NOTICE_LOG} &
+./build/bin/spdk_trace_record -s iscsi -p ${iscsi_pid} -f ${TRACE_RECORD_OUTPUT} -q 1> ${TRACE_RECORD_NOTICE_LOG} &
 record_pid=$!
 echo "Trace record pid: $record_pid"
 
@@ -71,9 +69,9 @@ sleep 1
 
 iscsiadm -m discovery -t sendtargets -p $TARGET_IP:$ISCSI_PORT
 iscsiadm -m node --login -p $TARGET_IP:$ISCSI_PORT
-waitforiscsidevices $(( CONNECTION_NUMBER + 1 ))
+waitforiscsidevices $((CONNECTION_NUMBER + 1))
 
-trap 'iscsicleanup; killprocess $iscsi_pid; killprocess $record_pid; delete_tmp_files; iscsitestfini $1 $2; exit 1' SIGINT SIGTERM EXIT
+trap 'iscsicleanup; killprocess $iscsi_pid; killprocess $record_pid; delete_tmp_files; iscsitestfini; exit 1' SIGINT SIGTERM EXIT
 
 echo "Running FIO"
 $fio_py -p iscsi -i 131072 -d 32 -t randrw -r 1
@@ -88,11 +86,11 @@ for i in $(seq 0 $CONNECTION_NUMBER); do
 done
 echo -e $RPCS | $rpc_py
 
-trap 'delete_tmp_files; iscsitestfini $1 $2; exit 1' SIGINT SIGTERM EXIT
+trap 'delete_tmp_files; iscsitestfini; exit 1' SIGINT SIGTERM EXIT
 
 killprocess $iscsi_pid
 killprocess $record_pid
-./app/trace/spdk_trace -f ${TRACE_RECORD_OUTPUT} > ${TRACE_TOOL_LOG}
+./build/bin/spdk_trace -f ${TRACE_RECORD_OUTPUT} > ${TRACE_TOOL_LOG}
 
 #verify trace record and trace tool
 #trace entries str in trace-record, like "Trace Size of lcore (0): 4136"
@@ -112,24 +110,24 @@ len_arr_record_num=${#arr_record_num[@]}
 len_arr_trace_tool_num=${#arr_trace_tool_num[@]}
 
 #lcore num check
-if [  $len_arr_record_num -ne $len_arr_trace_tool_num ]; then
+if [ $len_arr_record_num -ne $len_arr_trace_tool_num ]; then
 	echo "trace record test on iscsi: failure on lcore number check"
 	set -e
 	exit 1
 fi
 #trace entries num check
 for i in $(seq 0 $((len_arr_record_num - 1))); do
-if [  ${arr_record_num[$i]} -le ${NUM_TRACE_ENTRIES} ]; then
-	echo "trace record test on iscsi: failure on inefficient entries number check"
-	set -e
-	exit 1
-fi
-if [  ${arr_record_num[$i]} -ne ${arr_trace_tool_num[$i]} ]; then
-	echo "trace record test on iscsi: failure on entries number check"
-	set -e
-	exit 1
-fi
+	if [ ${arr_record_num[$i]} -le ${NUM_TRACE_ENTRIES} ]; then
+		echo "trace record test on iscsi: failure on inefficient entries number check"
+		set -e
+		exit 1
+	fi
+	if [ ${arr_record_num[$i]} -ne ${arr_trace_tool_num[$i]} ]; then
+		echo "trace record test on iscsi: failure on entries number check"
+		set -e
+		exit 1
+	fi
 done
 
 trap - SIGINT SIGTERM EXIT
-iscsitestfini $1 $2
+iscsitestfini

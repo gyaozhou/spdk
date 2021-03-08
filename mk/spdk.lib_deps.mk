@@ -44,44 +44,57 @@ DEPDIRS-env_ocf :=
 DEPDIRS-log :=
 DEPDIRS-rte_vhost :=
 
+DEPDIRS-env_dpdk := log
+
 DEPDIRS-ioat := log
-DEPDIRS-sock := log
+DEPDIRS-idxd := log util
+DEPDIRS-sock := log $(JSON_LIBS)
 DEPDIRS-util := log
 DEPDIRS-vmd := log
+ifeq ($(CONFIG_VFIO_USER),y)
+DEPDIRS-vfio_user := log
+endif
 
 DEPDIRS-conf := log util
 DEPDIRS-json := log util
-DEPDIRS-nvme := log sock util
+DEPDIRS-rdma := log util
 DEPDIRS-reduce := log util
 DEPDIRS-thread := log util
 
+DEPDIRS-nvme := log sock util
+ifeq ($(CONFIG_RDMA),y)
+DEPDIRS-nvme += rdma
+endif
+ifeq ($(CONFIG_VFIO_USER),y)
+DEPDIRS-nvme += vfio_user
+endif
+
 DEPDIRS-blob := log util thread
-DEPDIRS-copy := thread
+DEPDIRS-accel := log util thread json
 DEPDIRS-jsonrpc := log util json
 DEPDIRS-virtio := log util json thread
 
 DEPDIRS-lvol := log util blob
 DEPDIRS-rpc := log util json jsonrpc
 
-DEPDIRS-log_rpc := log $(JSON_LIBS)
 DEPDIRS-net := log util $(JSON_LIBS)
 DEPDIRS-notify := log util $(JSON_LIBS)
 DEPDIRS-trace := log util $(JSON_LIBS)
 
-DEPDIRS-bdev := log util conf thread $(JSON_LIBS) notify trace
-DEPDIRS-blobfs := log conf thread blob trace
-DEPDIRS-event := log util conf thread $(JSON_LIBS) trace
+DEPDIRS-bdev := log util thread $(JSON_LIBS) notify trace
+DEPDIRS-blobfs := log thread blob trace
+DEPDIRS-event := log util thread $(JSON_LIBS) trace
 
-DEPDIRS-ftl := log util nvme thread trace bdev
+DEPDIRS-ftl := log util thread trace bdev
 DEPDIRS-nbd := log util thread $(JSON_LIBS) bdev
-DEPDIRS-nvmf := log sock util nvme thread $(JSON_LIBS) trace bdev
+DEPDIRS-nvmf := accel log sock util nvme thread $(JSON_LIBS) trace bdev
+ifeq ($(CONFIG_RDMA),y)
+DEPDIRS-nvmf += rdma
+endif
 DEPDIRS-scsi := log util thread $(JSON_LIBS) trace bdev
 
-DEPDIRS-iscsi := log sock util conf thread $(JSON_LIBS) trace event scsi
-DEPDIRS-vhost = log util conf thread $(JSON_LIBS) bdev event scsi
-ifeq ($(CONFIG_VHOST_INTERNAL_LIB),y)
-DEPDIRS-vhost += rte_vhost
-endif
+DEPDIRS-iscsi := log sock util conf thread $(JSON_LIBS) trace scsi
+DEPDIRS-vhost = log util thread $(JSON_LIBS) bdev scsi
 
 # ------------------------------------------------------------------------
 # Start module/ directory - This section extends the organizational pattern from
@@ -90,72 +103,72 @@ endif
 # determine the unique dependencies of a given module. It is also grouped by directory.
 
 BDEV_DEPS = log util $(JSON_LIBS) bdev
-BDEV_DEPS_CONF = $(BDEV_DEPS) conf
 BDEV_DEPS_THREAD = $(BDEV_DEPS) thread
-BDEV_DEPS_CONF_THREAD = $(BDEV_DEPS) conf thread
 
 # module/blob
 DEPDIRS-blob_bdev := log thread bdev
 
 # module/blobfs
 DEPDIRS-blobfs_bdev := $(BDEV_DEPS_THREAD) blob_bdev blobfs
+ifeq ($(CONFIG_FUSE),y)
+DEPDIRS-blobfs_bdev += event
+endif
 
-# module/copy
-DEPDIRS-copy_ioat := log ioat conf thread $(JSON_LIBS) copy
+# module/accel
+DEPDIRS-accel_ioat := log ioat thread jsonrpc rpc accel
+DEPDIRS-accel_idxd := log idxd thread $(JSON_LIBS) accel
 
 # module/env_dpdk
 DEPDIRS-env_dpdk_rpc := log $(JSON_LIBS)
 
 # module/sock
-DEPDIRS-sock_posix := log sock
-DEPDIRS-sock_vpp := log sock util thread
+DEPDIRS-sock_posix := log sock util
+DEPDIRS-sock_uring := log sock util
 
 # module/bdev
-DEPDIRS-bdev_gpt := bdev conf json log thread util
+DEPDIRS-bdev_gpt := bdev json log thread util
 
+DEPDIRS-bdev_error := $(BDEV_DEPS)
 DEPDIRS-bdev_lvol := $(BDEV_DEPS) lvol blob blob_bdev
+DEPDIRS-bdev_malloc := $(BDEV_DEPS) accel
 DEPDIRS-bdev_rpc := $(BDEV_DEPS)
+DEPDIRS-bdev_split := $(BDEV_DEPS)
 
-DEPDIRS-bdev_error := $(BDEV_DEPS_CONF)
-DEPDIRS-bdev_malloc := $(BDEV_DEPS_CONF) copy
-DEPDIRS-bdev_split := $(BDEV_DEPS_CONF)
-
+DEPDIRS-bdev_aio := $(BDEV_DEPS_THREAD)
 DEPDIRS-bdev_compress := $(BDEV_DEPS_THREAD) reduce
+DEPDIRS-bdev_crypto := $(BDEV_DEPS_THREAD)
 DEPDIRS-bdev_delay := $(BDEV_DEPS_THREAD)
+DEPDIRS-bdev_iscsi := $(BDEV_DEPS_THREAD)
+DEPDIRS-bdev_null := $(BDEV_DEPS_THREAD)
+DEPDIRS-bdev_nvme = $(BDEV_DEPS_THREAD) nvme
+DEPDIRS-bdev_ocf := $(BDEV_DEPS_THREAD)
+DEPDIRS-bdev_passthru := $(BDEV_DEPS_THREAD)
+DEPDIRS-bdev_pmem := $(BDEV_DEPS_THREAD)
+DEPDIRS-bdev_raid := $(BDEV_DEPS_THREAD)
+DEPDIRS-bdev_rbd := $(BDEV_DEPS_THREAD)
+DEPDIRS-bdev_uring := $(BDEV_DEPS_THREAD)
+DEPDIRS-bdev_virtio := $(BDEV_DEPS_THREAD) virtio
 DEPDIRS-bdev_zone_block := $(BDEV_DEPS_THREAD)
-
-DEPDIRS-bdev_aio := $(BDEV_DEPS_CONF_THREAD)
-DEPDIRS-bdev_crypto := $(BDEV_DEPS_CONF_THREAD)
-DEPDIRS-bdev_iscsi := $(BDEV_DEPS_CONF_THREAD)
-DEPDIRS-bdev_null := $(BDEV_DEPS_CONF_THREAD)
-DEPDIRS-bdev_nvme = $(BDEV_DEPS_CONF_THREAD) nvme
 ifeq ($(OS),Linux)
-DEPDIRS-bdev_nvme += ftl
+DEPDIRS-bdev_ftl := $(BDEV_DEPS_THREAD) ftl
 endif
-DEPDIRS-bdev_ocf := $(BDEV_DEPS_CONF_THREAD)
-DEPDIRS-bdev_passthru := $(BDEV_DEPS_CONF_THREAD)
-DEPDIRS-bdev_pmem := $(BDEV_DEPS_CONF_THREAD)
-DEPDIRS-bdev_raid := $(BDEV_DEPS_CONF_THREAD)
-DEPDIRS-bdev_rbd := $(BDEV_DEPS_CONF_THREAD)
-DEPDIRS-bdev_virtio := $(BDEV_DEPS_CONF_THREAD) virtio
 
 # module/event
-# module/event/app
-DEPDIRS-app_rpc := log util thread event $(JSON_LIBS)
 
 # module/event/subsystems
 # These depdirs include subsystem interdependencies which
 # are not related to symbols, but are defined directly in
 # the SPDK event subsystem code.
-DEPDIRS-event_copy := copy event
-DEPDIRS-event_net := sock net event
-DEPDIRS-event_vmd := vmd conf $(JSON_LIBS) event log thread
+DEPDIRS-event_accel := event accel
+DEPDIRS-event_net := event net
+DEPDIRS-event_vmd := event vmd $(JSON_LIBS) log thread
 
-DEPDIRS-event_bdev := bdev event event_copy event_vmd
+DEPDIRS-event_bdev := event bdev event_accel event_vmd event_sock
 
 DEPDIRS-event_nbd := event nbd event_bdev
-DEPDIRS-event_nvmf := $(BDEV_DEPS_CONF_THREAD) event nvme nvmf event_bdev
+DEPDIRS-event_nvmf := event nvmf event_bdev event_sock $(BDEV_DEPS_THREAD)
 DEPDIRS-event_scsi := event scsi event_bdev
 
-DEPDIRS-event_iscsi := event iscsi event_scsi
+DEPDIRS-event_iscsi := event iscsi event_scsi event_sock
 DEPDIRS-event_vhost := event vhost event_scsi
+DEPDIRS-event_sock := event sock

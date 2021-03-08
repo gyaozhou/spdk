@@ -1,8 +1,8 @@
 /*-
  *   BSD LICENSE
  *
- *   Copyright (c) Intel Corporation.
- *   All rights reserved.
+ *   Copyright (c) Intel Corporation. All rights reserved.
+ *   Copyright (c) 2020 Mellanox Technologies LTD. All rights reserved.
  *
  *   Redistribution and use in source and binary forms, with or without
  *   modification, are permitted provided that the following conditions
@@ -41,26 +41,32 @@
 #include "spdk/stdinc.h"
 #include "spdk/sock.h"
 #include "spdk/queue.h"
+#include "spdk/likely.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 #define MAX_EVENTS_PER_POLL 32
+#define DEFAULT_SOCK_PRIORITY 0
+#define MIN_SOCK_PIPE_SIZE 1024
+#define MIN_SO_RCVBUF_SIZE (2 * 1024 * 1024)
+#define MIN_SO_SNDBUF_SIZE (2 * 1024 * 1024)
+#define IOV_BATCH_SIZE 64
 
 struct spdk_sock {
 	struct spdk_net_impl		*net_impl;
-	int				cb_cnt;
-	spdk_sock_cb			cb_fn;
-	void				*cb_arg;
+	struct spdk_sock_opts		opts;
 	struct spdk_sock_group_impl	*group_impl;
 	TAILQ_ENTRY(spdk_sock)		link;
 
-	int				max_iovcnt;
 	TAILQ_HEAD(, spdk_sock_request)	queued_reqs;
 	TAILQ_HEAD(, spdk_sock_request)	pending_reqs;
 	int				queued_iovcnt;
-
+	int				cb_cnt;
+	spdk_sock_cb			cb_fn;
+	void				*cb_arg;
+	int				placement_id;
 	struct {
 		uint8_t		closed		: 1;
 		uint8_t		reserved	: 7;
@@ -80,11 +86,12 @@ struct spdk_sock_group_impl {
 
 struct spdk_net_impl {
 	const char *name;
+	int priority;
 
 	int (*getaddr)(struct spdk_sock *sock, char *saddr, int slen, uint16_t *sport, char *caddr,
 		       int clen, uint16_t *cport);
-	struct spdk_sock *(*connect)(const char *ip, int port);
-	struct spdk_sock *(*listen)(const char *ip, int port);
+	struct spdk_sock *(*connect)(const char *ip, int port, struct spdk_sock_opts *opts);
+	struct spdk_sock *(*listen)(const char *ip, int port, struct spdk_sock_opts *opts);
 	struct spdk_sock *(*accept)(struct spdk_sock *sock);
 	int (*close)(struct spdk_sock *sock);
 	ssize_t (*recv)(struct spdk_sock *sock, void *buf, size_t len);
@@ -92,11 +99,11 @@ struct spdk_net_impl {
 	ssize_t (*writev)(struct spdk_sock *sock, struct iovec *iov, int iovcnt);
 
 	void (*writev_async)(struct spdk_sock *sock, struct spdk_sock_request *req);
+	int (*flush)(struct spdk_sock *sock);
 
 	int (*set_recvlowat)(struct spdk_sock *sock, int nbytes);
 	int (*set_recvbuf)(struct spdk_sock *sock, int sz);
 	int (*set_sendbuf)(struct spdk_sock *sock, int sz);
-	int (*set_priority)(struct spdk_sock *sock, int priority);
 
 	bool (*is_ipv6)(struct spdk_sock *sock);
 	bool (*is_ipv4)(struct spdk_sock *sock);
@@ -110,15 +117,18 @@ struct spdk_net_impl {
 			       struct spdk_sock **socks);
 	int (*group_impl_close)(struct spdk_sock_group_impl *group);
 
+	int (*get_opts)(struct spdk_sock_impl_opts *opts, size_t *len);
+	int (*set_opts)(const struct spdk_sock_impl_opts *opts, size_t len);
+
 	STAILQ_ENTRY(spdk_net_impl) link;
 };
 
-void spdk_net_impl_register(struct spdk_net_impl *impl);
+void spdk_net_impl_register(struct spdk_net_impl *impl, int priority);
 
-#define SPDK_NET_IMPL_REGISTER(name, impl) \
+#define SPDK_NET_IMPL_REGISTER(name, impl, priority) \
 static void __attribute__((constructor)) net_impl_register_##name(void) \
 { \
-	spdk_net_impl_register(impl); \
+	spdk_net_impl_register(impl, priority); \
 }
 
 static inline void
@@ -144,6 +154,8 @@ spdk_sock_request_put(struct spdk_sock *sock, struct spdk_sock_request *req, int
 	int rc = 0;
 
 	TAILQ_REMOVE(&sock->pending_reqs, req, internal.link);
+
+	req->internal.offset = 0;
 
 	closed = sock->flags.closed;
 	sock->cb_cnt++;
@@ -203,6 +215,60 @@ spdk_sock_abort_requests(struct spdk_sock *sock)
 	}
 
 	return rc;
+}
+
+static inline int
+spdk_sock_prep_reqs(struct spdk_sock *_sock, struct iovec *iovs, int index,
+		    struct spdk_sock_request **last_req)
+{
+	int iovcnt, i;
+	struct spdk_sock_request *req;
+	unsigned int offset;
+
+	/* Gather an iov */
+	iovcnt = index;
+	if (spdk_unlikely(iovcnt >= IOV_BATCH_SIZE)) {
+		goto end;
+	}
+
+	if (last_req != NULL && *last_req != NULL) {
+		req = TAILQ_NEXT(*last_req, internal.link);
+	} else {
+		req = TAILQ_FIRST(&_sock->queued_reqs);
+	}
+
+	while (req) {
+		offset = req->internal.offset;
+
+		for (i = 0; i < req->iovcnt; i++) {
+			/* Consume any offset first */
+			if (offset >= SPDK_SOCK_REQUEST_IOV(req, i)->iov_len) {
+				offset -= SPDK_SOCK_REQUEST_IOV(req, i)->iov_len;
+				continue;
+			}
+
+			iovs[iovcnt].iov_base = SPDK_SOCK_REQUEST_IOV(req, i)->iov_base + offset;
+			iovs[iovcnt].iov_len = SPDK_SOCK_REQUEST_IOV(req, i)->iov_len - offset;
+			iovcnt++;
+
+			offset = 0;
+
+			if (iovcnt >= IOV_BATCH_SIZE) {
+				break;
+			}
+		}
+		if (iovcnt >= IOV_BATCH_SIZE) {
+			break;
+		}
+
+		if (last_req != NULL) {
+			*last_req = req;
+		}
+		req = TAILQ_NEXT(req, internal.link);
+	}
+
+end:
+	return iovcnt;
 }
 
 #ifdef __cplusplus

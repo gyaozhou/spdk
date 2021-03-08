@@ -36,15 +36,15 @@
 #include "spdk/env.h"
 #include "spdk_cunit.h"
 #include "spdk/nvmf.h"
-#include "spdk_internal/event.h"
 #include "spdk/endian.h"
 #include "spdk/trace.h"
-#include "spdk_internal/log.h"
+#include "spdk/log.h"
 
 #include "ut_multithread.c"
 
 #include "transport.h"
 #include "nvmf_internal.h"
+
 #include "nvmf_fc.h"
 
 #include "json/json_util.c"
@@ -105,12 +105,12 @@ DEFINE_STUB_V(spdk_trace_register_description,
 	       const char *arg1_name));
 DEFINE_STUB_V(spdk_trace_add_register_fn, (struct spdk_trace_register_fn *reg_fn));
 DEFINE_STUB(spdk_bdev_get_name, const char *, (const struct spdk_bdev *bdev), "fc_ut_test");
-DEFINE_STUB_V(spdk_nvmf_ctrlr_destruct, (struct spdk_nvmf_ctrlr *ctrlr));
-DEFINE_STUB_V(spdk_nvmf_qpair_free_aer, (struct spdk_nvmf_qpair *qpair));
+DEFINE_STUB_V(nvmf_ctrlr_destruct, (struct spdk_nvmf_ctrlr *ctrlr));
+DEFINE_STUB_V(nvmf_qpair_free_aer, (struct spdk_nvmf_qpair *qpair));
 DEFINE_STUB(spdk_bdev_get_io_channel, struct spdk_io_channel *, (struct spdk_bdev_desc *desc),
 	    NULL);
 DEFINE_STUB_V(spdk_nvmf_request_exec, (struct spdk_nvmf_request *req));
-DEFINE_STUB_V(spdk_nvmf_ctrlr_ns_changed, (struct spdk_nvmf_ctrlr *ctrlr, uint32_t nsid));
+DEFINE_STUB_V(nvmf_ctrlr_ns_changed, (struct spdk_nvmf_ctrlr *ctrlr, uint32_t nsid));
 DEFINE_STUB(spdk_bdev_open, int, (struct spdk_bdev *bdev, bool write,
 				  spdk_bdev_remove_cb_t remove_cb,
 				  void *remove_ctx, struct spdk_bdev_desc **desc), 0);
@@ -122,7 +122,28 @@ DEFINE_STUB_V(spdk_bdev_module_release_bdev, (struct spdk_bdev *bdev));
 DEFINE_STUB(spdk_bdev_get_block_size, uint32_t, (const struct spdk_bdev *bdev), 512);
 DEFINE_STUB(spdk_bdev_get_num_blocks, uint64_t, (const struct spdk_bdev *bdev), 1024);
 
-DEFINE_STUB(spdk_nvmf_ctrlr_async_event_ns_notice, int, (struct spdk_nvmf_ctrlr *ctrlr), 0);
+DEFINE_STUB(nvmf_ctrlr_async_event_ns_notice, int, (struct spdk_nvmf_ctrlr *ctrlr), 0);
+DEFINE_STUB(nvmf_ctrlr_async_event_ana_change_notice, int,
+	    (struct spdk_nvmf_ctrlr *ctrlr), 0);
+DEFINE_STUB_V(spdk_nvme_trid_populate_transport, (struct spdk_nvme_transport_id *trid,
+		enum spdk_nvme_transport_type trtype));
+DEFINE_STUB_V(spdk_nvmf_ctrlr_data_init, (struct spdk_nvmf_transport_opts *opts,
+		struct spdk_nvmf_ctrlr_data *cdata));
+DEFINE_STUB(spdk_nvmf_request_complete, int, (struct spdk_nvmf_request *req),
+	    -ENOSPC);
+
+DEFINE_STUB_V(nvmf_update_discovery_log,
+	      (struct spdk_nvmf_tgt *tgt, const char *hostnqn));
+
+DEFINE_STUB(rte_hash_create, struct rte_hash *, (const struct rte_hash_parameters *params),
+	    (void *)1);
+DEFINE_STUB(rte_hash_del_key, int32_t, (const struct rte_hash *h, const void *key), 0);
+DEFINE_STUB(rte_hash_lookup_data, int, (const struct rte_hash *h, const void *key, void **data),
+	    -ENOENT);
+DEFINE_STUB(rte_hash_add_key_data, int, (const struct rte_hash *h, const void *key, void *data), 0);
+DEFINE_STUB_V(rte_hash_free, (struct rte_hash *h));
+DEFINE_STUB(nvmf_fc_lld_port_add, int, (struct spdk_nvmf_fc_port *fc_port), 0);
+DEFINE_STUB(nvmf_fc_lld_port_remove, int, (struct spdk_nvmf_fc_port *fc_port), 0);
 
 const char *
 spdk_nvme_transport_id_trtype_str(enum spdk_nvme_transport_type trtype)
@@ -174,7 +195,7 @@ nvmf_fc_lld_init(void)
 static bool g_lld_fini_called = false;
 
 void
-nvmf_fc_lld_fini(void)
+nvmf_fc_lld_fini(spdk_nvmf_transport_destroy_done_cb cb_fn, void *ctx)
 {
 	g_lld_fini_called = true;
 }
@@ -214,8 +235,6 @@ DEFINE_STUB(nvmf_fc_assign_conn_to_hwqp, bool, (struct spdk_nvmf_fc_hwqp *hwqp,
 DEFINE_STUB(nvmf_fc_get_hwqp_from_conn_id, struct spdk_nvmf_fc_hwqp *,
 	    (struct spdk_nvmf_fc_hwqp *queues,
 	     uint32_t num_queues, uint64_t conn_id), NULL);
-DEFINE_STUB_V(nvmf_fc_release_conn, (struct spdk_nvmf_fc_hwqp *hwqp, uint64_t conn_id,
-				     uint32_t sq_size));
 DEFINE_STUB_V(nvmf_fc_dump_all_queues, (struct spdk_nvmf_fc_hwqp *ls_queue,
 					struct spdk_nvmf_fc_hwqp *io_queues,
 					uint32_t num_io_queues,
@@ -276,14 +295,14 @@ create_transport_test(void)
 	g_nvmf_tgt = spdk_nvmf_tgt_create(&tgt_opts);
 	SPDK_CU_ASSERT_FATAL(g_nvmf_tgt != NULL);
 
-	ops = spdk_nvmf_get_transport_ops((enum spdk_nvme_transport_type) SPDK_NVMF_TRTYPE_FC);
+	ops = nvmf_get_transport_ops(SPDK_NVME_TRANSPORT_NAME_FC);
 	SPDK_CU_ASSERT_FATAL(ops != NULL);
 
 	ops->opts_init(&opts);
 
 	g_lld_init_called = false;
-	g_nvmf_tprt = spdk_nvmf_transport_create((enum spdk_nvme_transport_type) SPDK_NVMF_TRTYPE_FC,
-			&opts);
+	opts.opts_size = sizeof(opts);
+	g_nvmf_tprt = spdk_nvmf_transport_create("FC", &opts);
 	SPDK_CU_ASSERT_FATAL(g_nvmf_tprt != NULL);
 
 	CU_ASSERT(g_lld_init_called == true);
@@ -307,16 +326,14 @@ create_transport_test(void)
 
 	/* create transport with bad args/options */
 #ifndef SPDK_CONFIG_RDMA
-	CU_ASSERT(spdk_nvmf_transport_create(SPDK_NVMF_TRTYPE_RDMA, &opts) == NULL);
+	CU_ASSERT(spdk_nvmf_transport_create("RDMA", &opts) == NULL);
 #endif
-	CU_ASSERT(spdk_nvmf_transport_create(998, &opts) == NULL);
+	CU_ASSERT(spdk_nvmf_transport_create("Bogus Transport", &opts) == NULL);
 	opts.max_io_size = 1024 ^ 3;
-	CU_ASSERT(spdk_nvmf_transport_create((enum spdk_nvme_transport_type) SPDK_NVMF_TRTYPE_FC,
-					     &opts) == NULL);
+	CU_ASSERT(spdk_nvmf_transport_create("FC", &opts) == NULL);
 	opts.max_io_size = 999;
 	opts.io_unit_size = 1024;
-	CU_ASSERT(spdk_nvmf_transport_create((enum spdk_nvme_transport_type) SPDK_NVMF_TRTYPE_FC,
-					     &opts) == NULL);
+	CU_ASSERT(spdk_nvmf_transport_create("FC", &opts) == NULL);
 }
 
 static void
@@ -343,11 +360,11 @@ create_fc_port_test(void)
 	init_args.io_queues = (void *)lld_q;
 
 	set_thread(0);
-	err = spdk_nvmf_fc_master_enqueue_event(SPDK_FC_HW_PORT_INIT, (void *)&init_args, port_init_cb);
+	err = nvmf_fc_main_enqueue_event(SPDK_FC_HW_PORT_INIT, (void *)&init_args, port_init_cb);
 	CU_ASSERT(err == 0);
 	poll_thread(0);
 
-	fc_port = spdk_nvmf_fc_port_lookup(g_fc_port_handle);
+	fc_port = nvmf_fc_port_lookup(g_fc_port_handle);
 	CU_ASSERT(fc_port != NULL);
 }
 
@@ -360,12 +377,12 @@ online_fc_port_test(void)
 
 	SPDK_CU_ASSERT_FATAL(g_nvmf_tprt != NULL);
 
-	fc_port = spdk_nvmf_fc_port_lookup(g_fc_port_handle);
+	fc_port = nvmf_fc_port_lookup(g_fc_port_handle);
 	SPDK_CU_ASSERT_FATAL(fc_port != NULL);
 
 	set_thread(0);
 	args.port_handle = g_fc_port_handle;
-	err = spdk_nvmf_fc_master_enqueue_event(SPDK_FC_HW_PORT_ONLINE, (void *)&args, port_init_cb);
+	err = nvmf_fc_main_enqueue_event(SPDK_FC_HW_PORT_ONLINE, (void *)&args, port_init_cb);
 	CU_ASSERT(err == 0);
 	poll_threads();
 	set_thread(0);
@@ -405,7 +422,7 @@ poll_group_poll_test(void)
 	SPDK_CU_ASSERT_FATAL(g_nvmf_tprt != NULL);
 
 	set_thread(0);
-	fc_port = spdk_nvmf_fc_port_lookup(g_fc_port_handle);
+	fc_port = nvmf_fc_port_lookup(g_fc_port_handle);
 	SPDK_CU_ASSERT_FATAL(fc_port != NULL);
 
 	for (i = 0; i < fc_port->num_io_queues; i++) {
@@ -431,11 +448,11 @@ remove_hwqps_from_poll_groups_test(void)
 
 	SPDK_CU_ASSERT_FATAL(g_nvmf_tprt != NULL);
 
-	fc_port = spdk_nvmf_fc_port_lookup(g_fc_port_handle);
+	fc_port = nvmf_fc_port_lookup(g_fc_port_handle);
 	SPDK_CU_ASSERT_FATAL(fc_port != NULL);
 
 	for (i = 0; i < fc_port->num_io_queues; i++) {
-		spdk_nvmf_fc_poll_group_remove_hwqp(&fc_port->io_queues[i]);
+		nvmf_fc_poll_group_remove_hwqp(&fc_port->io_queues[i], NULL, NULL);
 		poll_threads();
 		CU_ASSERT(fc_port->io_queues[i].fgroup == 0);
 	}
@@ -446,15 +463,15 @@ destroy_transport_test(void)
 {
 	unsigned i;
 
-	set_thread(0);
 	SPDK_CU_ASSERT_FATAL(g_nvmf_tprt != NULL);
 
 	for (i = 0; i < MAX_FC_UT_POLL_THREADS; i++) {
 		set_thread(i);
-		spdk_nvmf_poll_group_destroy(g_poll_groups[i]);
+		spdk_nvmf_poll_group_destroy(g_poll_groups[i], NULL, NULL);
 		poll_thread(0);
 	}
 
+	set_thread(0);
 	SPDK_CU_ASSERT_FATAL(g_nvmf_tgt != NULL);
 	g_lld_fini_called = false;
 	spdk_nvmf_tgt_destroy(g_nvmf_tgt, NULL, NULL);
@@ -480,57 +497,18 @@ int main(int argc, char **argv)
 	unsigned int num_failures = 0;
 	CU_pSuite suite = NULL;
 
-	if (CU_initialize_registry() != CUE_SUCCESS) {
-		return CU_get_error();
-	}
+	CU_set_error_action(CUEA_ABORT);
+	CU_initialize_registry();
 
 	suite = CU_add_suite("NVMf-FC", nvmf_fc_tests_init, nvmf_fc_tests_fini);
-	if (suite == NULL) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
 
-	if (CU_add_test(suite, "Create Target & FC Transport",
-			create_transport_test) == NULL) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
-
-	if (CU_add_test(suite, "Create Poll Groups",
-			create_poll_groups_test) == NULL) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
-
-	if (CU_add_test(suite, "Create FC Port",
-			create_fc_port_test) == NULL) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
-
-
-	if (CU_add_test(suite, "Online FC Port",
-			online_fc_port_test) == NULL) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
-
-	if (CU_add_test(suite, "PG poll", poll_group_poll_test) == NULL) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
-
-	if (CU_add_test(suite, "Remove HWQP's from PG's",
-			remove_hwqps_from_poll_groups_test) == NULL) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
-
-	if (CU_add_test(suite, "Destroy Transport & Target",
-			destroy_transport_test) == NULL) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
+	CU_ADD_TEST(suite, create_transport_test);
+	CU_ADD_TEST(suite, create_poll_groups_test);
+	CU_ADD_TEST(suite, create_fc_port_test);
+	CU_ADD_TEST(suite, online_fc_port_test);
+	CU_ADD_TEST(suite, poll_group_poll_test);
+	CU_ADD_TEST(suite, remove_hwqps_from_poll_groups_test);
+	CU_ADD_TEST(suite, destroy_transport_test);
 
 	CU_basic_set_mode(CU_BRM_VERBOSE);
 	CU_basic_run_tests();

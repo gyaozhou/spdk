@@ -39,6 +39,8 @@ struct rpc_construct_crypto {
 	char *name;
 	char *crypto_pmd;
 	char *key;
+	char *cipher;
+	char *key2;
 };
 
 /* Free the allocated memory resource after the RPC handling. */
@@ -49,6 +51,8 @@ free_rpc_construct_crypto(struct rpc_construct_crypto *r)
 	free(r->name);
 	free(r->crypto_pmd);
 	free(r->key);
+	free(r->cipher);
+	free(r->key2);
 }
 
 /* Structure to decode the input parameters for this RPC method. */
@@ -57,14 +61,16 @@ static const struct spdk_json_object_decoder rpc_construct_crypto_decoders[] = {
 	{"name", offsetof(struct rpc_construct_crypto, name), spdk_json_decode_string},
 	{"crypto_pmd", offsetof(struct rpc_construct_crypto, crypto_pmd), spdk_json_decode_string},
 	{"key", offsetof(struct rpc_construct_crypto, key), spdk_json_decode_string},
+	{"cipher", offsetof(struct rpc_construct_crypto, cipher), spdk_json_decode_string, true},
+	{"key2", offsetof(struct rpc_construct_crypto, key2), spdk_json_decode_string, true},
 };
 
 /* Decode the parameters for this RPC method and properly construct the crypto
  * device. Error status returned in the failed cases.
  */
 static void
-spdk_rpc_bdev_crypto_create(struct spdk_jsonrpc_request *request,
-			    const struct spdk_json_val *params)
+rpc_bdev_crypto_create(struct spdk_jsonrpc_request *request,
+		       const struct spdk_json_val *params)
 {
 	struct rpc_construct_crypto req = {NULL};
 	struct spdk_json_write_ctx *w;
@@ -73,14 +79,47 @@ spdk_rpc_bdev_crypto_create(struct spdk_jsonrpc_request *request,
 	if (spdk_json_decode_object(params, rpc_construct_crypto_decoders,
 				    SPDK_COUNTOF(rpc_construct_crypto_decoders),
 				    &req)) {
-		SPDK_DEBUGLOG(SPDK_LOG_CRYPTO, "spdk_json_decode_object failed\n");
-		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
-						 "spdk_json_decode_object failed");
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						 "Invalid parameters");
+		goto cleanup;
+	}
+
+	if (req.cipher == NULL) {
+		req.cipher = strdup(AES_CBC);
+		if (req.cipher == NULL) {
+			spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
+							 "Unable to allocate memory for req.cipher");
+			goto cleanup;
+		}
+	}
+
+	if (strcmp(req.cipher, AES_XTS) != 0 && strcmp(req.cipher, AES_CBC) != 0) {
+		spdk_jsonrpc_send_error_response_fmt(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						     "Invalid cipher: %s",
+						     req.cipher);
+		goto cleanup;
+	}
+
+	if (strcmp(req.crypto_pmd, AESNI_MB) == 0 && strcmp(req.cipher, AES_XTS) == 0) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						 "Invalid cipher. AES_XTS is only available on QAT.");
+		goto cleanup;
+	}
+
+	if (strcmp(req.cipher, AES_XTS) == 0 && req.key2 == NULL) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						 "Invalid key. A 2nd key is needed for AES_XTS.");
+		goto cleanup;
+	}
+
+	if (strcmp(req.cipher, AES_CBC) == 0 && req.key2 != NULL) {
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						 "Invalid key. A 2nd key is needed only for AES_XTS.");
 		goto cleanup;
 	}
 
 	rc = create_crypto_disk(req.base_bdev_name, req.name,
-				req.crypto_pmd, req.key);
+				req.crypto_pmd, req.key, req.cipher, req.key2);
 	if (rc) {
 		spdk_jsonrpc_send_error_response(request, rc, spdk_strerror(-rc));
 		goto cleanup;
@@ -95,7 +134,7 @@ spdk_rpc_bdev_crypto_create(struct spdk_jsonrpc_request *request,
 cleanup:
 	free_rpc_construct_crypto(&req);
 }
-SPDK_RPC_REGISTER("bdev_crypto_create", spdk_rpc_bdev_crypto_create, SPDK_RPC_RUNTIME)
+SPDK_RPC_REGISTER("bdev_crypto_create", rpc_bdev_crypto_create, SPDK_RPC_RUNTIME)
 SPDK_RPC_REGISTER_ALIAS_DEPRECATED(bdev_crypto_create, construct_crypto_bdev)
 
 struct rpc_delete_crypto {
@@ -113,18 +152,16 @@ static const struct spdk_json_object_decoder rpc_delete_crypto_decoders[] = {
 };
 
 static void
-_spdk_rpc_bdev_crypto_delete_cb(void *cb_arg, int bdeverrno)
+rpc_bdev_crypto_delete_cb(void *cb_arg, int bdeverrno)
 {
 	struct spdk_jsonrpc_request *request = cb_arg;
-	struct spdk_json_write_ctx *w = spdk_jsonrpc_begin_result(request);
 
-	spdk_json_write_bool(w, bdeverrno == 0);
-	spdk_jsonrpc_end_result(request, w);
+	spdk_jsonrpc_send_bool_response(request, bdeverrno == 0);
 }
 
 static void
-spdk_rpc_bdev_crypto_delete(struct spdk_jsonrpc_request *request,
-			    const struct spdk_json_val *params)
+rpc_bdev_crypto_delete(struct spdk_jsonrpc_request *request,
+		       const struct spdk_json_val *params)
 {
 	struct rpc_delete_crypto req = {NULL};
 	struct spdk_bdev *bdev;
@@ -132,8 +169,8 @@ spdk_rpc_bdev_crypto_delete(struct spdk_jsonrpc_request *request,
 	if (spdk_json_decode_object(params, rpc_delete_crypto_decoders,
 				    SPDK_COUNTOF(rpc_delete_crypto_decoders),
 				    &req)) {
-		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
-						 "spdk_json_decode_object failed");
+		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
+						 "Invalid parameters");
 		goto cleanup;
 	}
 
@@ -143,7 +180,7 @@ spdk_rpc_bdev_crypto_delete(struct spdk_jsonrpc_request *request,
 		goto cleanup;
 	}
 
-	delete_crypto_disk(bdev, _spdk_rpc_bdev_crypto_delete_cb, request);
+	delete_crypto_disk(bdev, rpc_bdev_crypto_delete_cb, request);
 
 	free_rpc_delete_crypto(&req);
 
@@ -152,5 +189,5 @@ spdk_rpc_bdev_crypto_delete(struct spdk_jsonrpc_request *request,
 cleanup:
 	free_rpc_delete_crypto(&req);
 }
-SPDK_RPC_REGISTER("bdev_crypto_delete", spdk_rpc_bdev_crypto_delete, SPDK_RPC_RUNTIME)
+SPDK_RPC_REGISTER("bdev_crypto_delete", rpc_bdev_crypto_delete, SPDK_RPC_RUNTIME)
 SPDK_RPC_REGISTER_ALIAS_DEPRECATED(bdev_crypto_delete, delete_crypto_bdev)

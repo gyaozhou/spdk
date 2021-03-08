@@ -14,7 +14,7 @@ nvmftestinit
 
 timing_enter start_nvmf_tgt
 
-$NVMF_APP -m 0xF &
+"${NVMF_APP[@]}" -m 0xF &
 nvmfpid=$!
 
 trap 'process_shm --id $NVMF_APP_SHM_ID; nvmftestfini; exit 1' SIGINT SIGTERM EXIT
@@ -34,13 +34,13 @@ $rpc_py nvmf_subsystem_add_listener nqn.2016-06.io.spdk:cnode1 -t $TEST_TRANSPOR
 
 $rpc_py nvmf_get_subsystems
 
-$rootdir/examples/nvme/identify/identify -r "\
+$SPDK_EXAMPLE_DIR/identify -r "\
         trtype:$TEST_TRANSPORT \
         adrfam:IPv4 \
         traddr:$NVMF_FIRST_TARGET_IP \
         trsvcid:$NVMF_PORT \
         subnqn:nqn.2014-08.org.nvmexpress.discovery" -L all
-$rootdir/examples/nvme/identify/identify -r "\
+$SPDK_EXAMPLE_DIR/identify -r "\
         trtype:$TEST_TRANSPORT \
         adrfam:IPv4 \
         traddr:$NVMF_FIRST_TARGET_IP \

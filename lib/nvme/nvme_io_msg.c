@@ -64,6 +64,7 @@ nvme_io_msg_send(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid, spdk_nvme_io_msg_
 	rc = spdk_ring_enqueue(ctrlr->external_io_msgs, (void **)&io, 1, NULL);
 	if (rc != 1) {
 		assert(false);
+		free(io);
 		pthread_mutex_unlock(&ctrlr->external_io_msgs_lock);
 		return -ENOMEM;
 	}
@@ -74,7 +75,7 @@ nvme_io_msg_send(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid, spdk_nvme_io_msg_
 }
 
 int
-spdk_nvme_io_msg_process(struct spdk_nvme_ctrlr *ctrlr)
+nvme_io_msg_process(struct spdk_nvme_ctrlr *ctrlr)
 {
 	int i;
 	int count;
@@ -106,6 +107,20 @@ spdk_nvme_io_msg_process(struct spdk_nvme_ctrlr *ctrlr)
 	return count;
 }
 
+static bool
+nvme_io_msg_is_producer_registered(struct spdk_nvme_ctrlr *ctrlr,
+				   struct nvme_io_msg_producer *io_msg_producer)
+{
+	struct nvme_io_msg_producer *tmp;
+
+	STAILQ_FOREACH(tmp, &ctrlr->io_producers, link) {
+		if (tmp == io_msg_producer) {
+			return true;
+		}
+	}
+	return false;
+}
+
 int
 nvme_io_msg_ctrlr_register(struct spdk_nvme_ctrlr *ctrlr,
 			   struct nvme_io_msg_producer *io_msg_producer)
@@ -113,6 +128,10 @@ nvme_io_msg_ctrlr_register(struct spdk_nvme_ctrlr *ctrlr,
 	if (io_msg_producer == NULL) {
 		SPDK_ERRLOG("io_msg_producer cannot be NULL\n");
 		return -EINVAL;
+	}
+
+	if (nvme_io_msg_is_producer_registered(ctrlr, io_msg_producer)) {
+		return -EEXIST;
 	}
 
 	if (!STAILQ_EMPTY(&ctrlr->io_producers) || ctrlr->is_resetting) {
@@ -136,12 +155,24 @@ nvme_io_msg_ctrlr_register(struct spdk_nvme_ctrlr *ctrlr,
 	if (ctrlr->external_io_msgs_qpair == NULL) {
 		SPDK_ERRLOG("spdk_nvme_ctrlr_alloc_io_qpair() failed\n");
 		spdk_ring_free(ctrlr->external_io_msgs);
-		return -1;
+		ctrlr->external_io_msgs = NULL;
+		return -ENOMEM;
 	}
 
 	STAILQ_INSERT_TAIL(&ctrlr->io_producers, io_msg_producer, link);
 
 	return 0;
+}
+
+void
+nvme_io_msg_ctrlr_update(struct spdk_nvme_ctrlr *ctrlr)
+{
+	struct nvme_io_msg_producer *io_msg_producer;
+
+	/* Update all producers */
+	STAILQ_FOREACH(io_msg_producer, &ctrlr->io_producers, link) {
+		io_msg_producer->update(ctrlr);
+	}
 }
 
 void
@@ -157,6 +188,7 @@ nvme_io_msg_ctrlr_detach(struct spdk_nvme_ctrlr *ctrlr)
 
 	if (ctrlr->external_io_msgs) {
 		spdk_ring_free(ctrlr->external_io_msgs);
+		ctrlr->external_io_msgs = NULL;
 	}
 
 	if (ctrlr->external_io_msgs_qpair) {
@@ -172,6 +204,10 @@ nvme_io_msg_ctrlr_unregister(struct spdk_nvme_ctrlr *ctrlr,
 			     struct nvme_io_msg_producer *io_msg_producer)
 {
 	assert(io_msg_producer != NULL);
+
+	if (!nvme_io_msg_is_producer_registered(ctrlr, io_msg_producer)) {
+		return;
+	}
 
 	STAILQ_REMOVE(&ctrlr->io_producers, io_msg_producer, nvme_io_msg_producer, link);
 	if (STAILQ_EMPTY(&ctrlr->io_producers)) {

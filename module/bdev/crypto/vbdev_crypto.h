@@ -37,21 +37,33 @@
 #include "spdk/rpc.h"
 #include "spdk/util.h"
 #include "spdk/string.h"
-#include "spdk_internal/log.h"
+#include "spdk/log.h"
 
 #include "spdk/bdev.h"
+
+#define AESNI_MB "crypto_aesni_mb"
+#define QAT "crypto_qat"
+
+/* Supported ciphers */
+#define AES_CBC "AES_CBC" /* QAT and AESNI_MB */
+#define AES_XTS "AES_XTS" /* QAT only */
 
 typedef void (*spdk_delete_crypto_complete)(void *cb_arg, int bdeverrno);
 
 /**
  * Create new crypto bdev.
  *
- * \param bdev_name Bdev on which crypto vbdev will be created.
- * \param bdev_name Vbdev name crypto_pmd key
+ * \param bdev_name Name of the bdev on which the crypto vbdev will be created.
+ * \param vbdev_name Name of the new crypto vbdev.
+ * \param crypto_pmd Name of the polled mode driver to use for this vbdev.
+ * \param key The key to use for this vbdev.
+ * \param cipher The cipher to use for this vbdev.
+ * \param keys The 2nd key to use for AES_XTS cipher.
  * \return 0 on success, other on failure.
  */
 int create_crypto_disk(const char *bdev_name, const char *vbdev_name,
-		       const char *crypto_pmd, const char *key);
+		       const char *crypto_pmd, const char *key,
+		       const char *cipher, const char *key2);
 
 /**
  * Delete crypto bdev.

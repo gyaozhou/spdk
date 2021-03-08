@@ -1,3 +1,9 @@
+# Introduction
+
+This directory contains a plug-in module for fio to enable use
+with SPDK. Fio is free software published under version 2 of
+the GPL license.
+
 # Compiling fio
 
 Clone the fio source repository from https://github.com/axboe/fio
@@ -39,14 +45,11 @@ To use the SPDK fio plugin with fio, specify the plugin binary using LD_PRELOAD 
 fio and set ioengine=spdk_bdev in the fio configuration file (see example_config.fio in the same
 directory as this README).
 
-    LD_PRELOAD=<path to spdk repo>/examples/bdev/fio_plugin/fio_plugin fio
+    LD_PRELOAD=<path to spdk repo>/build/fio/spdk_bdev fio
 
 The fio configuration file must contain one new parameter:
 
-    spdk_conf=./examples/bdev/fio_plugin/bdev.conf
-
-This must point at an SPDK configuration file. There are a number of example configuration
-files in the SPDK repository under etc/spdk.
+    spdk_json_conf=./examples/bdev/fio_plugin/bdev.json
 
 You can specify which block device to run against by setting the filename parameter
 to the block device name:
@@ -57,8 +60,10 @@ Or for NVMe devices:
 
     filename=Nvme0n1
 
-Currently the SPDK fio plugin is limited to the thread usage model, so fio jobs must also specify thread=1
-when using the SPDK fio plugin.
+fio by default forks a separate process for every job. It also supports just spawning a separate
+thread in the same process for every job. The SPDK fio plugin is limited to this latter thread
+usage model, so fio jobs must also specify thread=1 when using the SPDK fio plugin. The SPDK fio
+plugin supports multiple threads - in this case, the "1" just means "use thread mode".
 
 fio also currently has a race condition on shutdown if dynamically loading the ioengine by specifying the
 engine's full path via the ioengine parameter - LD_PRELOAD is recommended to avoid this race condition.

@@ -8,8 +8,7 @@ VM_DIR=$VHOST_DIR/vms
 TARGET_DIR=$VHOST_DIR/vhost
 VM_PASSWORD="root"
 
-#TODO: Move vhost_vm_image.qcow2 into VHOST_DIR on test systems.
-VM_IMAGE=$HOME/vhost_vm_image.qcow2
+VM_IMAGE=${VM_IMAGE:-"$HOME/spdk_test_image.qcow2"}
 
 if ! hash $QEMU_IMG_BIN $QEMU_BIN; then
 	error 'QEMU is not installed on this system. Unable to run vhost tests.'
@@ -25,38 +24,30 @@ mkdir -p $TARGET_DIR
 #
 source $rootdir/test/vhost/common/autotest.config
 
-function vhosttestinit()
-{
+function vhosttestinit() {
 	if [ "$TEST_MODE" == "iso" ]; then
 		$rootdir/scripts/setup.sh
+	fi
 
-		# Look for the VM image
-		if [[ ! -f $VM_IMAGE ]]; then
-			echo "VM image not found at $VM_IMAGE"
-			echo "Download to $HOME? [yn]"
-			read -r download
-			if [ "$download" = "y" ]; then
-				curl https://dqtibwqq6s6ux.cloudfront.net/download/test_resources/vhost_vm_image.tar.gz | tar xz -C $HOME
-			fi
-		fi
+	if [[ -e $VM_IMAGE.gz ]]; then
+		gzip -dc "$VM_IMAGE.gz" > "$VM_IMAGE"
 	fi
 
 	# Look for the VM image
 	if [[ ! -f $VM_IMAGE ]]; then
-		error "VM image not found at $VM_IMAGE"
-		exit 1
+		[[ $1 != "--no_vm" ]] || return 0
+		echo "$VM_IMAGE is missing" >&2
+		return 1
 	fi
 }
 
-function vhosttestfini()
-{
+function vhosttestfini() {
 	if [ "$TEST_MODE" == "iso" ]; then
 		$rootdir/scripts/setup.sh reset
 	fi
 }
 
-function message()
-{
+function message() {
 	local verbose_out
 	if ! $SPDK_VHOST_VERBOSE; then
 		verbose_out=""
@@ -71,16 +62,14 @@ function message()
 	echo -e "${msg_type}${verbose_out}: $*"
 }
 
-function fail()
-{
+function fail() {
 	echo "===========" >&2
 	message "FAIL" "$@" >&2
 	echo "===========" >&2
 	exit 1
 }
 
-function error()
-{
+function error() {
 	echo "===========" >&2
 	message "ERROR" "$@" >&2
 	echo "===========" >&2
@@ -88,18 +77,22 @@ function error()
 	false
 }
 
-function warning()
-{
+function warning() {
 	message "WARN" "$@" >&2
 }
 
-function notice()
-{
+function notice() {
 	message "INFO" "$@"
 }
 
-function get_vhost_dir()
-{
+function check_qemu_packedring_support() {
+	qemu_version=$($QEMU_BIN -version | grep -Po "(?<=version )\d+.\d+.\d+")
+	if [[ "$qemu_version" < "4.2.0" ]]; then
+		error "This qemu binary does not support packed ring"
+	fi
+}
+
+function get_vhost_dir() {
 	local vhost_name="$1"
 
 	if [[ -z "$vhost_name" ]]; then
@@ -110,8 +103,7 @@ function get_vhost_dir()
 	echo "$TARGET_DIR/${vhost_name}"
 }
 
-function vhost_run()
-{
+function vhost_run() {
 	local vhost_name="$1"
 	local run_gen_nvme=true
 
@@ -129,7 +121,7 @@ function vhost_run()
 
 	local vhost_dir
 	vhost_dir="$(get_vhost_dir $vhost_name)"
-	local vhost_app="$rootdir/app/vhost/vhost"
+	local vhost_app="$SPDK_BIN_DIR/vhost"
 	local vhost_log_file="$vhost_dir/vhost.log"
 	local vhost_pid_file="$vhost_dir/vhost.pid"
 	local vhost_socket="$vhost_dir/usvhost"
@@ -150,7 +142,8 @@ function vhost_run()
 	notice "Command:     $cmd"
 
 	timing_enter vhost_start
-	cd $vhost_dir; $cmd &
+	cd $vhost_dir
+	$cmd &
 	vhost_pid=$!
 	echo $vhost_pid > $vhost_pid_file
 
@@ -158,26 +151,14 @@ function vhost_run()
 	waitforlisten "$vhost_pid" "$vhost_dir/rpc.sock"
 	#do not generate nvmes if pci access is disabled
 	if [[ "$cmd" != *"--no-pci"* ]] && [[ "$cmd" != *"-u"* ]] && $run_gen_nvme; then
-		$rootdir/scripts/gen_nvme.sh "--json" | $rootdir/scripts/rpc.py\
-		 -s $vhost_dir/rpc.sock load_subsystem_config
+		$rootdir/scripts/gen_nvme.sh | $rootdir/scripts/rpc.py -s $vhost_dir/rpc.sock load_subsystem_config
 	fi
 
 	notice "vhost started - pid=$vhost_pid"
 	timing_exit vhost_start
 }
 
-function vhost_load_config()
-{
-	local vhost_num="$1"
-	local vhost_json_conf="$2"
-	local vhost_dir
-	vhost_dir="$(get_vhost_dir $vhost_num)"
-
-	$rootdir/scripts/rpc.py -s $vhost_dir/rpc.sock load_config < "$vhost_json_conf"
-}
-
-function vhost_kill()
-{
+function vhost_kill() {
 	local rc=0
 	local vhost_name="$1"
 
@@ -202,7 +183,7 @@ function vhost_kill()
 
 	if kill -INT $vhost_pid > /dev/null; then
 		notice "sent SIGINT to vhost app - waiting 60 seconds to exit"
-		for ((i=0; i<60; i++)); do
+		for ((i = 0; i < 60; i++)); do
 			if kill -0 $vhost_pid; then
 				echo "."
 				sleep 1
@@ -237,8 +218,7 @@ function vhost_kill()
 	return $rc
 }
 
-function vhost_rpc
-{
+function vhost_rpc() {
 	local vhost_name="$1"
 
 	if [[ -z "$vhost_name" ]]; then
@@ -254,20 +234,18 @@ function vhost_rpc
 # Mgmt functions
 ###
 
-function assert_number()
-{
+function assert_number() {
 	[[ "$1" =~ [0-9]+ ]] && return 0
 
 	error "Invalid or missing paramter: need number but got '$1'"
-	return 1;
+	return 1
 }
 
 # Run command on vm with given password
 # First argument - vm number
 # Second argument - ssh password for vm
 #
-function vm_sshpass()
-{
+function vm_sshpass() {
 	vm_num_is_valid $1 || return 1
 
 	local ssh_cmd
@@ -281,32 +259,27 @@ function vm_sshpass()
 	$ssh_cmd "$@"
 }
 
-
 # Helper to validate VM number
 # param $1 VM number
 #
-function vm_num_is_valid()
-{
+function vm_num_is_valid() {
 	[[ "$1" =~ ^[0-9]+$ ]] && return 0
 
 	error "Invalid or missing paramter: vm number '$1'"
-	return 1;
+	return 1
 }
-
 
 # Print network socket for given VM number
 # param $1 virtual machine number
 #
-function vm_ssh_socket()
-{
+function vm_ssh_socket() {
 	vm_num_is_valid $1 || return 1
 	local vm_dir="$VM_DIR/$1"
 
 	cat $vm_dir/ssh_socket
 }
 
-function vm_fio_socket()
-{
+function vm_fio_socket() {
 	vm_num_is_valid $1 || return 1
 	local vm_dir="$VM_DIR/$1"
 
@@ -316,8 +289,7 @@ function vm_fio_socket()
 # Execute command on given VM
 # param $1 virtual machine number
 #
-function vm_exec()
-{
+function vm_exec() {
 	vm_num_is_valid $1 || return 1
 
 	local vm_num="$1"
@@ -334,8 +306,7 @@ function vm_exec()
 # Execute scp command on given VM
 # param $1 virtual machine number
 #
-function vm_scp()
-{
+function vm_scp() {
 	vm_num_is_valid $1 || return 1
 
 	local vm_num="$1"
@@ -349,11 +320,9 @@ function vm_scp()
 		"$@"
 }
 
-
 # check if specified VM is running
 # param $1 VM num
-function vm_is_running()
-{
+function vm_is_running() {
 	vm_num_is_valid $1 || return 1
 	local vm_dir="$VM_DIR/$1"
 
@@ -380,8 +349,7 @@ function vm_is_running()
 
 # check if specified VM is running
 # param $1 VM num
-function vm_os_booted()
-{
+function vm_os_booted() {
 	vm_num_is_valid $1 || return 1
 	local vm_dir="$VM_DIR/$1"
 
@@ -390,21 +358,19 @@ function vm_os_booted()
 		return 1
 	fi
 
-	if ! VM_SSH_OPTIONS="-o ControlMaster=no" vm_exec $1 "true" 2>/dev/null; then
+	if ! VM_SSH_OPTIONS="-o ControlMaster=no" vm_exec $1 "true" 2> /dev/null; then
 		# Shutdown existing master. Ignore errors as it might not exist.
-		VM_SSH_OPTIONS="-O exit" vm_exec $1 "true" 2>/dev/null
+		VM_SSH_OPTIONS="-O exit" vm_exec $1 "true" 2> /dev/null
 		return 1
 	fi
 
 	return 0
 }
 
-
 # Shutdown given VM
 # param $1 virtual machine number
 # return non-zero in case of error.
-function vm_shutdown()
-{
+function vm_shutdown() {
 	vm_num_is_valid $1 || return 1
 	local vm_dir="$VM_DIR/$1"
 	if [[ ! -d "$vm_dir" ]]; then
@@ -429,8 +395,7 @@ function vm_shutdown()
 # Kill given VM
 # param $1 virtual machine number
 #
-function vm_kill()
-{
+function vm_kill() {
 	vm_num_is_valid $1 || return 1
 	local vm_dir="$VM_DIR/$1"
 
@@ -455,10 +420,12 @@ function vm_kill()
 
 # List all VM numbers in VM_DIR
 #
-function vm_list_all()
-{
+function vm_list_all() {
 	local vms
-	vms="$(shopt -s nullglob; echo $VM_DIR/[0-9]*)"
+	vms="$(
+		shopt -s nullglob
+		echo $VM_DIR/[0-9]*
+	)"
 	if [[ -n "$vms" ]]; then
 		basename --multiple $vms
 	fi
@@ -466,8 +433,7 @@ function vm_list_all()
 
 # Kills all VM in $VM_DIR
 #
-function vm_kill_all()
-{
+function vm_kill_all() {
 	local vm
 	for vm in $(vm_list_all); do
 		vm_kill $vm
@@ -478,8 +444,7 @@ function vm_kill_all()
 
 # Shutdown all VM in $VM_DIR
 #
-function vm_shutdown_all()
-{
+function vm_shutdown_all() {
 	# XXX: temporarily disable to debug shutdown issue
 	# xtrace_disable
 
@@ -508,7 +473,7 @@ function vm_shutdown_all()
 			return 0
 		fi
 
-		((timeo-=1))
+		((timeo -= 1))
 		sleep 1
 	done
 
@@ -517,17 +482,17 @@ function vm_shutdown_all()
 	xtrace_restore
 }
 
-function vm_setup()
-{
+function vm_setup() {
 	xtrace_disable
 	local OPTIND optchar vm_num
 
 	local os=""
 	local os_mode=""
-	local qemu_args=""
+	local qemu_args=()
 	local disk_type_g=NOT_DEFINED
 	local read_only="false"
-	local disks=""
+	# List created of a strings separated with a ":"
+	local disks=()
 	local raw_cache=""
 	local vm_incoming=""
 	local vm_migrate_to=""
@@ -535,34 +500,37 @@ function vm_setup()
 	local guest_memory=1024
 	local queue_number=""
 	local vhost_dir
+	local packed=false
 	vhost_dir="$(get_vhost_dir 0)"
 	while getopts ':-:' optchar; do
 		case "$optchar" in
 			-)
-			case "$OPTARG" in
-				os=*) os="${OPTARG#*=}" ;;
-				os-mode=*) os_mode="${OPTARG#*=}" ;;
-				qemu-args=*) qemu_args="${qemu_args} ${OPTARG#*=}" ;;
-				disk-type=*) disk_type_g="${OPTARG#*=}" ;;
-				read-only=*) read_only="${OPTARG#*=}" ;;
-				disks=*) disks="${OPTARG#*=}" ;;
-				raw-cache=*) raw_cache=",cache${OPTARG#*=}" ;;
-				force=*) force_vm=${OPTARG#*=} ;;
-				memory=*) guest_memory=${OPTARG#*=} ;;
-				queue_num=*) queue_number=${OPTARG#*=} ;;
-				incoming=*) vm_incoming="${OPTARG#*=}" ;;
-				migrate-to=*) vm_migrate_to="${OPTARG#*=}" ;;
-				vhost-name=*) vhost_dir="$(get_vhost_dir ${OPTARG#*=})" ;;
-				spdk-boot=*) local boot_from="${OPTARG#*=}" ;;
-				*)
-					error "unknown argument $OPTARG"
-					return 1
-			esac
-			;;
+				case "$OPTARG" in
+					os=*) os="${OPTARG#*=}" ;;
+					os-mode=*) os_mode="${OPTARG#*=}" ;;
+					qemu-args=*) qemu_args+=("${OPTARG#*=}") ;;
+					disk-type=*) disk_type_g="${OPTARG#*=}" ;;
+					read-only=*) read_only="${OPTARG#*=}" ;;
+					disks=*) IFS=":" read -ra disks <<< "${OPTARG#*=}" ;;
+					raw-cache=*) raw_cache=",cache${OPTARG#*=}" ;;
+					force=*) force_vm=${OPTARG#*=} ;;
+					memory=*) guest_memory=${OPTARG#*=} ;;
+					queue_num=*) queue_number=${OPTARG#*=} ;;
+					incoming=*) vm_incoming="${OPTARG#*=}" ;;
+					migrate-to=*) vm_migrate_to="${OPTARG#*=}" ;;
+					vhost-name=*) vhost_dir="$(get_vhost_dir ${OPTARG#*=})" ;;
+					spdk-boot=*) local boot_from="${OPTARG#*=}" ;;
+					packed) packed=true ;;
+					*)
+						error "unknown argument $OPTARG"
+						return 1
+						;;
+				esac
+				;;
 			*)
 				error "vm_create Unknown param $OPTARG"
 				return 1
-			;;
+				;;
 		esac
 	done
 
@@ -577,7 +545,7 @@ function vm_setup()
 		local vm_dir=""
 
 		set +x
-		for (( i=0; i<=256; i++)); do
+		for ((i = 0; i <= 256; i++)); do
 			local vm_dir="$VM_DIR/$i"
 			[[ ! -d $vm_dir ]] && break
 		done
@@ -630,10 +598,6 @@ function vm_setup()
 		fi
 	fi
 
-	# WARNING:
-	# each cmd+= must contain ' ${eol}' at the end
-	#
-	local eol="\\\\\n  "
 	local qemu_mask_param="VM_${vm_num}_qemu_mask"
 	local qemu_numa_node_param="VM_${vm_num}_qemu_numa_node"
 
@@ -645,15 +609,15 @@ function vm_setup()
 	local task_mask=${!qemu_mask_param}
 
 	notice "TASK MASK: $task_mask"
-	local cmd="taskset -a -c $task_mask $QEMU_BIN ${eol}"
-	local vm_socket_offset=$(( 10000 + 100 * vm_num ))
+	local cmd=(taskset -a -c "$task_mask" "$QEMU_BIN")
+	local vm_socket_offset=$((10000 + 100 * vm_num))
 
-	local ssh_socket=$(( vm_socket_offset + 0 ))
-	local fio_socket=$(( vm_socket_offset + 1 ))
-	local monitor_port=$(( vm_socket_offset + 2 ))
-	local migration_port=$(( vm_socket_offset + 3 ))
-	local gdbserver_socket=$(( vm_socket_offset + 4 ))
-	local vnc_socket=$(( 100 + vm_num ))
+	local ssh_socket=$((vm_socket_offset + 0))
+	local fio_socket=$((vm_socket_offset + 1))
+	local monitor_port=$((vm_socket_offset + 2))
+	local migration_port=$((vm_socket_offset + 3))
+	local gdbserver_socket=$((vm_socket_offset + 4))
+	local vnc_socket=$((100 + vm_num))
 	local qemu_pid_file="$vm_dir/qemu.pid"
 	local cpu_num=0
 
@@ -665,13 +629,13 @@ function vm_setup()
 	for c in $cpu_list; do
 		# if range is detected - count how many cpus
 		if [[ $c =~ [0-9]+-[0-9]+ ]]; then
-			val=$((c-1))
+			val=$((c - 1))
 			val=${val#-}
 		else
 			val=1
 		fi
-		cpu_num=$((cpu_num+val))
-		queue_number=$((queue_number+val))
+		cpu_num=$((cpu_num + val))
+		queue_number=$((queue_number + val))
 	done
 
 	if [ -z $queue_number ]; then
@@ -683,34 +647,35 @@ function vm_setup()
 	local node_num=${!qemu_numa_node_param}
 	local boot_disk_present=false
 	notice "NUMA NODE: $node_num"
-	cmd+="-m $guest_memory --enable-kvm -cpu host -smp $cpu_num -vga std -vnc :$vnc_socket -daemonize ${eol}"
-	cmd+="-object memory-backend-file,id=mem,size=${guest_memory}M,mem-path=/dev/hugepages,share=on,prealloc=yes,host-nodes=$node_num,policy=bind ${eol}"
-	[[ $os_mode == snapshot ]] && cmd+="-snapshot ${eol}"
-	[[ -n "$vm_incoming" ]] && cmd+=" -incoming tcp:0:$migration_port ${eol}"
-	cmd+="-monitor telnet:127.0.0.1:$monitor_port,server,nowait ${eol}"
-	cmd+="-numa node,memdev=mem ${eol}"
-	cmd+="-pidfile $qemu_pid_file ${eol}"
-	cmd+="-serial file:$vm_dir/serial.log ${eol}"
-	cmd+="-D $vm_dir/qemu.log ${eol}"
-	cmd+="-chardev file,path=$vm_dir/seabios.log,id=seabios -device isa-debugcon,iobase=0x402,chardev=seabios ${eol}"
-	cmd+="-net user,hostfwd=tcp::$ssh_socket-:22,hostfwd=tcp::$fio_socket-:8765 ${eol}"
-	cmd+="-net nic ${eol}"
+	cmd+=(-m "$guest_memory" --enable-kvm -cpu host -smp "$cpu_num" -vga std -vnc ":$vnc_socket" -daemonize)
+	cmd+=(-object "memory-backend-file,id=mem,size=${guest_memory}M,mem-path=/dev/hugepages,share=on,prealloc=yes,host-nodes=$node_num,policy=bind")
+	[[ $os_mode == snapshot ]] && cmd+=(-snapshot)
+	[[ -n "$vm_incoming" ]] && cmd+=(-incoming "tcp:0:$migration_port")
+	cmd+=(-monitor "telnet:127.0.0.1:$monitor_port,server,nowait")
+	cmd+=(-numa "node,memdev=mem")
+	cmd+=(-pidfile "$qemu_pid_file")
+	cmd+=(-serial "file:$vm_dir/serial.log")
+	cmd+=(-D "$vm_dir/qemu.log")
+	cmd+=(-chardev "file,path=$vm_dir/seabios.log,id=seabios" -device "isa-debugcon,iobase=0x402,chardev=seabios")
+	cmd+=(-net "user,hostfwd=tcp::$ssh_socket-:22,hostfwd=tcp::$fio_socket-:8765")
+	cmd+=(-net nic)
 	if [[ -z "$boot_from" ]]; then
-		cmd+="-drive file=$os,if=none,id=os_disk ${eol}"
-		cmd+="-device ide-hd,drive=os_disk,bootindex=0 ${eol}"
+		cmd+=(-drive "file=$os,if=none,id=os_disk")
+		cmd+=(-device "ide-hd,drive=os_disk,bootindex=0")
 	fi
 
-	if [[ $disks == '' ]] && [[ $disk_type_g == virtio* ]]; then
-		disks=1
+	if ((${#disks[@]} == 0)) && [[ $disk_type_g == virtio* ]]; then
+		disks=("default_virtio.img")
+	elif ((${#disks[@]} == 0)); then
+		error "No disks defined, aborting"
+		return 1
 	fi
 
-	for disk in ${disks//:/ }; do
-		if [[ $disk = *","* ]]; then
-			disk_type=${disk#*,}
-			disk=${disk%,*}
-		else
-			disk_type=$disk_type_g
-		fi
+	for disk in "${disks[@]}"; do
+		# Each disk can define its type in a form of a disk_name,type. The remaining parts
+		# of the string are dropped.
+		IFS="," read -r disk disk_type _ <<< "$disk"
+		[[ -z $disk_type ]] && disk_type=$disk_type_g
 
 		case $disk_type in
 			virtio)
@@ -724,13 +689,13 @@ function vm_setup()
 				fi
 
 				# Create disk file if it not exist or it is smaller than 1G
-				if { [[ -f $raw_disk ]] && [[ $(stat --printf="%s" $raw_disk) -lt $((1024 * 1024 * 1024)) ]]; } || \
-					[[ ! -e $raw_disk ]]; then
+				if { [[ -f $raw_disk ]] && [[ $(stat --printf="%s" $raw_disk) -lt $((1024 * 1024 * 1024)) ]]; } \
+					|| [[ ! -e $raw_disk ]]; then
 					if [[ $raw_disk =~ /dev/.* ]]; then
 						error \
 							"ERROR: Virtio disk point to missing device ($raw_disk) -\n" \
 							"       this is probably not what you want."
-							return 1
+						return 1
 					fi
 
 					notice "Creating Virtio disc $raw_disk"
@@ -739,29 +704,33 @@ function vm_setup()
 					notice "Using existing image $raw_disk"
 				fi
 
-				cmd+="-device virtio-scsi-pci,num_queues=$queue_number ${eol}"
-				cmd+="-device scsi-hd,drive=hd$i,vendor=$raw_name ${eol}"
-				cmd+="-drive if=none,id=hd$i,file=$raw_disk,format=raw$raw_cache ${eol}"
+				cmd+=(-device "virtio-scsi-pci,num_queues=$queue_number")
+				cmd+=(-device "scsi-hd,drive=hd$i,vendor=$raw_name")
+				cmd+=(-drive "if=none,id=hd$i,file=$raw_disk,format=raw$raw_cache")
 				;;
 			spdk_vhost_scsi)
 				notice "using socket $vhost_dir/naa.$disk.$vm_num"
-				cmd+="-chardev socket,id=char_$disk,path=$vhost_dir/naa.$disk.$vm_num ${eol}"
-				cmd+="-device vhost-user-scsi-pci,id=scsi_$disk,num_queues=$queue_number,chardev=char_$disk"
+				cmd+=(-chardev "socket,id=char_$disk,path=$vhost_dir/naa.$disk.$vm_num")
+				cmd+=(-device "vhost-user-scsi-pci,id=scsi_$disk,num_queues=$queue_number,chardev=char_$disk")
 				if [[ "$disk" == "$boot_from" ]]; then
-					cmd+=",bootindex=0"
+					cmd[-1]+=,bootindex=0
 					boot_disk_present=true
 				fi
-				cmd+=" ${eol}"
 				;;
 			spdk_vhost_blk)
 				notice "using socket $vhost_dir/naa.$disk.$vm_num"
-				cmd+="-chardev socket,id=char_$disk,path=$vhost_dir/naa.$disk.$vm_num ${eol}"
-				cmd+="-device vhost-user-blk-pci,num-queues=$queue_number,chardev=char_$disk"
+				cmd+=(-chardev "socket,id=char_$disk,path=$vhost_dir/naa.$disk.$vm_num")
+				cmd+=(-device "vhost-user-blk-pci,num-queues=$queue_number,chardev=char_$disk")
 				if [[ "$disk" == "$boot_from" ]]; then
-					cmd+=",bootindex=0"
+					cmd[-1]+=,bootindex=0
 					boot_disk_present=true
 				fi
-				cmd+=" ${eol}"
+
+				if $packed; then
+					check_qemu_packedring_support
+					notice "Enabling packed ring support for VM $vm_num, controller $vhost_dir/naa.$disk.$vm_num"
+					cmd[-1]+=,packed=on
+				fi
 				;;
 			kernel_vhost)
 				if [[ -z $disk ]]; then
@@ -772,11 +741,12 @@ function vm_setup()
 					return 1
 				fi
 				notice "Using kernel vhost disk wwn=$disk"
-				cmd+=" -device vhost-scsi-pci,wwpn=$disk,num_queues=$queue_number ${eol}"
+				cmd+=(-device "vhost-scsi-pci,wwpn=$disk,num_queues=$queue_number")
 				;;
 			*)
 				error "unknown mode '$disk_type', use: virtio, spdk_vhost_scsi, spdk_vhost_blk or kernel_vhost"
 				return 1
+				;;
 		esac
 	done
 
@@ -785,35 +755,36 @@ function vm_setup()
 		return 1
 	fi
 
-	[[ -n $qemu_args ]] && cmd+=" $qemu_args ${eol}"
-	# remove last $eol
-	cmd="${cmd%\\\\\\n  }"
-
+	((${#qemu_args[@]})) && cmd+=("${qemu_args[@]}")
 	notice "Saving to $vm_dir/run.sh"
-	(
-	echo '#!/bin/bash'
-	echo 'if [[ $EUID -ne 0 ]]; then '
-	echo '	echo "Go away user come back as root"'
-	echo '	exit 1'
-	echo 'fi';
-	echo
-	echo -e "qemu_cmd=\"$cmd\"";
-	echo
-	echo "echo 'Running VM in $vm_dir'"
-	echo "rm -f $qemu_pid_file"
-	echo '$qemu_cmd'
-	echo "echo 'Waiting for QEMU pid file'"
-	echo "sleep 1"
-	echo "[[ ! -f $qemu_pid_file ]] && sleep 1"
-	echo "[[ ! -f $qemu_pid_file ]] && echo 'ERROR: no qemu pid file found' && exit 1"
-	echo
-	echo "chmod +r $vm_dir/*"
-	echo
-	echo "echo '=== qemu.log ==='"
-	echo "cat $vm_dir/qemu.log"
-	echo "echo '=== qemu.log ==='"
-	echo '# EOF'
-	) > $vm_dir/run.sh
+	cat <<- RUN > "$vm_dir/run.sh"
+		#!/bin/bash
+		qemu_log () {
+			echo "=== qemu.log ==="
+			[[ -s $vm_dir/qemu.log ]] && cat $vm_dir/qemu.log
+			echo "=== qemu.log ==="
+		}
+
+		if [[ \$EUID -ne 0 ]]; then
+			echo "Go away user come back as root"
+			exit 1
+		fi
+
+		trap "qemu_log" EXIT
+
+		qemu_cmd=($(printf '%s\n' "${cmd[@]}"))
+		chmod +r $vm_dir/*
+		echo "Running VM in $vm_dir"
+		rm -f $qemu_pid_file
+		"\${qemu_cmd[@]}"
+
+		echo "Waiting for QEMU pid file"
+		sleep 1
+		[[ ! -f $qemu_pid_file ]] && sleep 1
+		[[ ! -f $qemu_pid_file ]] && echo "ERROR: no qemu pid file found" && exit 1
+		exit 0
+		# EOF
+	RUN
 	chmod +x $vm_dir/run.sh
 
 	# Save generated sockets redirection
@@ -831,8 +802,7 @@ function vm_setup()
 	[[ -z $vm_migrate_to ]] || ln -fs $VM_DIR/$vm_migrate_to $vm_dir/vm_migrate_to
 }
 
-function vm_run()
-{
+function vm_run() {
 	local OPTIND optchar vm
 	local run_all=false
 	local vms_to_run=""
@@ -843,14 +813,14 @@ function vm_run()
 			*)
 				error "Unknown param $OPTARG"
 				return 1
-			;;
+				;;
 		esac
 	done
 
 	if $run_all; then
 		vms_to_run="$(vm_list_all)"
 	else
-		shift $((OPTIND-1))
+		shift $((OPTIND - 1))
 		for vm in "$@"; do
 			vm_num_is_valid $1 || return 1
 			if [[ ! -x $VM_DIR/$vm/run.sh ]]; then
@@ -875,8 +845,7 @@ function vm_run()
 	done
 }
 
-function vm_print_logs()
-{
+function vm_print_logs() {
 	vm_num=$1
 	warning "================"
 	warning "QEMU LOG:"
@@ -904,8 +873,7 @@ function vm_print_logs()
 
 # Wait for all created VMs to boot.
 # param $1 max wait time
-function vm_wait_for_boot()
-{
+function vm_wait_for_boot() {
 	assert_number $1
 
 	xtrace_disable
@@ -946,7 +914,7 @@ function vm_wait_for_boot()
 				xtrace_restore
 				return 1
 			fi
-			if (( i > 30 )); then
+			if ((i > 30)); then
 				local i=0
 				echo
 			fi
@@ -969,28 +937,28 @@ function vm_wait_for_boot()
 	return 0
 }
 
-function vm_start_fio_server()
-{
+function vm_start_fio_server() {
 	local OPTIND optchar
 	local readonly=''
+	local fio_bin=''
 	while getopts ':-:' optchar; do
 		case "$optchar" in
 			-)
-			case "$OPTARG" in
-				fio-bin=*) local fio_bin="${OPTARG#*=}" ;;
-				readonly) local readonly="--readonly" ;;
-				*) error "Invalid argument '$OPTARG'" && return 1;;
-			esac
-			;;
-			*) error "Invalid argument '$OPTARG'" && return 1;;
+				case "$OPTARG" in
+					fio-bin=*) local fio_bin="${OPTARG#*=}" ;;
+					readonly) local readonly="--readonly" ;;
+					*) error "Invalid argument '$OPTARG'" && return 1 ;;
+				esac
+				;;
+			*) error "Invalid argument '$OPTARG'" && return 1 ;;
 		esac
 	done
 
-	shift $(( OPTIND - 1 ))
+	shift $((OPTIND - 1))
 	for vm_num in "$@"; do
 		notice "Starting fio server on VM$vm_num"
 		if [[ $fio_bin != "" ]]; then
-			cat $fio_bin | vm_exec $vm_num 'cat > /root/fio; chmod +x /root/fio'
+			vm_exec $vm_num 'cat > /root/fio; chmod +x /root/fio' < $fio_bin
 			vm_exec $vm_num /root/fio $readonly --eta=never --server --daemonize=/root/fio.pid
 		else
 			vm_exec $vm_num fio $readonly --eta=never --server --daemonize=/root/fio.pid
@@ -998,8 +966,7 @@ function vm_start_fio_server()
 	done
 }
 
-function vm_check_scsi_location()
-{
+function vm_check_scsi_location() {
 	# Script to find wanted disc
 	local script='shopt -s nullglob;
 	for entry in /sys/block/sd*; do
@@ -1021,16 +988,14 @@ function vm_check_scsi_location()
 # Script to perform scsi device reset on all disks in VM
 # param $1 VM num
 # param $2..$n Disks to perform reset on
-function vm_reset_scsi_devices()
-{
+function vm_reset_scsi_devices() {
 	for disk in "${@:2}"; do
 		notice "VM$1 Performing device reset on disk $disk"
 		vm_exec $1 sg_reset /dev/$disk -vNd
 	done
 }
 
-function vm_check_blk_location()
-{
+function vm_check_blk_location() {
 	local script='shopt -s nullglob; cd /sys/block; echo vd*'
 	SCSI_DISK="$(echo "$script" | vm_exec $1 bash -s)"
 
@@ -1040,32 +1005,43 @@ function vm_check_blk_location()
 	fi
 }
 
-function run_fio()
-{
+function run_fio() {
 	local arg
 	local job_file=""
 	local fio_bin=""
 	local vms=()
 	local out=""
-	local fio_disks=""
 	local vm
 	local run_server_mode=true
+	local run_plugin_mode=false
+	local fio_start_cmd
+	local fio_output_format="normal"
+	local fio_gtod_reduce=false
+	local wait_for_fio=true
 
 	for arg in "$@"; do
 		case "$arg" in
 			--job-file=*) local job_file="${arg#*=}" ;;
 			--fio-bin=*) local fio_bin="${arg#*=}" ;;
-			--vm=*) vms+=( "${arg#*=}" ) ;;
+			--vm=*) vms+=("${arg#*=}") ;;
 			--out=*)
 				local out="${arg#*=}"
 				mkdir -p $out
 				;;
 			--local) run_server_mode=false ;;
-			--json) json="--json" ;;
-		*)
-			error "Invalid argument '$arg'"
-			return 1
-			;;
+			--plugin)
+				notice "Using plugin mode. Disabling server mode."
+				run_plugin_mode=true
+				run_server_mode=false
+				;;
+			--json) fio_output_format="json" ;;
+			--hide-results) hide_results=true ;;
+			--no-wait-for-fio) wait_for_fio=false ;;
+			--gtod-reduce) fio_gtod_reduce=true ;;
+			*)
+				error "Invalid argument '$arg'"
+				return 1
+				;;
 		esac
 	done
 
@@ -1074,47 +1050,163 @@ function run_fio()
 		return 1
 	fi
 
+	if [[ -z "$fio_bin" ]]; then
+		fio_bin="fio"
+	fi
+
 	if [[ ! -r "$job_file" ]]; then
 		error "Fio job '$job_file' does not exist"
 		return 1
 	fi
 
+	fio_start_cmd="$fio_bin --eta=never "
+
 	local job_fname
 	job_fname=$(basename "$job_file")
+	log_fname="${job_fname%%.*}.log"
+	fio_start_cmd+=" --output=$out/$log_fname --output-format=$fio_output_format "
+
 	# prepare job file for each VM
 	for vm in "${vms[@]}"; do
 		local vm_num=${vm%%:*}
 		local vmdisks=${vm#*:}
 
 		sed "s@filename=@filename=$vmdisks@" $job_file | vm_exec $vm_num "cat > /root/$job_fname"
-		fio_disks+="127.0.0.1:$(vm_fio_socket $vm_num):$vmdisks,"
+
+		if $fio_gtod_reduce; then
+			vm_exec $vm_num "echo 'gtod_reduce=1' >> /root/$job_fname"
+		fi
 
 		vm_exec $vm_num cat /root/$job_fname
+
+		if $run_server_mode; then
+			fio_start_cmd+="--client=127.0.0.1,$(vm_fio_socket $vm_num) --remote-config /root/$job_fname "
+		fi
+
 		if ! $run_server_mode; then
 			if [[ -n "$fio_bin" ]]; then
-				cat $fio_bin | vm_exec $vm_num 'cat > /root/fio; chmod +x /root/fio'
+				if ! $run_plugin_mode; then
+					vm_exec $vm_num 'cat > /root/fio; chmod +x /root/fio' < $fio_bin
+					vm_fio_bin="/root/fio"
+				else
+					vm_fio_bin="/usr/src/fio/fio"
+				fi
 			fi
 
 			notice "Running local fio on VM $vm_num"
-			vm_exec $vm_num "nohup /root/fio /root/$job_fname 1>/root/$job_fname.out 2>/root/$job_fname.out </dev/null & echo \$! > /root/fio.pid"
+			vm_exec $vm_num "$vm_fio_bin --output=/root/$log_fname --output-format=$fio_output_format /root/$job_fname & echo \$! > /root/fio.pid" &
+			vm_exec_pids+=("$!")
 		fi
 	done
 
 	if ! $run_server_mode; then
-		# Give FIO time to run
-		sleep 0.5
+		if ! $wait_for_fio; then
+			return 0
+		fi
+		echo "Waiting for guest fio instances to finish.."
+		wait "${vm_exec_pids[@]}"
+
+		for vm in "${vms[@]}"; do
+			local vm_num=${vm%%:*}
+			vm_exec $vm_num cat /root/$log_fname > "$out/vm${vm_num}_${log_fname}"
+		done
 		return 0
 	fi
 
-	$rootdir/test/vhost/common/run_fio.py --job-file=/root/$job_fname \
-		$([[ -n "$fio_bin" ]] && echo "--fio-bin=$fio_bin") \
-		--out=$out $json ${fio_disks%,}
+	$fio_start_cmd
+	sleep 1
+
+	if [[ "$fio_output_format" == "json" ]]; then
+		# Fio in client-server mode produces a lot of "trash" output
+		# preceding JSON structure, making it not possible to parse.
+		# Remove these lines from file.
+		# shellcheck disable=SC2005
+		echo "$(grep -vP '^[<\w]' "$out/$log_fname")" > "$out/$log_fname"
+	fi
+
+	if [[ ! $hide_results ]]; then
+		cat $out/$log_fname
+	fi
+}
+
+# Parsing fio results for json output and client-server mode only!
+function parse_fio_results() {
+	local fio_log_dir=$1
+	local fio_log_filename=$2
+	local fio_csv_filename
+
+	# Variables used in parsing loop
+	local log_file
+	local rwmode mixread mixwrite
+	local lat_key lat_divisor
+	local client_stats iops bw
+	local read_avg_lat read_min_lat read_max_lat
+	local write_avg_lat write_min_lat write_min_lat
+
+	declare -A results
+	results["iops"]=0
+	results["bw"]=0
+	results["avg_lat"]=0
+	results["min_lat"]=0
+	results["max_lat"]=0
+
+	# Loop using the log filename to see if there are any other
+	# matching files. This is in case we ran fio test multiple times.
+	log_files=("$fio_log_dir/$fio_log_filename"*)
+	for log_file in "${log_files[@]}"; do
+		rwmode=$(jq -r '.["client_stats"][0]["job options"]["rw"]' "$log_file")
+		mixread=1
+		mixwrite=1
+		if [[ $rwmode = *"rw"* ]]; then
+			mixread=$(jq -r '.["client_stats"][0]["job options"]["rwmixread"]' "$log_file")
+			mixread=$(bc -l <<< "scale=3; $mixread/100")
+			mixwrite=$(bc -l <<< "scale=3; 1-$mixread")
+		fi
+
+		client_stats=$(jq -r '.["client_stats"][] | select(.jobname == "All clients")' "$log_file")
+
+		# Check latency unit and later normalize to microseconds
+		lat_key="lat_us"
+		lat_divisor=1
+		if jq -er '.read["lat_ns"]' &> /dev/null <<< $client_stats; then
+			lat_key="lat_ns"
+			lat_divisor=1000
+		fi
+
+		# Horrific bash float point arithmetic oprations below.
+		# Viewer discretion is advised.
+		iops=$(jq -r '[.read["iops"],.write["iops"]] | add' <<< $client_stats)
+		bw=$(jq -r '[.read["bw"],.write["bw"]] | add' <<< $client_stats)
+		read_avg_lat=$(jq -r --arg lat_key $lat_key '.read[$lat_key]["mean"]' <<< $client_stats)
+		read_min_lat=$(jq -r --arg lat_key $lat_key '.read[$lat_key]["min"]' <<< $client_stats)
+		read_max_lat=$(jq -r --arg lat_key $lat_key '.read[$lat_key]["max"]' <<< $client_stats)
+		write_avg_lat=$(jq -r --arg lat_key $lat_key '.write[$lat_key]["mean"]' <<< $client_stats)
+		write_min_lat=$(jq -r --arg lat_key $lat_key '.write[$lat_key]["min"]' <<< $client_stats)
+		write_max_lat=$(jq -r --arg lat_key $lat_key '.write[$lat_key]["max"]' <<< $client_stats)
+
+		results["iops"]=$(bc -l <<< "${results[iops]} + $iops")
+		results["bw"]=$(bc -l <<< "${results[bw]} + $bw")
+		results["avg_lat"]=$(bc -l <<< "${results[avg_lat]} + ($mixread*$read_avg_lat + $mixwrite*$write_avg_lat)/$lat_divisor")
+		results["min_lat"]=$(bc -l <<< "${results[min_lat]} + ($mixread*$read_min_lat + $mixwrite*$write_min_lat)/$lat_divisor")
+		results["max_lat"]=$(bc -l <<< "${results[max_lat]} + ($mixread*$read_max_lat + $mixwrite*$write_max_lat)/$lat_divisor")
+	done
+
+	results["iops"]=$(bc -l <<< "scale=3; ${results[iops]} / ${#log_files[@]}")
+	results["bw"]=$(bc -l <<< "scale=3; ${results[bw]} / ${#log_files[@]}")
+	results["avg_lat"]=$(bc -l <<< "scale=3; ${results[avg_lat]} / ${#log_files[@]}")
+	results["min_lat"]=$(bc -l <<< "scale=3; ${results[min_lat]} / ${#log_files[@]}")
+	results["max_lat"]=$(bc -l <<< "scale=3; ${results[max_lat]} / ${#log_files[@]}")
+
+	fio_csv_filename="${fio_log_filename%%.*}.csv"
+	cat <<- EOF > "$fio_log_dir/$fio_csv_filename"
+		iops,bw,avg_lat,min_lat,max_lat
+		${results["iops"]},${results["bw"]},${results["avg_lat"]},${results["min_lat"]},${results["max_lat"]}
+	EOF
 }
 
 # Shutdown or kill any running VM and SPDK APP.
 #
-function at_app_exit()
-{
+function at_app_exit() {
 	local vhost_name
 
 	notice "APP EXITING"
@@ -1123,15 +1215,14 @@ function at_app_exit()
 	# Kill vhost application
 	notice "killing vhost app"
 
-	for vhost_name in $(ls $TARGET_DIR); do
-		vhost_kill $vhost_name
+	for vhost_name in "$TARGET_DIR"/*; do
+		vhost_kill "$(basename "$vhost_name")"
 	done
 
 	notice "EXIT DONE"
 }
 
-function error_exit()
-{
+function error_exit() {
 	trap - ERR
 	print_backtrace
 	set +e

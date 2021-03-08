@@ -5,25 +5,23 @@ rootdir=$(readlink -f $testdir/../../..)
 source $rootdir/test/common/autotest_common.sh
 source $rootdir/test/iscsi_tgt/common.sh
 
-# $1 = "iso" - triggers isolation mode (setting up required environment).
-# $2 = test type posix or vpp. defaults to posix.
-iscsitestinit $1 $2
+iscsitestinit
 
 rpc_py="$rootdir/scripts/rpc.py"
 node_base="iqn.2013-06.com.intel.ch.spdk"
 
 timing_enter start_iscsi_tgt
 
-$ISCSI_APP --wait-for-rpc &
+"${ISCSI_APP[@]}" --wait-for-rpc &
 pid=$!
 echo "Process pid: $pid"
 
-trap '$rpc_py bdev_split_delete Name0n1 || true; killprocess $pid; iscsitestfini $1 $2; exit 1' SIGINT SIGTERM EXIT
+trap '$rpc_py bdev_split_delete Name0n1 || true; killprocess $pid; iscsitestfini; exit 1' SIGINT SIGTERM EXIT
 
 waitforlisten $pid
 $rpc_py iscsi_set_options -o 30 -a 4 -b $node_base
 $rpc_py framework_start_init
-$rootdir/scripts/gen_nvme.sh --json | $rpc_py load_subsystem_config
+$rootdir/scripts/gen_nvme.sh | $rpc_py load_subsystem_config
 $rpc_py bdev_malloc_create 512 4096 --name Malloc0
 echo "iscsi_tgt is listening. Running tests..."
 
@@ -43,7 +41,7 @@ iscsiadm -m node --login -p $TARGET_IP:$ISCSI_PORT
 waitforiscsidevices 1
 
 trap 'for new_dir in $(dir -d /mnt/*dir); do umount $new_dir; rm -rf $new_dir; done;
-	iscsicleanup; killprocess $pid; iscsitestfini $1 $2; exit 1' SIGINT SIGTERM EXIT
+	iscsicleanup; killprocess $pid; iscsitestfini; exit 1' SIGINT SIGTERM EXIT
 
 echo "Test error injection"
 $rpc_py bdev_error_inject_error EE_Malloc0 'all' 'failure' -n 1000
@@ -51,8 +49,8 @@ $rpc_py bdev_error_inject_error EE_Malloc0 'all' 'failure' -n 1000
 dev=$(iscsiadm -m session -P 3 | grep "Attached scsi disk" | awk '{print $4}')
 
 set +e
-waitforfile /dev/$dev
-if mkfs.ext4 -F /dev/$dev; then
+waitforfile /dev/${dev}
+if make_filesystem ext4 /dev/${dev}; then
 	echo "mkfs successful - expected failure"
 	iscsicleanup
 	killprocess $pid
@@ -69,7 +67,7 @@ echo "Error injection test done"
 
 if [ -z "$NO_NVME" ]; then
 	bdev_size=$(get_bdev_size Nvme0n1)
-	split_size=$((bdev_size/2))
+	split_size=$((bdev_size / 2))
 	if [ $split_size -gt 10000 ]; then
 		split_size=10000
 	fi
@@ -84,14 +82,14 @@ waitforiscsidevices 1
 devs=$(iscsiadm -m session -P 3 | grep "Attached scsi disk" | awk '{print $4}')
 
 for dev in $devs; do
-	mkfs.ext4 -F /dev/$dev
+	make_filesystem ext4 /dev/${dev}
 	mkdir -p /mnt/${dev}dir
-	mount -o sync /dev/$dev /mnt/${dev}dir
+	mount -o sync /dev/${dev} /mnt/${dev}dir
 
 	rsync -qav --exclude=".git" --exclude="*.o" $rootdir/ /mnt/${dev}dir/spdk
 
 	make -C /mnt/${dev}dir/spdk clean
-	(cd /mnt/${dev}dir/spdk && ./configure $config_params)
+	(cd /mnt/${dev}dir/spdk && ./configure $(get_config_params))
 	make -C /mnt/${dev}dir/spdk -j16
 
 	# Print out space consumed on target device to help decide
@@ -128,5 +126,4 @@ if [ -z "$NO_NVME" ]; then
 fi
 
 killprocess $pid
-iscsitestfini $1 $2
-report_test_completion "nightly_iscsi_ext4test"
+iscsitestfini

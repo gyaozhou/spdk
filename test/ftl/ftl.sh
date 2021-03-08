@@ -9,7 +9,7 @@ rpc_py=$rootdir/scripts/rpc.py
 
 function at_ftl_exit() {
 	# restore original driver
-	PCI_WHITELIST="$device" PCI_BLACKLIST="" DRIVER_OVERRIDE="$ocssd_original_dirver" ./scripts/setup.sh
+	PCI_ALLOWED="$device" PCI_BLOCKED="" DRIVER_OVERRIDE="$ocssd_original_dirver" $rootdir/scripts/setup.sh
 }
 
 read -r device _ <<< "$OCSSD_PCI_DEVICES"
@@ -26,12 +26,12 @@ ocssd_original_dirver="$(basename $(readlink /sys/bus/pci/devices/$device/driver
 
 trap 'at_ftl_exit' SIGINT SIGTERM EXIT
 
-# OCSSD is blacklisted so bind it to vfio/uio driver before testing
-PCI_WHITELIST="$device" PCI_BLACKLIST="" DRIVER_OVERRIDE="" ./scripts/setup.sh
+# OCSSD is blocked so bind it to vfio/uio driver before testing
+PCI_ALLOWED="$device" PCI_BLOCKED="" DRIVER_OVERRIDE="" $rootdir/scripts/setup.sh
 
 # Use first regular NVMe disk (non-OC) as non-volatile cache
-nvme_disks=$($rootdir/scripts/gen_nvme.sh --json | jq -r \
-	   ".config[] | select(.params.traddr != \"$device\").params.traddr")
+nvme_disks=$($rootdir/scripts/gen_nvme.sh | jq -r \
+	".config[] | select(.params.traddr != \"$device\").params.traddr")
 
 for disk in $nvme_disks; do
 	if has_separate_md $disk; then
@@ -46,6 +46,7 @@ if [ -z "$nv_cache" ]; then
 fi
 
 run_test "ftl_bdevperf" $testdir/bdevperf.sh $device
+run_test "ftl_bdevperf_append" $testdir/bdevperf.sh $device --use_append
 
 run_test "ftl_restore" $testdir/restore.sh $device
 if [ -n "$nv_cache" ]; then
@@ -61,14 +62,17 @@ run_test "ftl_json" $testdir/json.sh $device
 if [ $SPDK_TEST_FTL_EXTENDED -eq 1 ]; then
 	run_test "ftl_fio_basic" $testdir/fio.sh $device basic
 
-	$rootdir/app/spdk_tgt/spdk_tgt &
-	svc_pid=$!
+	"$SPDK_BIN_DIR/spdk_tgt" --json <(gen_ftl_nvme_conf) &
+	svcpid=$!
 
-	trap 'killprocess $svc_pid; exit 1' SIGINT SIGTERM EXIT
+	trap 'killprocess $svcpid; exit 1' SIGINT SIGTERM EXIT
 
-	waitforlisten $svc_pid
-	uuid=$($rpc_py bdev_ftl_create -b nvme0 -a $device -l 0-3 | jq -r '.uuid')
-	killprocess $svc_pid
+	waitforlisten $svcpid
+
+	$rpc_py bdev_nvme_attach_controller -b nvme0 -a $device -t pcie
+	$rpc_py bdev_ocssd_create -c nvme0 -b nvme0n1 -n 1
+	uuid=$($rpc_py bdev_ftl_create -b ftl0 -d nvme0n1 | jq -r '.uuid')
+	killprocess $svcpid
 
 	trap - SIGINT SIGTERM EXIT
 

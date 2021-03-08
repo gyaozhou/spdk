@@ -5,9 +5,7 @@ rootdir=$(readlink -f $testdir/../../..)
 source $rootdir/test/common/autotest_common.sh
 source $rootdir/test/iscsi_tgt/common.sh
 
-# $1 = "iso" - triggers isolation mode (setting up required environment).
-# $2 = test type posix or vpp. defaults to posix.
-iscsitestinit $1 $2
+iscsitestinit
 
 rpc_py="$rootdir/scripts/rpc.py"
 fio_py="$rootdir/scripts/fio.py"
@@ -35,15 +33,15 @@ function remove_backends() {
 }
 
 timing_enter start_iscsi_tgt
-$ISCSI_APP --wait-for-rpc &
+"${ISCSI_APP[@]}" --wait-for-rpc &
 iscsipid=$!
 echo "iSCSI target launched. pid: $iscsipid"
-trap 'remove_backends; iscsicleanup; killprocess $iscsipid; iscsitestfini $1 $2; exit 1' SIGINT SIGTERM EXIT
+trap 'remove_backends; iscsicleanup; killprocess $iscsipid; iscsitestfini; exit 1' SIGINT SIGTERM EXIT
 
 waitforlisten $iscsipid
 $rpc_py iscsi_set_options -o 30 -a 128
 $rpc_py framework_start_init
-$rootdir/scripts/gen_nvme.sh --json | $rpc_py load_subsystem_config
+$rootdir/scripts/gen_nvme.sh | $rpc_py load_subsystem_config
 timing_exit start_iscsi_tgt
 
 $rpc_py iscsi_create_portal_group $PORTAL_TAG $TARGET_IP:$ISCSI_PORT
@@ -81,4 +79,4 @@ rm -f ./local-job*
 iscsicleanup
 remove_backends
 killprocess $iscsipid
-iscsitestfini $1 $2
+iscsitestfini

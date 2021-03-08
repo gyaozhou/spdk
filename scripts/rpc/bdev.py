@@ -2,12 +2,16 @@ from .helpers import deprecated_alias
 
 
 @deprecated_alias('set_bdev_options')
-def bdev_set_options(client, bdev_io_pool_size=None, bdev_io_cache_size=None):
+def bdev_set_options(client, bdev_io_pool_size=None, bdev_io_cache_size=None, bdev_auto_examine=None,
+                     small_buf_pool_size=None, large_buf_pool_size=None):
     """Set parameters for the bdev subsystem.
 
     Args:
         bdev_io_pool_size: number of bdev_io structures in shared buffer pool (optional)
         bdev_io_cache_size: maximum number of bdev_io structures cached per thread (optional)
+        bdev_auto_examine: if set to false, the bdev layer will not examine every disks automatically (optional)
+        small_buf_pool_size: maximum number of small buffer (8KB buffer) pool size (optional)
+        large_buf_pool_size: maximum number of large buffer (64KB buffer) pool size (optional)
     """
     params = {}
 
@@ -15,22 +19,47 @@ def bdev_set_options(client, bdev_io_pool_size=None, bdev_io_cache_size=None):
         params['bdev_io_pool_size'] = bdev_io_pool_size
     if bdev_io_cache_size:
         params['bdev_io_cache_size'] = bdev_io_cache_size
-
+    if bdev_auto_examine is not None:
+        params["bdev_auto_examine"] = bdev_auto_examine
+    if small_buf_pool_size:
+        params['small_buf_pool_size'] = small_buf_pool_size
+    if large_buf_pool_size:
+        params['large_buf_pool_size'] = large_buf_pool_size
     return client.call('bdev_set_options', params)
 
 
+def bdev_examine(client, name):
+    """Examine a bdev manually. If the bdev does not exist yet when this RPC is called,
+    it will be examined when it is created
+
+    Args:
+        name: name of the bdev
+    """
+    params = {
+        'name': name
+    }
+    return client.call('bdev_examine', params)
+
+
+def bdev_wait_for_examine(client):
+    """Report when all bdevs have been examined
+    """
+    return client.call('bdev_wait_for_examine')
+
+
 @deprecated_alias('construct_compress_bdev')
-def bdev_compress_create(client, base_bdev_name, pm_path):
+def bdev_compress_create(client, base_bdev_name, pm_path, lb_size):
     """Construct a compress virtual block device.
 
     Args:
         base_bdev_name: name of the underlying base bdev
         pm_path: path to persistent memory
+        lb_size: logical block size for the compressed vol in bytes.  Must be 4K or 512.
 
     Returns:
         Name of created virtual block device.
     """
-    params = {'base_bdev_name': base_bdev_name, 'pm_path': pm_path}
+    params = {'base_bdev_name': base_bdev_name, 'pm_path': pm_path, 'lb_size': lb_size}
 
     return client.call('bdev_compress_create', params)
 
@@ -46,7 +75,9 @@ def bdev_compress_delete(client, name):
     return client.call('bdev_compress_delete', params)
 
 
-def set_compress_pmd(client, pmd):
+@deprecated_alias('set_compress_pmd')
+@deprecated_alias('compress_set_pmd')
+def bdev_compress_set_pmd(client, pmd):
     """Set pmd options for the bdev compress.
 
     Args:
@@ -54,7 +85,7 @@ def set_compress_pmd(client, pmd):
     """
     params = {'pmd': pmd}
 
-    return client.call('set_compress_pmd', params)
+    return client.call('bdev_compress_set_pmd', params)
 
 
 def bdev_compress_get_orphans(client, name=None):
@@ -73,7 +104,7 @@ def bdev_compress_get_orphans(client, name=None):
 
 
 @deprecated_alias('construct_crypto_bdev')
-def bdev_crypto_create(client, base_bdev_name, name, crypto_pmd, key):
+def bdev_crypto_create(client, base_bdev_name, name, crypto_pmd, key, cipher=None, key2=None):
     """Construct a crypto virtual block device.
 
     Args:
@@ -86,7 +117,10 @@ def bdev_crypto_create(client, base_bdev_name, name, crypto_pmd, key):
         Name of created virtual block device.
     """
     params = {'base_bdev_name': base_bdev_name, 'name': name, 'crypto_pmd': crypto_pmd, 'key': key}
-
+    if cipher:
+        params['cipher'] = cipher
+    if key2:
+        params['key2'] = key2
     return client.call('bdev_crypto_create', params)
 
 
@@ -102,19 +136,26 @@ def bdev_crypto_delete(client, name):
 
 
 @deprecated_alias('construct_ocf_bdev')
-def bdev_ocf_create(client, name, mode, cache_bdev_name, core_bdev_name):
+def bdev_ocf_create(client, name, mode, cache_line_size, cache_bdev_name, core_bdev_name):
     """Add an OCF block device
 
     Args:
         name: name of constructed OCF bdev
         mode: OCF cache mode: {'wb', 'wt', 'pt', 'wa', 'wi', 'wo'}
+        cache_line_size: OCF cache line size. The unit is KiB: {4, 8, 16, 32, 64}
         cache_bdev_name: name of underlying cache bdev
         core_bdev_name: name of underlying core bdev
 
     Returns:
         Name of created block device
     """
-    params = {'name': name, 'mode': mode, 'cache_bdev_name': cache_bdev_name, 'core_bdev_name': core_bdev_name}
+    params = {
+        'name': name,
+        'mode': mode,
+        'cache_line_size': cache_line_size,
+        'cache_bdev_name': cache_bdev_name,
+        'core_bdev_name': core_bdev_name,
+    }
 
     return client.call('bdev_ocf_create', params)
 
@@ -236,6 +277,20 @@ def bdev_null_delete(client, name):
     return client.call('bdev_null_delete', params)
 
 
+def bdev_null_resize(client, name, new_size):
+    """Resize null bdev in the system.
+
+    Args:
+        name: name of null bdev to resize
+        new_size: new bdev size of resize operation. The unit is MiB
+    """
+    params = {
+            'name': name,
+            'new_size': new_size,
+            }
+    return client.call('bdev_null_resize', params)
+
+
 @deprecated_alias('get_raid_bdevs')
 def bdev_raid_get_bdevs(client, category):
     """Get list of raid bdevs based on category
@@ -352,8 +407,8 @@ def bdev_uring_delete(client, name):
 
 
 @deprecated_alias('set_bdev_nvme_options')
-def bdev_nvme_set_options(client, action_on_timeout=None, timeout_us=None, retry_count=None,
-                          arbitration_burst=None, low_priority_weight=None,
+def bdev_nvme_set_options(client, action_on_timeout=None, timeout_us=None, keep_alive_timeout_ms=None,
+                          retry_count=None, arbitration_burst=None, low_priority_weight=None,
                           medium_priority_weight=None, high_priority_weight=None,
                           nvme_adminq_poll_period_us=None, nvme_ioq_poll_period_us=None, io_queue_requests=None,
                           delay_cmd_submit=None):
@@ -362,6 +417,7 @@ def bdev_nvme_set_options(client, action_on_timeout=None, timeout_us=None, retry
     Args:
         action_on_timeout:  action to take on command time out. Valid values are: none, reset, abort (optional)
         timeout_us: Timeout for each command, in microseconds. If 0, don't track timeouts (optional)
+        keep_alive_timeout_ms: Keep alive timeout period in millisecond, default is 10s (optional)
         retry_count: The number of attempts per I/O when an I/O fails (optional)
         arbitration_burst: The value is expressed as a power of two (optional)
         low_prioity_weight: The number of commands that may be executed from the low priority queue at one time (optional)
@@ -377,31 +433,34 @@ def bdev_nvme_set_options(client, action_on_timeout=None, timeout_us=None, retry
     if action_on_timeout:
         params['action_on_timeout'] = action_on_timeout
 
-    if timeout_us:
+    if timeout_us is not None:
         params['timeout_us'] = timeout_us
 
-    if retry_count:
+    if keep_alive_timeout_ms is not None:
+        params['keep_alive_timeout_ms'] = keep_alive_timeout_ms
+
+    if retry_count is not None:
         params['retry_count'] = retry_count
 
-    if arbitration_burst:
+    if arbitration_burst is not None:
         params['arbitration_burst'] = arbitration_burst
 
-    if low_priority_weight:
+    if low_priority_weight is not None:
         params['low_priority_weight'] = low_priority_weight
 
-    if medium_priority_weight:
+    if medium_priority_weight is not None:
         params['medium_priority_weight'] = medium_priority_weight
 
-    if high_priority_weight:
+    if high_priority_weight is not None:
         params['high_priority_weight'] = high_priority_weight
 
     if nvme_adminq_poll_period_us:
         params['nvme_adminq_poll_period_us'] = nvme_adminq_poll_period_us
 
-    if nvme_ioq_poll_period_us:
+    if nvme_ioq_poll_period_us is not None:
         params['nvme_ioq_poll_period_us'] = nvme_ioq_poll_period_us
 
-    if io_queue_requests:
+    if io_queue_requests is not None:
         params['io_queue_requests'] = io_queue_requests
 
     if delay_cmd_submit is not None:
@@ -428,22 +487,26 @@ def bdev_nvme_set_hotplug(client, enable, period_us=None):
 
 @deprecated_alias('construct_nvme_bdev')
 def bdev_nvme_attach_controller(client, name, trtype, traddr, adrfam=None, trsvcid=None,
-                                subnqn=None, hostnqn=None, hostaddr=None, hostsvcid=None,
-                                prchk_reftag=None, prchk_guard=None):
+                                priority=None, subnqn=None, hostnqn=None, hostaddr=None,
+                                hostsvcid=None, prchk_reftag=None, prchk_guard=None,
+                                hdgst=None, ddgst=None):
     """Construct block device for each NVMe namespace in the attached controller.
 
     Args:
         name: bdev name prefix; "n" + namespace ID will be appended to create unique names
-        trtype: transport type ("PCIe", "RDMA")
+        trtype: transport type ("PCIe", "RDMA", "FC", "TCP")
         traddr: transport address (PCI BDF or IP address)
-        adrfam: address family ("IPv4", "IPv6", "IB", or "FC") (optional for PCIe)
-        trsvcid: transport service ID (port number for IP-based addresses; optional for PCIe)
+        adrfam: address family ("IPv4", "IPv6", "IB", or "FC")
+        trsvcid: transport service ID (port number for IP-based addresses)
+        priority: transport connection priority (Sock priority for TCP-based transports; optional)
         subnqn: subsystem NQN to connect to (optional)
         hostnqn: NQN to connect from (optional)
         hostaddr: host transport address (IP address for IP-based transports, NULL for PCIe or FC; optional)
         hostsvcid: host transport service ID (port number for IP-based transports, NULL for PCIe or FC; optional)
         prchk_reftag: Enable checking of PI reference tag for I/O processing (optional)
         prchk_guard: Enable checking of PI guard for I/O processing (optional)
+        hdgst: Enable TCP header digest (optional)
+        ddgst: Enable TCP data digest (optional)
 
     Returns:
         Names of created block devices.
@@ -467,6 +530,9 @@ def bdev_nvme_attach_controller(client, name, trtype, traddr, adrfam=None, trsvc
     if trsvcid:
         params['trsvcid'] = trsvcid
 
+    if priority:
+        params['priority'] = priority
+
     if subnqn:
         params['subnqn'] = subnqn
 
@@ -476,18 +542,50 @@ def bdev_nvme_attach_controller(client, name, trtype, traddr, adrfam=None, trsvc
     if prchk_guard:
         params['prchk_guard'] = prchk_guard
 
+    if hdgst:
+        params['hdgst'] = hdgst
+
+    if ddgst:
+        params['ddgst'] = ddgst
+
     return client.call('bdev_nvme_attach_controller', params)
 
 
 @deprecated_alias('delete_nvme_controller')
-def bdev_nvme_detach_controller(client, name):
-    """Detach NVMe controller and delete any associated bdevs.
+def bdev_nvme_detach_controller(client, name, trtype=None, traddr=None,
+                                adrfam=None, trsvcid=None, subnqn=None):
+    """Detach NVMe controller and delete any associated bdevs. Optionally,
+       If all of the transport ID options are specified, only remove that
+       transport path from the specified controller. If that is the only
+       available path for the controller, this will also result in the
+       controller being detached and the associated bdevs being deleted.
 
     Args:
         name: controller name
+        trtype: transport type ("PCIe", "RDMA")
+        traddr: transport address (PCI BDF or IP address)
+        adrfam: address family ("IPv4", "IPv6", "IB", or "FC")
+        trsvcid: transport service ID (port number for IP-based addresses)
+        subnqn: subsystem NQN to connect to (optional)
     """
 
     params = {'name': name}
+
+    if trtype:
+        params['trtype'] = trtype
+
+    if traddr:
+        params['traddr'] = traddr
+
+    if adrfam:
+        params['adrfam'] = adrfam
+
+    if trsvcid:
+        params['trsvcid'] = trsvcid
+
+    if subnqn:
+        params['subnqn'] = subnqn
+
     return client.call('bdev_nvme_detach_controller', params)
 
 
@@ -583,6 +681,20 @@ def bdev_rbd_delete(client, name):
     """
     params = {'name': name}
     return client.call('bdev_rbd_delete', params)
+
+
+def bdev_rbd_resize(client, name, new_size):
+    """Resize rbd bdev in the system.
+
+    Args:
+        name: name of rbd bdev to resize
+        new_size: new bdev size of resize operation. The unit is MiB
+    """
+    params = {
+            'name': name,
+            'new_size': new_size,
+            }
+    return client.call('bdev_rbd_resize', params)
 
 
 @deprecated_alias('construct_error_bdev')
@@ -884,20 +996,16 @@ def bdev_split_delete(client, base_bdev):
 
 
 @deprecated_alias('construct_ftl_bdev')
-def bdev_ftl_create(client, name, trtype, traddr, punits, **kwargs):
+def bdev_ftl_create(client, name, base_bdev, **kwargs):
     """Construct FTL bdev
 
     Args:
         name: name of the bdev
-        trtype: transport type
-        traddr: transport address
-        punit: parallel unit range
+        base_bdev: name of the base bdev
         kwargs: optional parameters
     """
     params = {'name': name,
-              'trtype': trtype,
-              'traddr': traddr,
-              'punits': punits}
+              'base_bdev': base_bdev}
     for key, value in kwargs.items():
         if value is not None:
             params[key] = value
@@ -924,16 +1032,12 @@ def bdev_ocssd_create(client, ctrlr_name, bdev_name, nsid=None, range=None):
         ctrlr_name: name of the OC NVMe controller
         bdev_name: name of the bdev to create
         nsid: namespace ID
-        range: parallel unit range
     """
     params = {'ctrlr_name': ctrlr_name,
               'bdev_name': bdev_name}
 
     if nsid is not None:
         params['nsid'] = nsid
-
-    if range is not None:
-        params['range'] = range
 
     return client.call('bdev_ocssd_create', params)
 
@@ -1050,7 +1154,7 @@ def bdev_set_qos_limit(
 
     Args:
         name: name of block device
-        rw_ios_per_sec: R/W IOs per second limit (>=10000, example: 20000). 0 means unlimited.
+        rw_ios_per_sec: R/W IOs per second limit (>=1000, example: 20000). 0 means unlimited.
         rw_mbytes_per_sec: R/W megabytes per second limit (>=10, example: 100). 0 means unlimited.
         r_mbytes_per_sec: Read megabytes per second limit (>=10, example: 100). 0 means unlimited.
         w_mbytes_per_sec: Write megabytes per second limit (>=10, example: 100). 0 means unlimited.

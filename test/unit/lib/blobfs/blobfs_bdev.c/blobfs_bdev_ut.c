@@ -39,8 +39,7 @@
 
 int g_fserrno;
 
-bool g_bdev_open_ext_fail = false;
-bool g_bdev_create_bs_dev_from_desc_fail = false;
+bool g_bdev_create_bs_dev_ext_fail = false;
 bool g_fs_load_fail = false;
 bool g_fs_unload_fail = false;
 bool g_bs_bdev_claim_fail = false;
@@ -48,34 +47,35 @@ bool g_blobfs_fuse_start_fail = false;
 struct blobfs_bdev_operation_ctx *g_fs_ctx;
 
 const char *g_bdev_name = "ut_bdev";
+struct spdk_bdev g_bdev;
 
-int
-spdk_bdev_open_ext(const char *bdev_name, bool write, spdk_bdev_event_cb_t event_cb,
-		   void *event_ctx, struct spdk_bdev_desc **_desc)
-{
-	if (g_bdev_open_ext_fail) {
-		return -1;
-	}
-
-	return 0;
-}
-
-static  void
+static void
 bs_dev_destroy(struct spdk_bs_dev *dev)
 {
 }
 
-struct spdk_bs_dev *
-spdk_bdev_create_bs_dev_from_desc(struct spdk_bdev_desc *desc)
+static struct spdk_bdev *
+bs_dev_get_base_bdev(struct spdk_bs_dev *dev)
+{
+	return &g_bdev;
+}
+
+int
+spdk_bdev_create_bs_dev_ext(const char *bdev_name, spdk_bdev_event_cb_t event_cb,
+			    void *event_ctx, struct spdk_bs_dev **_bs_dev)
 {
 	static struct spdk_bs_dev bs_dev;
 
-	if (g_bdev_create_bs_dev_from_desc_fail) {
-		return NULL;
+	if (g_bdev_create_bs_dev_ext_fail) {
+		return -EINVAL;
 	}
 
 	bs_dev.destroy = bs_dev_destroy;
-	return &bs_dev;
+	bs_dev.get_base_bdev = bs_dev_get_base_bdev;
+
+	*_bs_dev = &bs_dev;
+
+	return 0;
 }
 
 void
@@ -132,8 +132,8 @@ spdk_bs_bdev_claim(struct spdk_bs_dev *bs_dev, struct spdk_bdev_module *module)
 }
 
 int
-spdk_blobfs_fuse_start(const char *bdev_name, const char *mountpoint, struct spdk_filesystem *fs,
-		       blobfs_fuse_unmount_cb cb_fn, void *cb_arg, struct spdk_blobfs_fuse **_bfuse)
+blobfs_fuse_start(const char *bdev_name, const char *mountpoint, struct spdk_filesystem *fs,
+		  blobfs_fuse_unmount_cb cb_fn, void *cb_arg, struct spdk_blobfs_fuse **_bfuse)
 {
 	if (g_blobfs_fuse_start_fail) {
 		return -1;
@@ -177,12 +177,12 @@ spdk_fs_opts_init(struct spdk_blobfs_opts *opts)
 }
 
 void
-spdk_blobfs_fuse_send_request(fs_request_fn fn, void *arg)
+blobfs_fuse_send_request(fs_request_fn fn, void *arg)
 {
 }
 
 void
-spdk_blobfs_fuse_stop(struct spdk_blobfs_fuse *bfuse)
+blobfs_fuse_stop(struct spdk_blobfs_fuse *bfuse)
 {
 }
 
@@ -195,19 +195,12 @@ blobfs_bdev_op_complete(void *cb_arg, int fserrno)
 static void
 spdk_blobfs_bdev_detect_test(void)
 {
-	/* spdk_bdev_open_ext() fails */
-	g_bdev_open_ext_fail = true;
+	/* spdk_bdev_create_bs_dev_ext() fails */
+	g_bdev_create_bs_dev_ext_fail = true;
 	spdk_blobfs_bdev_detect(g_bdev_name, blobfs_bdev_op_complete, NULL);
 	CU_ASSERT(g_fserrno != 0);
 
-	g_bdev_open_ext_fail = false;
-
-	/* spdk_bdev_create_bs_dev_from_desc() fails */
-	g_bdev_create_bs_dev_from_desc_fail = true;
-	spdk_blobfs_bdev_detect(g_bdev_name, blobfs_bdev_op_complete, NULL);
-	CU_ASSERT(g_fserrno != 0);
-
-	g_bdev_create_bs_dev_from_desc_fail = false;
+	g_bdev_create_bs_dev_ext_fail = false;
 
 	/* spdk_fs_load() fails */
 	g_fs_load_fail = true;
@@ -233,19 +226,12 @@ spdk_blobfs_bdev_create_test(void)
 {
 	uint32_t cluster_sz = 1024 * 1024;
 
-	/* spdk_bdev_open_ext() fails */
-	g_bdev_open_ext_fail = true;
+	/* spdk_bdev_create_bs_dev_ext() fails */
+	g_bdev_create_bs_dev_ext_fail = true;
 	spdk_blobfs_bdev_create(g_bdev_name, cluster_sz, blobfs_bdev_op_complete, NULL);
 	CU_ASSERT(g_fserrno != 0);
 
-	g_bdev_open_ext_fail = false;
-
-	/* spdk_bdev_create_bs_dev_from_desc() fails */
-	g_bdev_create_bs_dev_from_desc_fail = true;
-	spdk_blobfs_bdev_create(g_bdev_name, cluster_sz, blobfs_bdev_op_complete, NULL);
-	CU_ASSERT(g_fserrno != 0);
-
-	g_bdev_create_bs_dev_from_desc_fail = false;
+	g_bdev_create_bs_dev_ext_fail = false;
 
 	/* spdk_bs_bdev_claim() fails */
 	g_bs_bdev_claim_fail = true;
@@ -279,19 +265,12 @@ spdk_blobfs_bdev_mount_test(void)
 #ifdef SPDK_CONFIG_FUSE
 	const char *mountpoint = "/mnt";
 
-	/* spdk_bdev_open_ext() fails */
-	g_bdev_open_ext_fail = true;
+	/* spdk_bdev_create_bs_dev_ext() fails */
+	g_bdev_create_bs_dev_ext_fail = true;
 	spdk_blobfs_bdev_mount(g_bdev_name, mountpoint, blobfs_bdev_op_complete, NULL);
 	CU_ASSERT(g_fserrno != 0);
 
-	g_bdev_open_ext_fail = false;
-
-	/* spdk_bdev_create_bs_dev_from_desc() fails */
-	g_bdev_create_bs_dev_from_desc_fail = true;
-	spdk_blobfs_bdev_mount(g_bdev_name, mountpoint, blobfs_bdev_op_complete, NULL);
-	CU_ASSERT(g_fserrno != 0);
-
-	g_bdev_create_bs_dev_from_desc_fail = false;
+	g_bdev_create_bs_dev_ext_fail = false;
 
 	/* spdk_bs_bdev_claim() fails */
 	g_bs_bdev_claim_fail = true;
@@ -307,7 +286,7 @@ spdk_blobfs_bdev_mount_test(void)
 
 	g_fs_load_fail = false;
 
-	/* spdk_blobfs_fuse_start() fails */
+	/* blobfs_fuse_start() fails */
 	g_blobfs_fuse_start_fail = true;
 	spdk_blobfs_bdev_mount(g_bdev_name, mountpoint, blobfs_bdev_op_complete, NULL);
 	CU_ASSERT(g_fserrno != 0);
@@ -330,24 +309,14 @@ int main(int argc, char **argv)
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	if (CU_initialize_registry() != CUE_SUCCESS) {
-		return CU_get_error();
-	}
+	CU_set_error_action(CUEA_ABORT);
+	CU_initialize_registry();
 
 	suite = CU_add_suite("blobfs_bdev_ut", NULL, NULL);
-	if (suite == NULL) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
 
-	if (
-		CU_add_test(suite, "spdk_blobfs_bdev_detect_test", spdk_blobfs_bdev_detect_test) == NULL ||
-		CU_add_test(suite, "spdk_blobfs_bdev_create_test", spdk_blobfs_bdev_create_test) == NULL ||
-		CU_add_test(suite, "spdk_blobfs_bdev_mount_test", spdk_blobfs_bdev_mount_test) == NULL
-	) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
+	CU_ADD_TEST(suite, spdk_blobfs_bdev_detect_test);
+	CU_ADD_TEST(suite, spdk_blobfs_bdev_create_test);
+	CU_ADD_TEST(suite, spdk_blobfs_bdev_mount_test);
 
 	CU_basic_set_mode(CU_BRM_VERBOSE);
 	CU_basic_run_tests();
@@ -356,5 +325,3 @@ int main(int argc, char **argv)
 
 	return num_failures;
 }
-
-SPDK_LOG_REGISTER_COMPONENT("blobfs", SPDK_LOG_BLOBFS)

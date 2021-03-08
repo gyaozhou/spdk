@@ -33,12 +33,7 @@
 
 #include "spdk/stdinc.h"
 
-#include "spdk_internal/log.h"
-
-#ifdef SPDK_LOG_BACKTRACE_LVL
-#define UNW_LOCAL_ONLY
-#include <libunwind.h>
-#endif
+#include "spdk/log.h"
 
 static const char *const spdk_level_names[] = {
 	[SPDK_LOG_ERROR]	= "ERROR",
@@ -51,6 +46,10 @@ static const char *const spdk_level_names[] = {
 #define MAX_TMPBUF 1024
 
 static logfunc *g_log = NULL;
+static bool g_log_timestamps = true;
+
+extern enum spdk_log_level g_spdk_log_level;
+extern enum spdk_log_level g_spdk_log_print_level;
 
 void
 spdk_log_open(logfunc *logf)
@@ -70,56 +69,58 @@ spdk_log_close(void)
 	}
 }
 
-#ifdef SPDK_LOG_BACKTRACE_LVL
-static void
-spdk_log_unwind_stack(FILE *fp, enum spdk_log_level level)
+void
+spdk_log_enable_timestamps(bool value)
 {
-	unw_error_t err;
-	unw_cursor_t cursor;
-	unw_context_t uc;
-	unw_word_t ip;
-	unw_word_t offp;
-	char f_name[64];
-	int frame;
+	g_log_timestamps = value;
+}
 
-	if (level > g_spdk_log_backtrace_level) {
+static void
+get_timestamp_prefix(char *buf, int buf_size)
+{
+	struct tm *info;
+	char date[24];
+	struct timespec ts;
+	long usec;
+
+	if (!g_log_timestamps) {
+		buf[0] = '\0';
 		return;
 	}
 
-	unw_getcontext(&uc);
-	unw_init_local(&cursor, &uc);
-	fprintf(fp, "*%s*: === BACKTRACE START ===\n", spdk_level_names[level]);
-
-	unw_step(&cursor);
-	for (frame = 1; unw_step(&cursor) > 0; frame++) {
-		unw_get_reg(&cursor, UNW_REG_IP, &ip);
-		err = unw_get_proc_name(&cursor, f_name, sizeof(f_name), &offp);
-		if (err || strcmp(f_name, "main") == 0) {
-			break;
-		}
-
-		fprintf(fp, "*%s*: %3d: %*s%s() at %#lx\n", spdk_level_names[level], frame, frame - 1, "", f_name,
-			(unsigned long)ip);
+	clock_gettime(CLOCK_REALTIME, &ts);
+	info = localtime(&ts.tv_sec);
+	usec = ts.tv_nsec / 1000;
+	if (info == NULL) {
+		snprintf(buf, buf_size, "[%s.%06ld] ", "unknown date", usec);
+		return;
 	}
-	fprintf(fp, "*%s*: === BACKTRACE END ===\n", spdk_level_names[level]);
-}
 
-#else
-#define spdk_log_unwind_stack(fp, lvl)
-#endif
+	strftime(date, sizeof(date), "%Y-%m-%d %H:%M:%S", info);
+	snprintf(buf, buf_size, "[%s.%06ld] ", date, usec);
+}
 
 void
 spdk_log(enum spdk_log_level level, const char *file, const int line, const char *func,
 	 const char *format, ...)
 {
-	int severity = LOG_INFO;
-	char buf[MAX_TMPBUF];
 	va_list ap;
 
+	va_start(ap, format);
+	spdk_vlog(level, file, line, func, format, ap);
+	va_end(ap);
+}
+
+void
+spdk_vlog(enum spdk_log_level level, const char *file, const int line, const char *func,
+	  const char *format, va_list ap)
+{
+	int severity = LOG_INFO;
+	char buf[MAX_TMPBUF];
+	char timestamp[64];
+
 	if (g_log) {
-		va_start(ap, format);
 		g_log(level, file, line, func, format, ap);
-		va_end(ap);
 		return;
 	}
 
@@ -145,20 +146,24 @@ spdk_log(enum spdk_log_level level, const char *file, const int line, const char
 		return;
 	}
 
-	va_start(ap, format);
-
 	vsnprintf(buf, sizeof(buf), format, ap);
 
 	if (level <= g_spdk_log_print_level) {
-		fprintf(stderr, "%s:%4d:%s: *%s*: %s", file, line, func, spdk_level_names[level], buf);
-		spdk_log_unwind_stack(stderr, level);
+		get_timestamp_prefix(timestamp, sizeof(timestamp));
+		if (file) {
+			fprintf(stderr, "%s%s:%4d:%s: *%s*: %s", timestamp, file, line, func, spdk_level_names[level], buf);
+		} else {
+			fprintf(stderr, "%s%s", timestamp, buf);
+		}
 	}
 
 	if (level <= g_spdk_log_level) {
-		syslog(severity, "%s:%4d:%s: *%s*: %s", file, line, func, spdk_level_names[level], buf);
+		if (file) {
+			syslog(severity, "%s:%4d:%s: *%s*: %s", file, line, func, spdk_level_names[level], buf);
+		} else {
+			syslog(severity, "%s", buf);
+		}
 	}
-
-	va_end(ap);
 }
 
 static void
@@ -177,6 +182,7 @@ fdump(FILE *fp, const char *label, const uint8_t *buf, size_t len)
 		if (idx != 0 && idx % 16 == 0) {
 			snprintf(tmpbuf + total, sizeof tmpbuf - total,
 				 " %s", buf16);
+			memset(buf16, 0, sizeof buf16);
 			fprintf(fp, "%s\n", tmpbuf);
 			total = 0;
 		}
@@ -199,7 +205,6 @@ fdump(FILE *fp, const char *label, const uint8_t *buf, size_t len)
 		}
 
 		total += snprintf(tmpbuf + total, sizeof tmpbuf - total, "   ");
-		buf16[idx % 16] = ' ';
 	}
 	snprintf(tmpbuf + total, sizeof tmpbuf - total, "  %s", buf16);
 	fprintf(fp, "%s\n", tmpbuf);

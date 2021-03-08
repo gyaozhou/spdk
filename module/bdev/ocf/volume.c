@@ -35,8 +35,8 @@
 
 #include "spdk/bdev_module.h"
 #include "spdk/env.h"
-#include "spdk/io_channel.h"
-#include "spdk_internal/log.h"
+#include "spdk/thread.h"
+#include "spdk/log.h"
 
 #include "data.h"
 #include "volume.h"
@@ -182,7 +182,7 @@ vbdev_ocf_volume_submit_io_cb(struct spdk_bdev_io *bdev_io, bool success, void *
 	}
 
 	if (io_ctx->error) {
-		SPDK_DEBUGLOG(SPDK_TRACE_VBDEV_OCF_VOLUME,
+		SPDK_DEBUGLOG(vbdev_ocf_volume,
 			      "base returned error on io submission: %d\n", io_ctx->error);
 	}
 
@@ -204,7 +204,7 @@ static int
 prepare_submit(struct ocf_io *io)
 {
 	struct ocf_io_ctx *io_ctx = ocf_get_io_ctx(io);
-	struct vbdev_ocf_qcxt *qctx;
+	struct vbdev_ocf_qctx *qctx;
 	struct vbdev_ocf_base *base;
 	ocf_queue_t q = io->io_queue;
 	ocf_cache_t cache;
@@ -217,7 +217,7 @@ prepare_submit(struct ocf_io *io)
 	}
 
 	vbdev_ocf_volume_io_get(io);
-	base = *((struct vbdev_ocf_base **)ocf_volume_get_priv(io->volume));
+	base = *((struct vbdev_ocf_base **)ocf_volume_get_priv(ocf_io_get_volume(io)));
 
 	if (io->io_queue == NULL) {
 		/* In case IO is initiated by OCF, queue is unknown
@@ -231,6 +231,9 @@ prepare_submit(struct ocf_io *io)
 
 	cache = ocf_queue_get_cache(q);
 	cctx = ocf_cache_get_priv(cache);
+	if (cctx == NULL) {
+		return -EFAULT;
+	}
 
 	if (q == cctx->cleaner_queue || q == cctx->mngt_queue) {
 		io_ctx->ch = base->management_channel;
@@ -254,7 +257,9 @@ prepare_submit(struct ocf_io *io)
 static void
 vbdev_ocf_volume_submit_flush(struct ocf_io *io)
 {
-	struct vbdev_ocf_base *base = *((struct vbdev_ocf_base **)ocf_volume_get_priv(io->volume));
+	struct vbdev_ocf_base *base =
+		*((struct vbdev_ocf_base **)
+		  ocf_volume_get_priv(ocf_io_get_volume(io)));
 	struct ocf_io_ctx *io_ctx = ocf_get_io_ctx(io);
 	int status;
 
@@ -279,7 +284,9 @@ vbdev_ocf_volume_submit_flush(struct ocf_io *io)
 static void
 vbdev_ocf_volume_submit_io(struct ocf_io *io)
 {
-	struct vbdev_ocf_base *base = *((struct vbdev_ocf_base **)ocf_volume_get_priv(io->volume));
+	struct vbdev_ocf_base *base =
+		*((struct vbdev_ocf_base **)
+		  ocf_volume_get_priv(ocf_io_get_volume(io)));
 	struct ocf_io_ctx *io_ctx = ocf_get_io_ctx(io);
 	struct iovec *iovs;
 	int iovcnt, status = 0, i, offset;
@@ -363,7 +370,9 @@ end:
 static void
 vbdev_ocf_volume_submit_discard(struct ocf_io *io)
 {
-	struct vbdev_ocf_base *base = *((struct vbdev_ocf_base **)ocf_volume_get_priv(io->volume));
+	struct vbdev_ocf_base *base =
+		*((struct vbdev_ocf_base **)
+		  ocf_volume_get_priv(ocf_io_get_volume(io)));
 	struct ocf_io_ctx *io_ctx = ocf_get_io_ctx(io);
 	int status = 0;
 
@@ -432,4 +441,4 @@ vbdev_ocf_volume_cleanup(void)
 	ocf_ctx_unregister_volume_type(vbdev_ocf_ctx, SPDK_OBJECT);
 }
 
-SPDK_LOG_REGISTER_COMPONENT("vbdev_ocf_volume", SPDK_TRACE_VBDEV_OCF_VOLUME)
+SPDK_LOG_REGISTER_COMPONENT(vbdev_ocf_volume)

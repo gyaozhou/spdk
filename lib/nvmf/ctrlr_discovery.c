@@ -40,26 +40,44 @@
 #include "nvmf_internal.h"
 #include "transport.h"
 
-#include "spdk/event.h"
 #include "spdk/string.h"
 #include "spdk/trace.h"
 #include "spdk/nvmf_spec.h"
 
 #include "spdk/bdev_module.h"
-#include "spdk_internal/log.h"
+#include "spdk/log.h"
+
+void
+nvmf_update_discovery_log(struct spdk_nvmf_tgt *tgt, const char *hostnqn)
+{
+	struct spdk_nvmf_subsystem *discovery_subsystem;
+	struct spdk_nvmf_ctrlr *ctrlr;
+
+	tgt->discovery_genctr++;
+	discovery_subsystem = spdk_nvmf_tgt_find_subsystem(tgt, SPDK_NVMF_DISCOVERY_NQN);
+
+	if (discovery_subsystem) {
+		/** There is a change in discovery log for hosts with given hostnqn */
+		TAILQ_FOREACH(ctrlr, &discovery_subsystem->ctrlrs, link) {
+			if (hostnqn == NULL || strcmp(hostnqn, ctrlr->hostnqn) == 0) {
+				nvmf_ctrlr_async_event_discovery_log_change_notice(ctrlr);
+			}
+		}
+	}
+}
 
 static struct spdk_nvmf_discovery_log_page *
 nvmf_generate_discovery_log(struct spdk_nvmf_tgt *tgt, const char *hostnqn, size_t *log_page_size)
 {
 	uint64_t numrec = 0;
 	struct spdk_nvmf_subsystem *subsystem;
-	struct spdk_nvmf_listener *listener;
+	struct spdk_nvmf_subsystem_listener *listener;
 	struct spdk_nvmf_discovery_log_page_entry *entry;
 	struct spdk_nvmf_discovery_log_page *disc_log;
 	size_t cur_size;
 	uint32_t sid;
 
-	SPDK_DEBUGLOG(SPDK_LOG_NVMF, "Generating log page for genctr %" PRIu64 "\n",
+	SPDK_DEBUGLOG(nvmf, "Generating log page for genctr %" PRIu64 "\n",
 		      tgt->discovery_genctr);
 
 	cur_size = sizeof(struct spdk_nvmf_discovery_log_page);
@@ -106,7 +124,7 @@ nvmf_generate_discovery_log(struct spdk_nvmf_tgt *tgt, const char *hostnqn, size
 			entry->subtype = subsystem->subtype;
 			snprintf(entry->subnqn, sizeof(entry->subnqn), "%s", subsystem->subnqn);
 
-			spdk_nvmf_transport_listener_discover(listener->transport, &listener->trid, entry);
+			nvmf_transport_listener_discover(listener->transport, listener->trid, entry);
 
 			numrec++;
 		}
@@ -120,8 +138,8 @@ nvmf_generate_discovery_log(struct spdk_nvmf_tgt *tgt, const char *hostnqn, size
 }
 
 void
-spdk_nvmf_get_discovery_log_page(struct spdk_nvmf_tgt *tgt, const char *hostnqn, struct iovec *iov,
-				 uint32_t iovcnt, uint64_t offset, uint32_t length)
+nvmf_get_discovery_log_page(struct spdk_nvmf_tgt *tgt, const char *hostnqn, struct iovec *iov,
+			    uint32_t iovcnt, uint64_t offset, uint32_t length)
 {
 	size_t copy_len = 0;
 	size_t zero_len = 0;

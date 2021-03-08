@@ -274,9 +274,10 @@ DEFINE_STUB(spdk_bdev_get_name, const char *, (const struct spdk_bdev *bdev), 0)
 DEFINE_STUB(spdk_bdev_get_io_channel, struct spdk_io_channel *, (struct spdk_bdev_desc *desc), 0);
 DEFINE_STUB_V(spdk_bdev_unregister, (struct spdk_bdev *bdev, spdk_bdev_unregister_cb cb_fn,
 				     void *cb_arg));
-DEFINE_STUB(spdk_bdev_open, int, (struct spdk_bdev *bdev, bool write,
-				  spdk_bdev_remove_cb_t remove_cb,
-				  void *remove_ctx, struct spdk_bdev_desc **_desc), 0);
+DEFINE_STUB(spdk_bdev_open_ext, int, (const char *bdev_name, bool write,
+				      spdk_bdev_event_cb_t event_cb,
+				      void *event_ctx, struct spdk_bdev_desc **_desc), 0);
+DEFINE_STUB(spdk_bdev_desc_get_bdev, struct spdk_bdev *, (struct spdk_bdev_desc *desc), NULL);
 DEFINE_STUB(spdk_bdev_module_claim_bdev, int, (struct spdk_bdev *bdev, struct spdk_bdev_desc *desc,
 		struct spdk_bdev_module *module), 0);
 DEFINE_STUB_V(spdk_bdev_module_examine_done, (struct spdk_bdev_module *module));
@@ -292,8 +293,17 @@ DEFINE_STUB_V(spdk_reduce_vol_load, (struct spdk_reduce_backing_dev *backing_dev
 				     spdk_reduce_vol_op_with_handle_complete cb_fn, void *cb_arg));
 DEFINE_STUB(spdk_reduce_vol_get_params, const struct spdk_reduce_vol_params *,
 	    (struct spdk_reduce_vol *vol), NULL);
+DEFINE_STUB_V(spdk_reduce_vol_init, (struct spdk_reduce_vol_params *params,
+				     struct spdk_reduce_backing_dev *backing_dev,
+				     const char *pm_file_dir,
+				     spdk_reduce_vol_op_with_handle_complete cb_fn, void *cb_arg));
+DEFINE_STUB_V(spdk_reduce_vol_destroy, (struct spdk_reduce_backing_dev *backing_dev,
+					spdk_reduce_vol_op_complete cb_fn, void *cb_arg));
 
 /* DPDK stubs */
+#define DPDK_DYNFIELD_OFFSET offsetof(struct rte_mbuf, dynfield1[1])
+DEFINE_STUB(rte_mbuf_dynfield_register, int, (const struct rte_mbuf_dynfield *params),
+	    DPDK_DYNFIELD_OFFSET);
 DEFINE_STUB(rte_socket_id, unsigned, (void), 0);
 DEFINE_STUB(rte_vdev_init, int, (const char *name, const char *args), 0);
 DEFINE_STUB_V(rte_comp_op_free, (struct rte_comp_op *op));
@@ -303,7 +313,7 @@ int g_small_size_counter = 0;
 int g_small_size_modify = 0;
 uint64_t g_small_size = 0;
 uint64_t
-spdk_vtophys(void *buf, uint64_t *size)
+spdk_vtophys(const void *buf, uint64_t *size)
 {
 	g_small_size_counter++;
 	if (g_small_size_counter == g_small_size_modify) {
@@ -496,8 +506,8 @@ rte_compressdev_enqueue_burst(uint8_t dev_id, uint16_t qp_id, struct rte_comp_op
 		CU_ASSERT(op_mbuf[UT_MBUFS_PER_OP_BOUND_TEST - 1] == NULL);
 		CU_ASSERT(exp_mbuf[UT_MBUFS_PER_OP_BOUND_TEST - 1] == NULL);
 	}
-
-	CU_ASSERT(op->m_src->userdata == ut_expected_op.m_src->userdata);
+	CU_ASSERT(*RTE_MBUF_DYNFIELD(op->m_src, g_mbuf_offset, uint64_t *) ==
+		  *RTE_MBUF_DYNFIELD(ut_expected_op.m_src, g_mbuf_offset, uint64_t *));
 	CU_ASSERT(op->src.offset == ut_expected_op.src.offset);
 	CU_ASSERT(op->src.length == ut_expected_op.src.length);
 
@@ -520,8 +530,15 @@ rte_compressdev_enqueue_burst(uint8_t dev_id, uint16_t qp_id, struct rte_comp_op
 static int
 test_setup(void)
 {
+	struct spdk_thread *thread;
 	int i;
 
+	spdk_thread_lib_init(NULL, 0);
+
+	thread = spdk_thread_create(NULL, NULL);
+	spdk_set_thread(thread);
+
+	g_comp_bdev.reduce_thread = thread;
 	g_comp_bdev.backing_dev.unmap = _comp_reduce_unmap;
 	g_comp_bdev.backing_dev.readv = _comp_reduce_readv;
 	g_comp_bdev.backing_dev.writev = _comp_reduce_writev;
@@ -572,6 +589,7 @@ test_setup(void)
 	g_bdev_io->u.bdev.iovs = calloc(128, sizeof(struct iovec));
 	g_bdev_io->bdev = &g_comp_bdev.comp_bdev;
 	g_io_ch = calloc(1, sizeof(struct spdk_io_channel) + sizeof(struct comp_io_channel));
+	g_io_ch->thread = thread;
 	g_comp_ch = (struct comp_io_channel *)((uint8_t *)g_io_ch + sizeof(struct spdk_io_channel));
 	g_io_ctx = (struct comp_bdev_io *)g_bdev_io->driver_ctx;
 
@@ -589,6 +607,7 @@ test_setup(void)
 		g_expected_dst_mbufs[i].next = &g_expected_dst_mbufs[i + 1];
 	}
 	g_expected_dst_mbufs[UT_MBUFS_PER_OP - 1].next = NULL;
+	g_mbuf_offset = DPDK_DYNFIELD_OFFSET;
 
 	return 0;
 }
@@ -597,6 +616,7 @@ test_setup(void)
 static int
 test_cleanup(void)
 {
+	struct spdk_thread *thread;
 	int i;
 
 	for (i = 0; i < UT_MBUFS_PER_OP_BOUND_TEST; i++) {
@@ -608,6 +628,16 @@ test_cleanup(void)
 	free(g_bdev_io->u.bdev.iovs);
 	free(g_bdev_io);
 	free(g_io_ch);
+
+	thread = spdk_get_thread();
+	spdk_thread_exit(thread);
+	while (!spdk_thread_is_exited(thread)) {
+		spdk_thread_poll(thread, 0, 0);
+	}
+	spdk_thread_destroy(thread);
+
+	spdk_thread_lib_fini();
+
 	return 0;
 }
 
@@ -696,7 +726,7 @@ test_compress_operation(void)
 	ut_expected_op.m_src = exp_src_mbuf[0];
 
 	for (i = 0; i < UT_MBUFS_PER_OP; i++) {
-		exp_src_mbuf[i]->userdata = &cb_arg;
+		*RTE_MBUF_DYNFIELD(exp_src_mbuf[i], g_mbuf_offset, uint64_t *) = (uint64_t)&cb_arg;
 		exp_src_mbuf[i]->buf_addr = src_iovs[i].iov_base;
 		exp_src_mbuf[i]->buf_iova = spdk_vtophys(src_iovs[i].iov_base, &src_iovs[i].iov_len);
 		exp_src_mbuf[i]->buf_len = src_iovs[i].iov_len;
@@ -755,7 +785,7 @@ test_compress_operation_cross_boundary(void)
 	ut_expected_op.m_src = exp_src_mbuf[0];
 
 	for (i = 0; i < UT_MBUFS_PER_OP; i++) {
-		exp_src_mbuf[i]->userdata = &cb_arg;
+		*RTE_MBUF_DYNFIELD(exp_src_mbuf[i], g_mbuf_offset, uint64_t *) = (uint64_t)&cb_arg;
 		exp_src_mbuf[i]->buf_addr = src_iovs[i].iov_base;
 		exp_src_mbuf[i]->buf_iova = spdk_vtophys(src_iovs[i].iov_base, &src_iovs[i].iov_len);
 		exp_src_mbuf[i]->buf_len = src_iovs[i].iov_len;
@@ -778,7 +808,7 @@ test_compress_operation_cross_boundary(void)
 	g_small_size_counter = 0;
 	g_small_size_modify = 1;
 	g_small_size = 0x800;
-	exp_src_mbuf[3]->userdata = &cb_arg;
+	*RTE_MBUF_DYNFIELD(exp_src_mbuf[3], g_mbuf_offset, uint64_t *) = (uint64_t)&cb_arg;
 
 	/* first only has shorter length */
 	exp_src_mbuf[0]->pkt_len = exp_src_mbuf[0]->buf_len = 0x800;
@@ -896,7 +926,7 @@ test_poller(void)
 	 */
 	ut_rte_compressdev_dequeue_burst = 1;
 	/* setup what we want dequeue to return for the op */
-	g_comp_op[0].m_src->userdata = (void *)cb_args;
+	*RTE_MBUF_DYNFIELD(g_comp_op[0].m_src, g_mbuf_offset, uint64_t *) = (uint64_t)cb_args;
 	g_comp_op[0].produced = 1;
 	g_comp_op[0].status = 1;
 	/* value asserted in the reduce callback */
@@ -904,16 +934,16 @@ test_poller(void)
 	CU_ASSERT(TAILQ_EMPTY(&g_comp_bdev.queued_comp_ops) == true);
 	rc = comp_dev_poller((void *)&g_comp_bdev);
 	CU_ASSERT(TAILQ_EMPTY(&g_comp_bdev.queued_comp_ops) == true);
-	CU_ASSERT(rc == 0);
+	CU_ASSERT(rc == SPDK_POLLER_BUSY);
 
 	/* Success from dequeue, 2 ops. nothing needing to be resubmitted.
 	 */
 	ut_rte_compressdev_dequeue_burst = 2;
 	/* setup what we want dequeue to return for the op */
-	g_comp_op[0].m_src->userdata = (void *)cb_args;
+	*RTE_MBUF_DYNFIELD(g_comp_op[0].m_src, g_mbuf_offset, uint64_t *) = (uint64_t)cb_args;
 	g_comp_op[0].produced = 16;
 	g_comp_op[0].status = 0;
-	g_comp_op[1].m_src->userdata = (void *)cb_args;
+	*RTE_MBUF_DYNFIELD(g_comp_op[1].m_src, g_mbuf_offset, uint64_t *) = (uint64_t)cb_args;
 	g_comp_op[1].produced = 32;
 	g_comp_op[1].status = 0;
 	/* value asserted in the reduce callback */
@@ -923,13 +953,13 @@ test_poller(void)
 	CU_ASSERT(TAILQ_EMPTY(&g_comp_bdev.queued_comp_ops) == true);
 	rc = comp_dev_poller((void *)&g_comp_bdev);
 	CU_ASSERT(TAILQ_EMPTY(&g_comp_bdev.queued_comp_ops) == true);
-	CU_ASSERT(rc == 0);
+	CU_ASSERT(rc == SPDK_POLLER_BUSY);
 
 	/* Success from dequeue, one op to be resubmitted.
 	 */
 	ut_rte_compressdev_dequeue_burst = 1;
 	/* setup what we want dequeue to return for the op */
-	g_comp_op[0].m_src->userdata = (void *)cb_args;
+	*RTE_MBUF_DYNFIELD(g_comp_op[0].m_src, g_mbuf_offset, uint64_t *) = (uint64_t)cb_args;
 	g_comp_op[0].produced = 16;
 	g_comp_op[0].status = 0;
 	/* value asserted in the reduce callback */
@@ -951,7 +981,7 @@ test_poller(void)
 	CU_ASSERT(TAILQ_EMPTY(&g_comp_bdev.queued_comp_ops) == false);
 	rc = comp_dev_poller((void *)&g_comp_bdev);
 	CU_ASSERT(TAILQ_EMPTY(&g_comp_bdev.queued_comp_ops) == true);
-	CU_ASSERT(rc == 0);
+	CU_ASSERT(rc == SPDK_POLLER_BUSY);
 
 	/* op_to_queue is freed in code under test */
 	free(cb_args);
@@ -964,7 +994,6 @@ test_vbdev_compress_submit_request(void)
 	g_bdev_io->internal.status = SPDK_BDEV_IO_STATUS_FAILED;
 	g_bdev_io->type = SPDK_BDEV_IO_TYPE_WRITE;
 	g_completion_called = false;
-	MOCK_SET(spdk_bdev_io_get_io_channel, g_io_ch);
 	vbdev_compress_submit_request(g_io_ch, g_bdev_io);
 	CU_ASSERT(g_bdev_io->internal.status == SPDK_BDEV_IO_STATUS_SUCCESS);
 	CU_ASSERT(g_completion_called == true);
@@ -1086,6 +1115,7 @@ test_initdrivers(void)
 	ut_rte_compressdev_private_xform_create = 0;
 	rc = vbdev_init_compress_drivers();
 	CU_ASSERT(rc == 0);
+	CU_ASSERT(g_mbuf_offset == DPDK_DYNFIELD_OFFSET);
 	spdk_mempool_free((struct spdk_mempool *)g_mbuf_mp);
 }
 
@@ -1101,36 +1131,18 @@ main(int argc, char **argv)
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	if (CU_initialize_registry() != CUE_SUCCESS) {
-		return CU_get_error();
-	}
+	CU_set_error_action(CUEA_ABORT);
+	CU_initialize_registry();
 
 	suite = CU_add_suite("compress", test_setup, test_cleanup);
-	if (suite == NULL) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
-
-	if (CU_add_test(suite, "test_compress_operation",
-			test_compress_operation) == NULL ||
-	    CU_add_test(suite, "test_compress_operation_cross_boundary",
-			test_compress_operation_cross_boundary) == NULL ||
-	    CU_add_test(suite, "vbdev_compress_submit_request",
-			test_vbdev_compress_submit_request) == NULL ||
-	    CU_add_test(suite, "test_passthru",
-			test_passthru) == NULL ||
-	    CU_add_test(suite, "test_initdrivers",
-			test_initdrivers) == NULL ||
-	    CU_add_test(suite, "test_supported_io",
-			test_supported_io) == NULL ||
-	    CU_add_test(suite, "test_poller",
-			test_poller) == NULL ||
-	    CU_add_test(suite, "test_reset",
-			test_reset) == NULL
-	   ) {
-		CU_cleanup_registry();
-		return CU_get_error();
-	}
+	CU_ADD_TEST(suite, test_compress_operation);
+	CU_ADD_TEST(suite, test_compress_operation_cross_boundary);
+	CU_ADD_TEST(suite, test_vbdev_compress_submit_request);
+	CU_ADD_TEST(suite, test_passthru);
+	CU_ADD_TEST(suite, test_initdrivers);
+	CU_ADD_TEST(suite, test_supported_io);
+	CU_ADD_TEST(suite, test_poller);
+	CU_ADD_TEST(suite, test_reset);
 
 	CU_basic_set_mode(CU_BRM_VERBOSE);
 	CU_basic_run_tests();

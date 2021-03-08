@@ -5,9 +5,9 @@ set -e
 trap 'echo -e "\n\nConfiguration failed\n\n" >&2' ERR
 
 rootdir=$(readlink -f $(dirname $0))
+source "$rootdir/scripts/common.sh"
 
-function usage()
-{
+function usage() {
 	echo "'configure' configures SPDK to compile on supported platforms."
 	echo ""
 	echo "Usage: ./configure [OPTION]..."
@@ -24,7 +24,6 @@ function usage()
 	echo "                           example: aarch64-linux-gnu"
 	echo ""
 	echo " --enable-debug            Configure for debug builds"
-	echo " --enable-log-bt           Enable support of backtrace printing in SPDK logs (requires libunwind)."
 	echo " --enable-werror           Treat compiler warnings as errors"
 	echo " --enable-asan             Enable address sanitizer"
 	echo " --enable-ubsan            Enable undefined behavior sanitizer"
@@ -32,7 +31,10 @@ function usage()
 	echo " --enable-lto              Enable link-time optimization"
 	echo " --enable-pgo-capture      Enable generation of profile guided optimization data"
 	echo " --enable-pgo-use          Use previously captured profile guided optimization data"
-	echo " --disable-tests           Disable building of tests"
+	echo " --enable-cet              Enable Intel Control-flow Enforcement Technology (CET)"
+	echo " --disable-tests           Disable building of functional tests"
+	echo " --disable-unit-tests      Disable building of unit tests"
+	echo " --disable-examples        Disable building of examples"
 	echo ""
 	echo "Specifying Dependencies:"
 	echo "--with-DEPENDENCY[=path]   Use the given dependency. Optionally, provide the"
@@ -46,31 +48,27 @@ function usage()
 	echo "                           example: /usr/share/dpdk/x86_64-default-linuxapp-gcc"
 	echo " env                       Use an alternate environment implementation instead of DPDK."
 	echo "                           Implies --without-dpdk."
-	echo " igb-uio-driver            Build DPDK's igb-uio driver."
-	echo "                           Required on some systems to use qat devices. This flag is"
-	echo "                           effective only with the default dpdk submodule."
-	echo "                           No path required"
+	echo " idxd                      Build the IDXD library and accel framework plug-in module."
+	echo "                           Disabled while experimental. Only built for x86 when enabled."
 	echo " crypto                    Build vbdev crypto module."
 	echo "                           No path required."
 	echo " fio                       Build fio_plugin."
-	echo "                           example: /usr/src/fio"
+	echo "                           default: /usr/src/fio"
 	echo " vhost                     Build vhost target. Enabled by default."
-	echo "                           No path required."
-	echo " internal-vhost-lib        Use the internal copy of rte_vhost. By default, the upstream"
-	echo "                           rte_vhost from DPDK will be used."
 	echo "                           No path required."
 	echo " virtio                    Build vhost initiator and virtio-pci bdev modules."
 	echo "                           No path required."
+	echo " vfio-user                 Build custom vfio-user transport for NVMf target and NVMe initiator."
+	echo "                           example: /usr/src/libvfio-user"
 	echo " pmdk                      Build persistent memory bdev."
 	echo "                           example: /usr/share/pmdk"
 	echo " reduce                    Build vbdev compression module."
 	echo "                           No path required."
-	echo " vpp                       Build VPP net module."
-	echo "                           example: /vpp_repo/build-root/rpmbuild/vpp-18.01.1.0/build-root/install-vpp-native/vpp"
 	echo " rbd                       Build Ceph RBD bdev module."
 	echo "                           No path required."
 	echo " rdma                      Build RDMA transport for NVMf target and initiator."
-	echo "                           No path required."
+	echo "                           Accepts optional RDMA provider name. Can be \"verbs\" or \"mlx5_dv\"."
+	echo "                           If no provider specified, \"verbs\" provider is used by default."
 	echo " fc                        Build FC transport for NVMf target."
 	echo "                           If an argument is provided, it is considered a directory containing"
 	echo "                           libufc.a and fc_lld.h. Otherwise the regular system paths will"
@@ -88,13 +86,15 @@ function usage()
 	echo "                           example: /usr/src/ocf/"
 	echo " isal                      Build with ISA-L. Enabled by default on x86 and aarch64 architectures."
 	echo "                           No path required."
-	echo " uring                     Build I/O uring bdev."
+	echo " uring                     Build I/O uring bdev or socket module."
 	echo "                           If an argument is provided, it is considered a directory containing"
 	echo "                           liburing.a and io_uring.h. Otherwise the regular system paths will"
 	echo "                           be searched."
 	echo " fuse                      Build FUSE components for mounting a blobfs filesystem."
 	echo "                           No path required."
 	echo " nvme-cuse                 Build NVMe driver with support for CUSE-based character devices."
+	echo "                           No path required."
+	echo " raid5                     Build with bdev_raid module RAID5 support."
 	echo "                           No path required."
 	echo ""
 	echo "Environment variables:"
@@ -116,6 +116,61 @@ declare -A CONFIG
 source $rootdir/CONFIG.sh
 rm $rootdir/CONFIG.sh
 
+for i in "$@"; do
+	case "$i" in
+		--cross-prefix=*)
+			CONFIG[CROSS_PREFIX]="${i#*=}"
+			;;
+		--enable-lto)
+			CONFIG[LTO]=y
+			;;
+		--disable-lto)
+			CONFIG[LTO]=n
+			;;
+	esac
+done
+
+# Detect the compiler toolchain
+$rootdir/scripts/detect_cc.sh --cc="$CC" --cxx="$CXX" --lto="${CONFIG[LTO]}" --ld="$LD" --cross-prefix="${CONFIG[CROSS_PREFIX]}" > $rootdir/mk/cc.mk
+
+CC=$(grep "DEFAULT_CC=" "$rootdir/mk/cc.mk" | sed s/DEFAULT_CC=//)
+CC_TYPE=$(grep "CC_TYPE=" "$rootdir/mk/cc.mk" | cut -d "=" -f 2)
+
+arch=$($CC -dumpmachine)
+sys_name=$(uname -s)
+
+# Sanitize default configuration. All parameters set by user explicit should fail
+# Force no ISA-L if non-x86 or non-aarch64 architecture
+if [[ "${CONFIG[ISAL]}" = "y" ]]; then
+	if [[ $arch != x86_64* ]] && [[ $arch != aarch64* ]]; then
+		CONFIG[ISAL]=n
+		echo "Notice: ISA-L not supported for ${arch}. Turning off default feature."
+	fi
+fi
+
+if [[ $sys_name != "Linux" ]]; then
+	# Vhost, rte_vhost library and virtio are only supported on Linux.
+	CONFIG[VHOST]="n"
+	CONFIG[VIRTIO]="n"
+	echo "Notice: Vhost, rte_vhost library and virtio are only supported on Linux. Turning off default feature."
+fi
+
+#check nasm only on x86
+if [[ $arch == x86_64* ]]; then
+	ver=$(nasm -v 2> /dev/null | awk '{print $3}')
+	if lt "$ver" 2.14; then
+		# ISA-L, compression & crypto require NASM version 2.14 or newer.
+		CONFIG[ISAL]=n
+		CONFIG[CRYPTO]=n
+		CONFIG[IPSEC_MB]=n
+		CONFIG[REDUCE]=n
+		HAVE_NASM=n
+		echo "Notice: ISA-L, compression & crypto require NASM version 2.14 or newer. Turning off default ISA-L and crypto features."
+	else
+		HAVE_NASM=y
+	fi
+fi
+
 function check_dir() {
 	arg="$1"
 	dir="${arg#*=}"
@@ -127,9 +182,14 @@ function check_dir() {
 
 for i in "$@"; do
 	case "$i" in
-		-h|--help)
+		-h | --help)
 			usage
 			exit 0
+			;;
+		--cross-prefix=*) ;&
+		--enable-lto) ;&
+		--disable-lto)
+			# Options handled before detecting CC.
 			;;
 		--prefix=*)
 			CONFIG[PREFIX]="${i#*=}"
@@ -137,20 +197,11 @@ for i in "$@"; do
 		--target-arch=*)
 			CONFIG[ARCH]="${i#*=}"
 			;;
-		--cross-prefix=*)
-			CONFIG[CROSS_PREFIX]="${i#*=}"
-			;;
 		--enable-debug)
 			CONFIG[DEBUG]=y
 			;;
 		--disable-debug)
 			CONFIG[DEBUG]=n
-			;;
-		--enable-log-bt)
-			CONFIG[LOG_BACKTRACE]=y
-			;;
-		--disable-log-bt)
-			CONFIG[LOG_BACKTRACE]=n
 			;;
 		--enable-asan)
 			CONFIG[ASAN]=y
@@ -176,12 +227,6 @@ for i in "$@"; do
 		--disable-coverage)
 			CONFIG[COVERAGE]=n
 			;;
-		--enable-lto)
-			CONFIG[LTO]=y
-			;;
-		--disable-lto)
-			CONFIG[LTO]=n
-			;;
 		--enable-pgo-capture)
 			CONFIG[PGO_CAPTURE]=y
 			;;
@@ -200,11 +245,29 @@ for i in "$@"; do
 		--disable-tests)
 			CONFIG[TESTS]=n
 			;;
+		--enable-unit-tests)
+			CONFIG[UNIT_TESTS]=y
+			;;
+		--disable-unit-tests)
+			CONFIG[UNIT_TESTS]=n
+			;;
+		--enable-examples)
+			CONFIG[EXAMPLES]=y
+			;;
+		--disable-examples)
+			CONFIG[EXAMPLES]=n
+			;;
 		--enable-werror)
 			CONFIG[WERROR]=y
 			;;
 		--disable-werror)
 			CONFIG[WERROR]=n
+			;;
+		--enable-cet)
+			CONFIG[CET]=y
+			;;
+		--disable-cet)
+			CONFIG[CET]=n
 			;;
 		--with-dpdk=*)
 			check_dir "$i"
@@ -222,8 +285,13 @@ for i in "$@"; do
 		--without-rbd)
 			CONFIG[RBD]=n
 			;;
+		--with-rdma=*)
+			CONFIG[RDMA]=y
+			CONFIG[RDMA_PROV]=${i#*=}
+			;;
 		--with-rdma)
 			CONFIG[RDMA]=y
+			CONFIG[RDMA_PROV]="verbs"
 			;;
 		--without-rdma)
 			CONFIG[RDMA]=n
@@ -264,17 +332,23 @@ for i in "$@"; do
 		--without-vhost)
 			CONFIG[VHOST]=n
 			;;
-		--with-internal-vhost-lib)
-			CONFIG[VHOST_INTERNAL_LIB]=y
-			;;
-		--without-internal-vhost-lib)
-			CONFIG[VHOST_INTERNAL_LIB]=n
-			;;
 		--with-virtio)
 			CONFIG[VIRTIO]=y
 			;;
 		--without-virtio)
 			CONFIG[VIRTIO]=n
+			;;
+		--with-vfio-user)
+			CONFIG[VFIO_USER]=y
+			CONFIG[VFIO_USER_DIR]=""
+			;;
+		--with-vfio-user=*)
+			CONFIG[VFIO_USER]=y
+			check_dir "$i"
+			CONFIG[VFIO_USER_DIR]=$(readlink -f ${i#*=})
+			;;
+		--without-vfio-user)
+			CONFIG[VFIO_USER]=n
 			;;
 		--with-pmdk)
 			CONFIG[PMDK]=y
@@ -294,24 +368,15 @@ for i in "$@"; do
 		--without-reduce)
 			CONFIG[REDUCE]=n
 			;;
-		--with-vpp)
-			CONFIG[VPP]=y
-			;;
-		--with-vpp=*)
-			CONFIG[VPP]=y
-			check_dir "$i"
-			CONFIG[VPP_DIR]=$(readlink -f ${i#*=})
-			;;
-		--without-vpp)
-			CONFIG[VPP]=n
-			;;
+		--with-fio) ;&
 		--with-fio=*)
-			check_dir "$i"
-			CONFIG[FIO_SOURCE_DIR]="${i#*=}"
+			if [[ ${i#*=} != "$i" ]]; then
+				CONFIG[FIO_SOURCE_DIR]=$(readlink -f "${i#*=}")
+			fi
+			check_dir "--with-fio=${CONFIG[FIO_SOURCE_DIR]}"
 			CONFIG[FIO_PLUGIN]=y
 			;;
 		--without-fio)
-			CONFIG[FIO_SOURCE_DIR]=
 			CONFIG[FIO_PLUGIN]=n
 			;;
 		--with-vtune=*)
@@ -322,12 +387,6 @@ for i in "$@"; do
 		--without-vtune)
 			CONFIG[VTUNE_DIR]=
 			CONFIG[VTUNE]=n
-			;;
-		--with-igb-uio-driver)
-			CONFIG[IGB_UIO_DRIVER]=y
-			;;
-		--without-igb-uio-driver)
-			CONFIG[IGB_UIO_DRIVER]=n
 			;;
 		--with-ocf)
 			CONFIG[OCF]=y
@@ -371,6 +430,18 @@ for i in "$@"; do
 		--without-nvme-cuse)
 			CONFIG[NVME_CUSE]=n
 			;;
+		--with-raid5)
+			CONFIG[RAID5]=y
+			;;
+		--without-raid5)
+			CONFIG[RAID5]=n
+			;;
+		--with-idxd)
+			CONFIG[IDXD]=y
+			;;
+		--without-idxd)
+			CONFIG[IDXD]=n
+			;;
 		--)
 			break
 			;;
@@ -378,41 +449,69 @@ for i in "$@"; do
 			echo "Unrecognized option $i"
 			usage
 			exit 1
+			;;
 	esac
 done
 
-# Detect the compiler toolchain
-$rootdir/scripts/detect_cc.sh --cc="$CC" --cxx="$CXX" --lto="${CONFIG[LTO]}" --ld="$LD" --cross-prefix="${CONFIG[CROSS_PREFIX]}"  > $rootdir/mk/cc.mk
-
-CC=$(cat $rootdir/mk/cc.mk | grep "DEFAULT_CC=" | cut -d "=" -f 2)
-CC_TYPE=$(cat $rootdir/mk/cc.mk | grep "CC_TYPE=" | cut -d "=" -f 2)
-
-arch=$($CC -dumpmachine)
-
 if [[ $arch == x86_64* ]]; then
-	BUILD_CMD=($CC -o /dev/null -x c $CPPFLAGS $CFLAGS $LDFLAGS -march=native)
+	BUILD_CMD=("$CC" -o /dev/null -x c $CPPFLAGS $CFLAGS $LDFLAGS "-march=native")
 else
-	BUILD_CMD=($CC -o /dev/null -x c $CPPFLAGS $CFLAGS $LDFLAGS)
+	BUILD_CMD=("$CC" -o /dev/null -x c $CPPFLAGS $CFLAGS $LDFLAGS)
+fi
+BUILD_CMD+=(-I/usr/local/include -L/usr/local/lib)
+
+if [[ "${CONFIG[VFIO_USER]}" = "y" ]]; then
+
+	if ! hash cmake; then
+		echo "ERROR: --with-vfio-user requires cmake"
+		echo "Please install then re-run this script"
+		exit 1
+	fi
+	if [[ ! -d /usr/include/json-c ]] && [[ ! -d /usr/local/include/json-c ]]; then
+		echo "ERROR: --with-vfio-user requires json-c-devel"
+		echo "Please install then re-run this script"
+		exit 1
+	fi
+	if [[ ! -e /usr/include/cmocka.h ]] && [[ ! -e /usr/local/include/cmocka.h ]]; then
+		echo "ERROR: --with-vfio-user requires libcmocka-devel"
+		echo "Please install then re-run this script"
+		exit 1
+	fi
+fi
+
+# IDXD uses Intel specific instructions.
+if [[ "${CONFIG[IDXD]}" = "y" ]]; then
+	if [ $(uname -s) == "FreeBSD" ]; then
+		intel="hw.model: Intel"
+		cpu_vendor=$(sysctl -a | grep hw.model | cut -c 1-15)
+	else
+		intel="GenuineIntel"
+		cpu_vendor=$(grep -i 'vendor' /proc/cpuinfo --max-count=1)
+	fi
+	if [[ "$cpu_vendor" != *"$intel"* ]]; then
+		echo "ERROR: IDXD cannot be used due to CPU incompatiblity."
+		exit 1
+	fi
 fi
 
 # Detect architecture and force no ISA-L if non-x86 or non-aarch64 architecture
 if [[ "${CONFIG[ISAL]}" = "y" ]]; then
 	if [[ $arch != x86_64* ]] && [[ $arch != aarch64* ]]; then
-		echo "Notice: ISA-L disabled due to CPU incompatiblity."
-		CONFIG[ISAL]=n
+		echo "ERROR: ISA-L cannot be used due to CPU incompatiblity."
+		exit 1
 	fi
 fi
 
 if [[ "${CONFIG[ISAL]}" = "n" ]] && [[ "${CONFIG[REDUCE]}" = "y" ]]; then
-		echo "ERROR Conflicting options: --with-reduce is not compatible with --without-isal."
-		exit 1
+	echo "ERROR Conflicting options: --with-reduce is not compatible with --without-isal."
+	exit 1
 fi
 
 if [ -z "${CONFIG[ENV]}" ]; then
 	CONFIG[ENV]=$rootdir/lib/env_dpdk
 	echo "Using default SPDK env in ${CONFIG[ENV]}"
 	if [ -z "${CONFIG[DPDK_DIR]}" ]; then
-		if [ ! -f "$rootdir"/dpdk/config/common_base ]; then
+		if [ ! -f "$rootdir"/dpdk/config/meson.build ]; then
 			echo "DPDK not found; please specify --with-dpdk=<path> or run:"
 			echo
 			echo "  git submodule update --init"
@@ -420,31 +519,6 @@ if [ -z "${CONFIG[ENV]}" ]; then
 		else
 			CONFIG[DPDK_DIR]="${rootdir}/dpdk/build"
 			echo "Using default DPDK in ${CONFIG[DPDK_DIR]}"
-		fi
-
-		if [[ "${CONFIG[VHOST]}" = "y" ]] && [[ "${CONFIG[VHOST_INTERNAL_LIB]}" = "n" ]]; then
-			# We lookup "common_linux" file to check if DPDK version is >= 19.05.
-			# "common_linux" is available since exactly DPDK 19.05 - it was renamed
-			# from "common_linuxapp".
-			if [ ! -f "$rootdir"/dpdk/config/common_linux ]; then
-				echo "Notice: Using internal, legacy rte_vhost library due to DPDK" \
-				     "version < 19.05"
-				CONFIG[VHOST_INTERNAL_LIB]=y
-			fi
-		fi
-	else
-		if [[ "${CONFIG[VHOST]}" = "y" ]] && [[ "${CONFIG[VHOST_INTERNAL_LIB]}" = "n" ]]; then
-			# DPDK must be already built, so we can simply try to use the new rte_vhost.
-			# It has a number of internal dependencies though, so don't try to link the
-			# program, just compile it
-			if ! echo -e '#include <rte_vhost.h>\n' \
-				'int main(void) { return rte_vhost_extern_callback_register(0, NULL, NULL); }\n' \
-				| ${BUILD_CMD[@]} -c -Wno-deprecated-declarations -Werror \
-				-I"${CONFIG[DPDK_DIR]}/include" - &>/dev/null; then
-				echo "Notice: DPDK's rte_vhost not found or version < 19.05, using internal," \
-				     "legacy rte_vhost library."
-				CONFIG[VHOST_INTERNAL_LIB]=y
-			fi
 		fi
 	fi
 else
@@ -465,15 +539,6 @@ else
 	CONFIG[VIRTIO]="n"
 fi
 
-if [ "${CONFIG[FIO_PLUGIN]}" = "y" ]; then
-	if [ -z "${CONFIG[FIO_SOURCE_DIR]}" ]; then
-		echo "When fio is enabled, you must specify the fio directory using --with-fio=path"
-		exit 1
-	fi
-else
-	CONFIG[FIO_SOURCE_DIR]=
-fi
-
 if [ "${CONFIG[VTUNE]}" = "y" ]; then
 	if [ -z "${CONFIG[VTUNE_DIR]}" ]; then
 		echo "When VTune is enabled, you must specify the VTune directory using --with-vtune=path"
@@ -481,12 +546,12 @@ if [ "${CONFIG[VTUNE]}" = "y" ]; then
 	fi
 fi
 
-if [ "${CONFIG[ASAN]}" = "y" -a "${CONFIG[TSAN]}" = "y" ]; then
+if [[ "${CONFIG[ASAN]}" = "y" && "${CONFIG[TSAN]}" = "y" ]]; then
 	echo "ERROR: ASAN and TSAN cannot be enabled at the same time."
 	exit 1
 fi
 
-if [[ "$OSTYPE" == "freebsd"* ]]; then
+if [[ $sys_name == "FreeBSD" ]]; then
 	# FreeBSD doesn't support all configurations
 	if [[ "${CONFIG[COVERAGE]}" == "y" ]]; then
 		echo "ERROR: CONFIG_COVERAGE not available on FreeBSD"
@@ -494,33 +559,34 @@ if [[ "$OSTYPE" == "freebsd"* ]]; then
 	fi
 fi
 
-if [[ "$OSTYPE" == "freebsd"* ]]; then
+if [[ $sys_name != "Linux" ]]; then
 	if [[ "${CONFIG[VHOST]}" == "y" ]]; then
-		echo "Vhost is only supported on Linux. Disabling it."
-		CONFIG[VHOST]="n"
-	fi
-	if [[ "${CONFIG[VHOST_INTERNAL_LIB]}" == "y" ]]; then
-		echo "Internal rte_vhost library is only supported on Linux. Disabling it."
-		CONFIG[VHOST_INTERNAL_LIB]="n"
+		echo "Vhost is only supported on Linux."
+		exit 1
 	fi
 	if [[ "${CONFIG[VIRTIO]}" == "y" ]]; then
-		echo "Virtio is only supported on Linux. Disabling it."
-		CONFIG[VIRTIO]="n"
+		echo "Virtio is only supported on Linux."
+		exit 1
 	fi
 fi
 
 if [ "${CONFIG[RDMA]}" = "y" ]; then
+	if [[ ! "${CONFIG[RDMA_PROV]}" == "verbs" ]] && [[ ! "${CONFIG[RDMA_PROV]}" == "mlx5_dv" ]]; then
+		echo "Invalid RDMA provider specified, must be \"verbs\" or \"mlx5_dv\""
+		exit 1
+	fi
+
 	if ! echo -e '#include <infiniband/verbs.h>\n#include <rdma/rdma_verbs.h>\n' \
 		'int main(void) { return 0; }\n' \
-		| ${BUILD_CMD[@]} -libverbs -lrdmacm - 2>/dev/null; then
-		echo --with-rdma requires libverbs and librdmacm.
-		echo Please install then re-run this script.
+		| "${BUILD_CMD[@]}" -libverbs -lrdmacm - 2> /dev/null; then
+		echo "--with-rdma requires libverbs and librdmacm."
+		echo "Please install then re-run this script."
 		exit 1
 	fi
 
 	if echo -e '#include <infiniband/verbs.h>\n' \
 		'int main(void) { return !!IBV_WR_SEND_WITH_INV; }\n' \
-		| ${BUILD_CMD[@]} -c - 2>/dev/null; then
+		| "${BUILD_CMD[@]}" -c - 2> /dev/null; then
 		CONFIG[RDMA_SEND_WITH_INVAL]="y"
 	else
 		CONFIG[RDMA_SEND_WITH_INVAL]="n"
@@ -539,6 +605,29 @@ of libibverbs, so Linux kernel NVMe-oF initiators based on kernels greater
 than or equal to 4.14 will see significantly reduced performance.
 *******************************************************************************"
 	fi
+
+	if echo -e '#include <rdma/rdma_cma.h>\n' \
+		'int main(void) { return !!RDMA_OPTION_ID_ACK_TIMEOUT; }\n' \
+		| "${BUILD_CMD[@]}" -c - 2> /dev/null; then
+		CONFIG[RDMA_SET_ACK_TIMEOUT]="y"
+	else
+		CONFIG[RDMA_SET_ACK_TIMEOUT]="n"
+		echo "RDMA_OPTION_ID_ACK_TIMEOUT is not supported"
+	fi
+
+	if [ "${CONFIG[RDMA_PROV]}" == "mlx5_dv" ]; then
+		if ! echo -e '#include <spdk/stdinc.h>\n' \
+			'#include <infiniband/mlx5dv.h>\n' \
+			'#include <rdma/rdma_cma.h>\n' \
+			'int main(void) { return rdma_establish(NULL) || ' \
+			'!!IBV_QP_INIT_ATTR_SEND_OPS_FLAGS || !!MLX5_OPCODE_RDMA_WRITE; }\n' \
+			| "${BUILD_CMD[@]}" -lmlx5 -I${rootdir}/include -c - 2> /dev/null; then
+			echo "mlx5_dv provider is not supported"
+			exit 1
+		fi
+	fi
+
+	echo "Using '${CONFIG[RDMA_PROV]}' RDMA provider"
 fi
 
 if [[ "${CONFIG[FC]}" = "y" ]]; then
@@ -551,15 +640,10 @@ if [[ "${CONFIG[FC]}" = "y" ]]; then
 fi
 
 if [[ "${CONFIG[ISAL]}" = "y" ]] || [[ "${CONFIG[CRYPTO]}" = "y" ]]; then
-	ver=$(nasm -v | awk '{print $3}' | sed 's/[^0-9]*//g')
-	if [[ "${ver:0:1}" -le "2" ]] && [[ "${ver:0:3}" -le "213" ]] && [[ "${ver:0:5}" -lt "21303" ]]; then
-		echo "Notice: ISA-L, compression & crypto auto-disabled due to nasm dependency."
-		echo "These features require NASM version 2.13.03 or newer.  Please install"
-		echo "or upgrade then re-run this script."
-		CONFIG[ISAL]=n
-		CONFIG[CRYPTO]=n
-		CONFIG[IPSEC_MB]=n
-		CONFIG[REDUCE]=n
+	if [[ "${HAVE_NASM}" = "n" ]] && [[ $arch == x86_64* ]]; then
+		echo "ERROR: ISA-L, compression & crypto require NASM version 2.14 or newer."
+		echo "Please install or upgrade them re-run this script."
+		exit 1
 	else
 		if [[ "${CONFIG[CRYPTO]}" = "y" ]]; then
 			CONFIG[IPSEC_MB]=y
@@ -574,56 +658,38 @@ if [[ "${CONFIG[ISAL]}" = "y" ]]; then
 		exit 1
 	fi
 
-	if [[ "${CONFIG[RBD]}" = "y" ]]; then
-		echo "ISAL and RBD cannot co-exist currently so disabling ISAL and compression."
-		CONFIG[ISAL]=n
-		CONFIG[REDUCE]=n
-	else
-		cd $rootdir/isa-l
-		ISAL_LOG=$rootdir/isa-l/spdk-isal.log
-		echo -n "Configuring ISA-L (logfile: $ISAL_LOG)..."
-		./autogen.sh &> $ISAL_LOG
-		./configure CFLAGS="-fPIC -g -O2" --enable-shared=no >> $ISAL_LOG 2>&1
-		echo "done."
-		cd $rootdir
-	fi
+	cd $rootdir/isa-l
+	ISAL_LOG=$rootdir/isa-l/spdk-isal.log
+	echo -n "Configuring ISA-L (logfile: $ISAL_LOG)..."
+	./autogen.sh &> $ISAL_LOG
+	./configure CFLAGS="-fPIC -g -O2" --enable-shared=no >> $ISAL_LOG 2>&1
+	echo "done."
+	cd $rootdir
 fi
 
 if [[ "${CONFIG[PMDK]}" = "y" ]]; then
 	if ! echo -e '#include <libpmemblk.h>\nint main(void) { return 0; }\n' \
-		| ${BUILD_CMD[@]} -lpmemblk - 2>/dev/null; then
-		echo --with-pmdk requires libpmemblk.
-		echo Please install then re-run this script.
+		| "${BUILD_CMD[@]}" -lpmemblk - 2> /dev/null; then
+		echo "--with-pmdk requires libpmemblk."
+		echo "Please install then re-run this script."
 		exit 1
 	fi
 fi
 
 if [[ "${CONFIG[REDUCE]}" = "y" ]]; then
 	if ! echo -e '#include <libpmem.h>\nint main(void) { return 0; }\n' \
-		| ${BUILD_CMD[@]} -lpmem - 2>/dev/null; then
-		echo --with-reduce requires libpmem.
-		echo Please install then re-run this script.
-		exit 1
-	fi
-fi
-
-if [[ "${CONFIG[VPP]}" = "y" ]]; then
-	if [ ! -z "${CONFIG[VPP_DIR]}" ]; then
-		VPP_CFLAGS="-L${CONFIG[VPP_DIR]}/lib -I${CONFIG[VPP_DIR]}/include"
-	fi
-	if ! echo -e '#include <vnet/session/application_interface.h>\nint main(void) { return 0; }\n' \
-		| ${BUILD_CMD[@]} ${VPP_CFLAGS} -lvppinfra -lsvm -lvlibmemoryclient - 2>/dev/null; then
-		echo --with-vpp requires installed vpp.
-		echo Please install then re-run this script.
+		| "${BUILD_CMD[@]}" -lpmem - 2> /dev/null; then
+		echo "--with-reduce requires libpmem."
+		echo "Please install then re-run this script."
 		exit 1
 	fi
 fi
 
 if [[ "${CONFIG[NVME_CUSE]}" = "y" ]]; then
 	if ! echo -e '#define FUSE_USE_VERSION 31\n#include <fuse3/cuse_lowlevel.h>\n#include <fuse3/fuse_lowlevel.h>\n#include <fuse3/fuse_opt.h>\nint main(void) { return 0; }\n' \
-		| ${BUILD_CMD[@]} -lfuse3 -D_FILE_OFFSET_BITS=64 - 2>/dev/null; then
-		echo --with-cuse requires libfuse3.
-		echo Please install then re-run this script.
+		| "${BUILD_CMD[@]}" -lfuse3 -D_FILE_OFFSET_BITS=64 - 2> /dev/null; then
+		echo "--with-cuse requires libfuse3."
+		echo "Please install then re-run this script."
 		exit 1
 	fi
 fi
@@ -631,9 +697,9 @@ fi
 if [[ "${CONFIG[RBD]}" = "y" ]]; then
 	if ! echo -e '#include <rbd/librbd.h>\n#include <rados/librados.h>\n' \
 		'int main(void) { return 0; }\n' \
-		| ${BUILD_CMD[@]} -lrados -lrbd - 2>/dev/null; then
-		echo --with-rbd requires librados and librbd.
-		echo Please install then re-run this script.
+		| "${BUILD_CMD[@]}" -lrados -lrbd - 2> /dev/null; then
+		echo "--with-rbd requires librados and librbd."
+		echo "Please install then re-run this script."
 		exit 1
 	fi
 fi
@@ -645,46 +711,39 @@ if [[ "${CONFIG[ISCSI_INITIATOR]}" = "y" ]]; then
 		'#error\n' \
 		'#endif\n' \
 		'int main(void) { return 0; }\n' \
-		| ${BUILD_CMD[@]} -L/usr/lib64/iscsi -liscsi - 2>/dev/null; then
-		echo --with-iscsi-initiator requires libiscsi with
-		echo 'LIBISCSI_API_VERSION >= 20150621.'
-		echo Please install then re-run this script.
-		exit 1
-	fi
-fi
-
-if [[ "${CONFIG[LOG_BACKTRACE]}" = "y" ]]; then
-	if ! echo -e '#include <libunwind.h>\nint main(void) { return 0; }\n' \
-		| ${BUILD_CMD[@]} -lunwind - 2>/dev/null; then
-		echo --enable-log-bt requires libunwind.
-		echo Please install then re-run this script.
+		| "${BUILD_CMD[@]}" -L/usr/lib64/iscsi -liscsi - 2> /dev/null; then
+		echo "--with-iscsi-initiator requires libiscsi with"
+		echo "LIBISCSI_API_VERSION >= 20150621."
+		echo "Please install then re-run this script."
 		exit 1
 	fi
 fi
 
 if [[ "${CONFIG[ASAN]}" = "y" ]]; then
 	if ! echo -e 'int main(void) { return 0; }\n' \
-		| ${BUILD_CMD[@]} -fsanitize=address - 2>/dev/null; then
-		echo --enable-asan requires libasan.
-		echo Please install then re-run this script.
+		| "${BUILD_CMD[@]}" -fsanitize=address - 2> /dev/null; then
+		echo "--enable-asan requires libasan."
+		echo "Please install then re-run this script."
 		exit 1
 	fi
 fi
 
 if [[ "${CONFIG[UBSAN]}" = "y" ]]; then
 	if ! echo -e 'int main(void) { return 0; }\n' \
-		| ${BUILD_CMD[@]} -fsanitize=undefined - 2>/dev/null; then
-		echo --enable-ubsan requires libubsan.
-		echo Please install then re-run this script.
+		| "${BUILD_CMD[@]}" -fsanitize=undefined - 2> /dev/null; then
+		echo "--enable-ubsan requires libubsan."
+		echo "Please install then re-run this script."
+		echo "If installed, please check that the GCC version is at least 6.4"
+		echo "and synchronize CC accordingly."
 		exit 1
 	fi
 fi
 
 if [[ "${CONFIG[TSAN]}" = "y" ]]; then
 	if ! echo -e 'int main(void) { return 0; }\n' \
-		| ${BUILD_CMD[@]} -fsanitize=thread - 2>/dev/null; then
-		echo --enable-tsan requires libtsan.
-		echo Please install then re-run this script.
+		| "${BUILD_CMD[@]}" -fsanitize=thread - 2> /dev/null; then
+		echo "--enable-tsan requires libtsan."
+		echo "Please install then re-run this script."
 		exit 1
 	fi
 fi
@@ -726,21 +785,29 @@ if [[ "${CONFIG[FUSE]}" = "y" ]]; then
 	fi
 fi
 
+if [ "${CONFIG[CET]}" = "y" ]; then
+	if ! echo -e 'int main(void) { return 0; }\n' | "${BUILD_CMD[@]}" -fcf-protection - 2> /dev/null; then
+		echo "--enable-cet requires compiler/linker that supports CET."
+		echo "Please install then re-run this script."
+		exit 1
+	fi
+fi
+
 # We are now ready to generate final configuration. But first do sanity
 # check to see if all keys in CONFIG array have its reflection in CONFIG file.
-if [ $(egrep -c "^\s*CONFIG_[[:alnum:]_]+=" $rootdir/CONFIG) -ne ${#CONFIG[@]} ]; then
+if (($(grep -cE "^\s*CONFIG_[[:alnum:]_]+=" "$rootdir/CONFIG") != ${#CONFIG[@]})); then
 	echo ""
 	echo "BUG: Some configuration options are not present in CONFIG file. Please update this file."
 	echo "Missing options in CONFIG (+) file and in current config (-): "
 	diff -u --label "CONFIG file" --label "CONFIG[@]" \
 		<(sed -r -e '/^\s*$/d; /^\s*#.*/d; s/(CONFIG_[[:alnum:]_]+)=.*/\1/g' CONFIG | sort) \
-		<(printf "CONFIG_%s\n" ${!CONFIG[@]} | sort)
+		<(printf "CONFIG_%s\n" "${!CONFIG[@]}" | sort)
 	exit 1
 fi
 
 echo -n "Creating mk/config.mk..."
 cp -f $rootdir/CONFIG $rootdir/mk/config.mk
-for key in ${!CONFIG[@]}; do
+for key in "${!CONFIG[@]}"; do
 	sed -i.bak -r "s#^\s*CONFIG_${key}=.*#CONFIG_${key}\?=${CONFIG[$key]}#g" $rootdir/mk/config.mk
 done
 # On FreeBSD sed -i 'SUFFIX' - SUFFIX is mandatory. So no way but to delete the backed file.
@@ -756,7 +823,12 @@ rm -f $rootdir/mk/cc.flags.mk
 [ -n "$DESTDIR" ] && echo "DESTDIR?=$DESTDIR" >> $rootdir/mk/cc.flags.mk
 echo "done."
 
-if [[ "$OSTYPE" == "freebsd"* ]]; then
+# Create .sh with build config for easy sourcing|lookup during the tests.
+for conf in "${!CONFIG[@]}"; do
+	echo "CONFIG_$conf=${CONFIG[$conf]}"
+done > "$rootdir/test/common/build_config.sh"
+
+if [[ $sys_name == "FreeBSD" ]]; then
 	echo "Type 'gmake' to build."
 else
 	echo "Type 'make' to build."

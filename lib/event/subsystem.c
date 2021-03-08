@@ -39,7 +39,10 @@
 #include "spdk_internal/event.h"
 #include "spdk/env.h"
 
+TAILQ_HEAD(spdk_subsystem_list, spdk_subsystem);
 struct spdk_subsystem_list g_subsystems = TAILQ_HEAD_INITIALIZER(g_subsystems);
+
+TAILQ_HEAD(spdk_subsystem_depend_list, spdk_subsystem_depend);
 struct spdk_subsystem_depend_list g_subsystems_deps = TAILQ_HEAD_INITIALIZER(g_subsystems_deps);
 static struct spdk_subsystem *g_next_subsystem;
 static bool g_subsystems_initialized = false;
@@ -67,9 +70,8 @@ spdk_add_subsystem_depend(struct spdk_subsystem_depend *depend)
 	TAILQ_INSERT_TAIL(&g_subsystems_deps, depend, tailq);
 }
 
-
-struct spdk_subsystem *
-spdk_subsystem_find(struct spdk_subsystem_list *list, const char *name)
+static struct spdk_subsystem *
+_subsystem_find(struct spdk_subsystem_list *list, const char *name)
 {
 	struct spdk_subsystem *iter;
 
@@ -80,6 +82,37 @@ spdk_subsystem_find(struct spdk_subsystem_list *list, const char *name)
 	}
 
 	return NULL;
+}
+
+struct spdk_subsystem *
+spdk_subsystem_find(const char *name)
+{
+	return _subsystem_find(&g_subsystems, name);
+}
+
+struct spdk_subsystem *
+spdk_subsystem_get_first(void)
+{
+	return TAILQ_FIRST(&g_subsystems);
+}
+
+struct spdk_subsystem *
+spdk_subsystem_get_next(struct spdk_subsystem *cur_subsystem)
+{
+	return TAILQ_NEXT(cur_subsystem, tailq);
+}
+
+
+struct spdk_subsystem_depend *
+spdk_subsystem_get_first_depend(void)
+{
+	return TAILQ_FIRST(&g_subsystems_deps);
+}
+
+struct spdk_subsystem_depend *
+spdk_subsystem_get_next_depend(struct spdk_subsystem_depend *cur_depend)
+{
+	return TAILQ_NEXT(cur_depend, tailq);
 }
 
 // zhou: will sort "g_subsystems" according to dependency!!! Just like including.
@@ -106,7 +139,7 @@ subsystem_sort(void)
 				if (strcmp(subsystem->name, subsystem_dep->name) == 0) {
 					depends_on = true;
                     // zhou: already in sorted list.
-					depends_on_sorted = !!spdk_subsystem_find(&subsystems_list, subsystem_dep->depends_on);
+					depends_on_sorted = !!_subsystem_find(&subsystems_list, subsystem_dep->depends_on);
 					if (depends_on_sorted) {
                         // zhou: need make sure all depended subsystem are in sorted list.
 						continue;
@@ -193,12 +226,12 @@ spdk_subsystem_init(spdk_subsystem_init_fn cb_fn, void *cb_arg)
 
 	/* Verify that all dependency name and depends_on subsystems are registered */
 	TAILQ_FOREACH(dep, &g_subsystems_deps, tailq) {
-		if (!spdk_subsystem_find(&g_subsystems, dep->name)) {
+		if (!spdk_subsystem_find(dep->name)) {
 			SPDK_ERRLOG("subsystem %s is missing\n", dep->name);
 			g_subsystem_start_fn(-1, g_subsystem_start_arg);
 			return;
 		}
-		if (!spdk_subsystem_find(&g_subsystems, dep->depends_on)) {
+		if (!spdk_subsystem_find(dep->depends_on)) {
 			SPDK_ERRLOG("subsystem %s dependency %s is missing\n",
 				    dep->name, dep->depends_on);
 			g_subsystem_start_fn(-1, g_subsystem_start_arg);
@@ -213,7 +246,7 @@ spdk_subsystem_init(spdk_subsystem_init_fn cb_fn, void *cb_arg)
 }
 
 static void
-_spdk_subsystem_fini_next(void *arg1)
+subsystem_fini_next(void *arg1)
 {
 	assert(g_fini_thread == spdk_get_thread());
 
@@ -248,9 +281,9 @@ void
 spdk_subsystem_fini_next(void)
 {
 	if (g_fini_thread != spdk_get_thread()) {
-		spdk_thread_send_msg(g_fini_thread, _spdk_subsystem_fini_next, NULL);
+		spdk_thread_send_msg(g_fini_thread, subsystem_fini_next, NULL);
 	} else {
-		_spdk_subsystem_fini_next(NULL);
+		subsystem_fini_next(NULL);
 	}
 }
 
@@ -267,19 +300,6 @@ spdk_subsystem_fini(spdk_msg_fn cb_fn, void *cb_arg)
 }
 
 // zhou: ask each registered subsystem to read config file.
-void
-spdk_subsystem_config(FILE *fp)
-{
-	struct spdk_subsystem *subsystem;
-
-	TAILQ_FOREACH(subsystem, &g_subsystems, tailq) {
-		if (subsystem->config) {
-			subsystem->config(fp);
-		}
-	}
-}
-
-// zhou:
 void
 spdk_subsystem_config_json(struct spdk_json_write_ctx *w, struct spdk_subsystem *subsystem)
 {

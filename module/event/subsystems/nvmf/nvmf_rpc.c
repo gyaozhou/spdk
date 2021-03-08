@@ -41,10 +41,9 @@ static const struct spdk_json_object_decoder nvmf_rpc_subsystem_tgt_opts_decoder
 };
 
 static void
-spdk_rpc_nvmf_set_max_subsystems(struct spdk_jsonrpc_request *request,
-				 const struct spdk_json_val *params)
+rpc_nvmf_set_max_subsystems(struct spdk_jsonrpc_request *request,
+			    const struct spdk_json_val *params)
 {
-	struct spdk_json_write_ctx *w;
 	uint32_t max_subsystems = 0;
 
 	if (g_spdk_nvmf_tgt_max_subsystems != 0) {
@@ -66,27 +65,34 @@ spdk_rpc_nvmf_set_max_subsystems(struct spdk_jsonrpc_request *request,
 
 	g_spdk_nvmf_tgt_max_subsystems = max_subsystems;
 
-	w = spdk_jsonrpc_begin_result(request);
-	spdk_json_write_bool(w, true);
-	spdk_jsonrpc_end_result(request, w);
+	spdk_jsonrpc_send_bool_response(request, true);
 }
-SPDK_RPC_REGISTER("nvmf_set_max_subsystems", spdk_rpc_nvmf_set_max_subsystems,
+SPDK_RPC_REGISTER("nvmf_set_max_subsystems", rpc_nvmf_set_max_subsystems,
 		  SPDK_RPC_STARTUP)
 SPDK_RPC_REGISTER_ALIAS_DEPRECATED(nvmf_set_max_subsystems, set_nvmf_target_max_subsystems)
 
 static int decode_conn_sched(const struct spdk_json_val *val, void *out)
 {
-	enum spdk_nvmf_connect_sched *sched = out;
+	*(uint32_t *)out = 0;
 
-	if (spdk_json_strequal(val, "roundrobin") == true) {
-		*sched = CONNECT_SCHED_ROUND_ROBIN;
-	} else if (spdk_json_strequal(val, "hostip") == true) {
-		*sched = CONNECT_SCHED_HOST_IP;
-	} else if (spdk_json_strequal(val, "transport") == true) {
-		*sched = CONNECT_SCHED_TRANSPORT_OPTIMAL_GROUP;
-	} else {
-		SPDK_ERRLOG("Invalid connection scheduling parameter\n");
-		return -EINVAL;
+	SPDK_NOTICELOG("conn_sched is no longer a supported parameter. Ignoring.");
+
+	return 0;
+}
+
+static const struct spdk_json_object_decoder admin_passthru_decoder[] = {
+	{"identify_ctrlr", offsetof(struct spdk_nvmf_admin_passthru_conf, identify_ctrlr), spdk_json_decode_bool}
+};
+
+static int decode_admin_passthru(const struct spdk_json_val *val, void *out)
+{
+	struct spdk_nvmf_admin_passthru_conf *req = (struct spdk_nvmf_admin_passthru_conf *)out;
+
+	if (spdk_json_decode_object(val, admin_passthru_decoder,
+				    SPDK_COUNTOF(admin_passthru_decoder),
+				    req)) {
+		SPDK_ERRLOG("spdk_json_decode_object failed\n");
+		return -1;
 	}
 
 	return 0;
@@ -95,37 +101,20 @@ static int decode_conn_sched(const struct spdk_json_val *val, void *out)
 static const struct spdk_json_object_decoder nvmf_rpc_subsystem_tgt_conf_decoder[] = {
 	{"acceptor_poll_rate", offsetof(struct spdk_nvmf_tgt_conf, acceptor_poll_rate), spdk_json_decode_uint32, true},
 	{"conn_sched", offsetof(struct spdk_nvmf_tgt_conf, conn_sched), decode_conn_sched, true},
+	{"admin_cmd_passthru", offsetof(struct spdk_nvmf_tgt_conf, admin_passthru), decode_admin_passthru, true}
 };
 
 static void
-spdk_rpc_nvmf_set_config(struct spdk_jsonrpc_request *request,
-			 const struct spdk_json_val *params)
+rpc_nvmf_set_config(struct spdk_jsonrpc_request *request,
+		    const struct spdk_json_val *params)
 {
-	struct spdk_nvmf_tgt_conf *conf;
-	struct spdk_json_write_ctx *w;
+	struct spdk_nvmf_tgt_conf conf;
 
-	if (g_spdk_nvmf_tgt_conf != NULL) {
-		SPDK_ERRLOG("this RPC must not be called more than once.\n");
-		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
-						 "Must not call more than once");
-		return;
-	}
-
-	conf = calloc(1, sizeof(*conf));
-	if (conf == NULL) {
-		SPDK_ERRLOG("calloc() failed for target config\n");
-		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
-						 "Out of memory");
-		return;
-	}
-
-	conf->acceptor_poll_rate = ACCEPT_TIMEOUT_US;
-	conf->conn_sched = DEFAULT_CONN_SCHED;
+	memcpy(&conf, &g_spdk_nvmf_tgt_conf, sizeof(conf));
 
 	if (params != NULL) {
 		if (spdk_json_decode_object(params, nvmf_rpc_subsystem_tgt_conf_decoder,
-					    SPDK_COUNTOF(nvmf_rpc_subsystem_tgt_conf_decoder), conf)) {
-			free(conf);
+					    SPDK_COUNTOF(nvmf_rpc_subsystem_tgt_conf_decoder), &conf)) {
 			SPDK_ERRLOG("spdk_json_decode_object() failed\n");
 			spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
 							 "Invalid parameters");
@@ -133,11 +122,9 @@ spdk_rpc_nvmf_set_config(struct spdk_jsonrpc_request *request,
 		}
 	}
 
-	g_spdk_nvmf_tgt_conf = conf;
+	memcpy(&g_spdk_nvmf_tgt_conf, &conf, sizeof(conf));
 
-	w = spdk_jsonrpc_begin_result(request);
-	spdk_json_write_bool(w, true);
-	spdk_jsonrpc_end_result(request, w);
+	spdk_jsonrpc_send_bool_response(request, true);
 }
-SPDK_RPC_REGISTER("nvmf_set_config", spdk_rpc_nvmf_set_config, SPDK_RPC_STARTUP)
+SPDK_RPC_REGISTER("nvmf_set_config", rpc_nvmf_set_config, SPDK_RPC_STARTUP)
 SPDK_RPC_REGISTER_ALIAS_DEPRECATED(nvmf_set_config, set_nvmf_target_config)
